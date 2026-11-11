@@ -73,8 +73,10 @@ impl LogicalType {
 }
 
 /// Scalar reference form used by the correctness oracle. A `None` represents SQL NULL.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+///
+/// Equality and ordering use IEEE total ordering for f64 so `Value` can be used as a map key
+/// or participate in a primary key without panicking on NaN. Null sorts first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -85,6 +87,84 @@ pub enum Value {
     Uid(Uid),
     Timestamp(i64), // unix millis
     Period(String),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        fn tag(v: &Value) -> u8 {
+            match v {
+                Value::Null => 0,
+                Value::Bool(_) => 1,
+                Value::I64(_) => 2,
+                Value::F64(_) => 3,
+                Value::Decimal128 { .. } => 4,
+                Value::Str(_) => 5,
+                Value::Uid(_) => 6,
+                Value::Timestamp(_) => 7,
+                Value::Period(_) => 8,
+            }
+        }
+        let (ta, tb) = (tag(self), tag(other));
+        if ta != tb {
+            return ta.cmp(&tb);
+        }
+        match (self, other) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::I64(a), Value::I64(b)) => a.cmp(b),
+            (Value::F64(a), Value::F64(b)) => a.total_cmp(b),
+            (
+                Value::Decimal128 {
+                    value: a,
+                    scale: sa,
+                },
+                Value::Decimal128 {
+                    value: b,
+                    scale: sb,
+                },
+            ) => sa.cmp(sb).then_with(|| a.cmp(b)),
+            (Value::Str(a), Value::Str(b)) => a.cmp(b),
+            (Value::Uid(a), Value::Uid(b)) => a.cmp(b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
+            (Value::Period(a), Value::Period(b)) => a.cmp(b),
+            _ => Ordering::Equal, // unreachable: tag equality covers this
+        }
+    }
+}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::Bool(v) => v.hash(state),
+            Value::I64(v) => v.hash(state),
+            Value::F64(v) => v.to_bits().hash(state),
+            Value::Decimal128 { value, scale } => {
+                value.hash(state);
+                scale.hash(state);
+            }
+            Value::Str(v) => v.hash(state),
+            Value::Uid(v) => v.hash(state),
+            Value::Timestamp(v) => v.hash(state),
+            Value::Period(v) => v.hash(state),
+        }
+    }
 }
 
 impl Value {

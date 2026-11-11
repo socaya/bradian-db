@@ -11,12 +11,17 @@ pub mod bitmap;
 pub mod checksum;
 pub mod codec;
 pub mod column;
+pub mod partition;
 pub mod segment;
 pub mod zonemap;
 
 pub use column::{ColumnBuffer, ColumnValue};
+pub use partition::{
+    Delta, DeltaEntry, Manifest, ManifestSegment, Partition, PartitionOptions, PrimaryKey, Row,
+    Snapshot, WalReader, WalRecord, WalWriter,
+};
 pub use segment::{
-    SegmentFooter, SegmentReader, SegmentWriter, SegmentWriterOptions, ColumnMeta, PageMeta,
-    CodecId, FeatureFlags, SEGMENT_MAGIC, SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
+    CodecId, ColumnMeta, FeatureFlags, PageMeta, SegmentFooter, SegmentReader, SegmentWriter,
+    SegmentWriterOptions, SEGMENT_MAGIC, SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
 };
 pub use zonemap::ZoneMap;
