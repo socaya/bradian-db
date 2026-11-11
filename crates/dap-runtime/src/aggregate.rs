@@ -198,7 +198,7 @@ impl HashAggregator {
         })
     }
 
-    fn spill_current_groups(&mut self) -> DapResult<()> {
+    fn spill_current_groups(&mut self, ctx: &ExecContext) -> DapResult<()> {
         if self.groups.is_empty() {
             return Ok(());
         }
@@ -206,6 +206,7 @@ impl HashAggregator {
             self.groups.drain().collect();
         let encoded = bincode::serialize(&payload)
             .map_err(|e| DapError::Serialization(e.to_string()))?;
+        let bytes_written = encoded.len() as u64;
         // Use a NamedTempFile that persists on disk until this struct is dropped.
         let tmp = tempfile::NamedTempFile::new()?;
         std::fs::write(tmp.path(), &encoded)?;
@@ -214,6 +215,9 @@ impl HashAggregator {
                 .keep()
                 .map_err(|e| DapError::Io(std::io::Error::other(e)))?,
         );
+        ctx.metrics
+            .spilled_bytes
+            .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -246,7 +250,7 @@ impl HashAggregator {
         if ctx.memory.hard_limit > 0
             && self.groups.len() as u64 * 128 > ctx.memory.spill_threshold
         {
-            self.spill_current_groups()?;
+            self.spill_current_groups(ctx)?;
         }
         let gb_indexes: Vec<usize> = self
             .group_by
@@ -314,9 +318,7 @@ impl HashAggregator {
                     }
                 }
             }
-            ctx.metrics
-                .spilled_bytes
-                .fetch_add(0, std::sync::atomic::Ordering::Relaxed);
+            // spilled_bytes counter already reflects every spill_current_groups write.
         }
 
         let mut builder = RecordBatchBuilder::new(self.output_schema.clone());
@@ -382,6 +384,7 @@ fn merge_pair(dst: &mut AggState, src: AggState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::MemoryBudget;
     use dap_core::LogicalType;
     use dap_storage::column::ColumnBuilder;
 
@@ -543,5 +546,86 @@ mod tests {
             by_ou[&Value::Str("b".into())],
             (Value::F64(20.0), Value::F64(20.0))
         );
+    }
+
+    /// Build a batch with `n` distinct ou keys so the hash table's group count can be
+    /// forced above an aggressively low `spill_threshold`.
+    fn many_distinct_ous(n: usize) -> RecordBatch {
+        let schema = Schema::new(vec![
+            Column::new("ou", LogicalType::Uid).required(),
+            Column::new("v", LogicalType::F64),
+        ])
+        .unwrap();
+        let mut ou = ColumnBuilder::new(LogicalType::Uid);
+        let mut v = ColumnBuilder::new(LogicalType::F64);
+        for i in 0..n {
+            ou.append_value(&Value::Str(format!("ou{:0>9}", i))).unwrap();
+            v.append_value(&Value::F64(i as f64)).unwrap();
+        }
+        RecordBatch::new(schema, vec![ou.finish(), v.finish()]).unwrap()
+    }
+
+    #[test]
+    fn spill_merges_back_and_reports_bytes_written() {
+        // Aggressive memory budget: hard_limit=1_000 so spill_threshold=500 → one group
+        // consumes ~128 bytes in the heuristic, so the spill fires after ~4 groups.
+        let batch = many_distinct_ous(20);
+        let ctx = ExecContext {
+            memory: MemoryBudget::limited(1_000),
+            ..Default::default()
+        };
+
+        let mut agg = HashAggregator::new(
+            batch.schema.clone(),
+            vec!["ou".into()],
+            vec![AggregateKind::Sum { column: "v".into() }],
+        )
+        .unwrap();
+
+        // Feed the same 20-row batch three times so the first ingest triggers spill,
+        // the second resees the keys, the third drives at least one more spill.
+        agg.consume_batch(&batch, &ctx).unwrap();
+        agg.consume_batch(&batch, &ctx).unwrap();
+        agg.consume_batch(&batch, &ctx).unwrap();
+
+        let out = agg.finish(&ctx).unwrap();
+
+        // Every ou must appear exactly once in the final output.
+        assert_eq!(out.row_count(), 20);
+        let mut by_ou = ahash::AHashMap::new();
+        for r in 0..out.row_count() {
+            let row = out.row_values(r).unwrap();
+            by_ou.insert(row[0].clone(), row[1].clone());
+        }
+        for i in 0..20 {
+            let key = Value::Str(format!("ou{:0>9}", i));
+            // Each row contributes `i` three times → sum = 3*i.
+            assert_eq!(by_ou[&key], Value::F64((i * 3) as f64));
+        }
+
+        let snap = ctx.metrics.snapshot();
+        assert!(
+            snap.spilled_bytes > 0,
+            "spill path must advance the spilled_bytes counter"
+        );
+    }
+
+    #[test]
+    fn no_spill_when_hard_limit_is_zero() {
+        // Default MemoryBudget is unlimited → spill must never fire regardless of size.
+        let batch = many_distinct_ous(100);
+        let ctx = ExecContext::default();
+        assert_eq!(ctx.memory.hard_limit, 0);
+
+        let mut agg = HashAggregator::new(
+            batch.schema.clone(),
+            vec!["ou".into()],
+            vec![AggregateKind::Sum { column: "v".into() }],
+        )
+        .unwrap();
+        agg.consume_batch(&batch, &ctx).unwrap();
+        let out = agg.finish(&ctx).unwrap();
+        assert_eq!(out.row_count(), 100);
+        assert_eq!(ctx.metrics.snapshot().spilled_bytes, 0);
     }
 }
