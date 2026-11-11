@@ -195,11 +195,32 @@ impl IncrementalAggregate {
         &self.dirty_keys
     }
 
+    /// Hand the caller every dirty key as an owned `Vec`, clearing the set in the same
+    /// call. Lets a refresh loop iterate + `mark_fresh` each key without fighting the
+    /// shared borrow of [`dirty_keys`]. Any future `apply_change` that touches a
+    /// non-invertible aggregate re-populates the set.
+    pub fn drain_dirty_keys(&mut self) -> Vec<Vec<Value>> {
+        self.dirty_keys.drain().collect()
+    }
+
     pub fn mark_fresh(&mut self, key: &[Value], value: Option<f64>) {
         if let Some(cell) = self.cells.get_mut(key) {
             cell.mark_fresh(value);
         }
         self.dirty_keys.remove(key);
+    }
+
+    /// Governed cleanup: drop the cell for `key` entirely. Call once the caller has
+    /// retracted every contribution to that key and no longer wants to retain the
+    /// per-key state. Removes the key from `dirty_keys` too so a stale recompute does
+    /// not re-populate the view with an orphan cell.
+    ///
+    /// The aggregate itself cannot infer emptiness in general — a `Sum` cell at 0.0
+    /// may legitimately carry two live contributions that happen to cancel — so the
+    /// decision stays with the caller.
+    pub fn remove_key(&mut self, key: &[Value]) -> bool {
+        self.dirty_keys.remove(key);
+        self.cells.remove(key).is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -275,5 +296,64 @@ mod tests {
         agg.apply_change(key("ouA", "202601"), Some(1.0), None).unwrap();
         let snap: AHashMap<_, _> = agg.snapshot().into_iter().collect();
         assert_eq!(snap[&key("ouA", "202601")], Some(4.0));
+    }
+
+    #[test]
+    fn drain_dirty_keys_clears_set_and_hands_ownership() {
+        let mut agg = IncrementalAggregate::new(AggKind::Min);
+        agg.apply_change(key("ouA", "202601"), None, Some(5.0)).unwrap();
+        agg.apply_change(key("ouB", "202601"), None, Some(7.0)).unwrap();
+        assert_eq!(agg.dirty_keys().len(), 2);
+
+        let drained = agg.drain_dirty_keys();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(agg.dirty_keys().len(), 0, "drain clears the set");
+
+        // Marking fresh on an already-drained key must still populate the cell value.
+        for k in &drained {
+            agg.mark_fresh(k, Some(5.0));
+        }
+        let snap: AHashMap<_, _> = agg.snapshot().into_iter().collect();
+        assert_eq!(snap.len(), 2);
+
+        // Subsequent apply_change on a non-invertible aggregate re-dirties the key.
+        agg.apply_change(key("ouA", "202601"), Some(5.0), Some(3.0)).unwrap();
+        assert_eq!(agg.dirty_keys().len(), 1);
+    }
+
+    #[test]
+    fn remove_key_drops_cell_and_cleans_dirty_set() {
+        let mut agg = IncrementalAggregate::new(AggKind::Min);
+        agg.apply_change(key("ouA", "202601"), None, Some(5.0)).unwrap();
+        assert_eq!(agg.len(), 1);
+        assert_eq!(agg.dirty_keys().len(), 1);
+
+        assert!(agg.remove_key(&key("ouA", "202601")));
+        assert_eq!(agg.len(), 0);
+        assert_eq!(
+            agg.dirty_keys().len(),
+            0,
+            "remove_key must also purge the dirty entry — otherwise a stale recompute re-materialises the cell"
+        );
+        // Removing an absent key reports false but is not an error.
+        assert!(!agg.remove_key(&key("ouA", "202601")));
+    }
+
+    #[test]
+    fn full_retraction_leaves_cell_at_zero_until_remove_key() {
+        // Honest contract: Sum retracted to zero stays present with sum = 0.0. The
+        // aggregate cannot distinguish "two live cancelling contributions" from "every
+        // contribution deleted", so cleanup is opt-in via remove_key.
+        let mut agg = IncrementalAggregate::new(AggKind::Sum);
+        agg.apply_change(key("ouA", "202601"), None, Some(10.0)).unwrap();
+        agg.apply_change(key("ouA", "202601"), Some(10.0), None).unwrap();
+
+        let snap: AHashMap<_, _> = agg.snapshot().into_iter().collect();
+        assert_eq!(snap[&key("ouA", "202601")], Some(0.0));
+        assert_eq!(agg.len(), 1);
+
+        // Caller knows the group is empty → explicit cleanup.
+        assert!(agg.remove_key(&key("ouA", "202601")));
+        assert_eq!(agg.len(), 0);
     }
 }
