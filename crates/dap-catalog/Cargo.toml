@@ -1,0 +1,21 @@
+[package]
+name = "dap-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Versioned DHIS2 semantic catalog + lineage"
+
+[dependencies]
+dap-core    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+blake3      = { workspace = true }
+parking_lot = { workspace = true }
+ahash       = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }

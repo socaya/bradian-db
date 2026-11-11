@@ -1,0 +1,30 @@
+[package]
+name = "dap-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = ".derc segment format, WAL, manifests, delta, compaction"
+
+[dependencies]
+dap-core    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bincode     = { workspace = true }
+thiserror   = { workspace = true }
+zstd        = { workspace = true }
+lz4_flex    = { workspace = true }
+crc32fast   = { workspace = true }
+blake3      = { workspace = true }
+byteorder   = { workspace = true }
+parking_lot = { workspace = true }
+smallvec    = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }
+rand        = { workspace = true }
+rand_chacha = { workspace = true }

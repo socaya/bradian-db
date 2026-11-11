@@ -1,0 +1,24 @@
+[package]
+name = "dap-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Canonical change log + idempotent ingestion"
+
+[dependencies]
+dap-core    = { workspace = true }
+dap-catalog = { workspace = true }
+dap-storage = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+blake3      = { workspace = true }
+parking_lot = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+tempfile    = { workspace = true }

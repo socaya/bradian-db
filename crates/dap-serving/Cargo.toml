@@ -1,0 +1,35 @@
+[package]
+name = "dap-serving"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "HTTP/JSON analytical API (axum)"
+
+[dependencies]
+dap-core     = { workspace = true }
+dap-catalog  = { workspace = true }
+dap-storage  = { workspace = true }
+dap-runtime  = { workspace = true }
+dap-planner  = { workspace = true }
+dap-ingest   = { workspace = true }
+dap-views    = { workspace = true }
+dap-dhis2    = { workspace = true }
+dap-security = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+tokio        = { workspace = true }
+axum         = { workspace = true }
+tower        = { workspace = true }
+tower-http   = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot  = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }
+tokio        = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

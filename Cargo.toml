@@ -1,0 +1,88 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dap-core",
+    "crates/dap-catalog",
+    "crates/dap-storage",
+    "crates/dap-runtime",
+    "crates/dap-planner",
+    "crates/dap-ingest",
+    "crates/dap-views",
+    "crates/dap-dhis2",
+    "crates/dap-security",
+    "crates/dap-serving",
+    "crates/dap-admin",
+    "crates/dap-benchmark",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["DER Engineering <socaya@users.noreply.github.com>"]
+repository = "https://github.com/socaya/dap"
+readme = "README.md"
+
+[workspace.dependencies]
+# intra-workspace
+dap-core      = { path = "crates/dap-core" }
+dap-catalog   = { path = "crates/dap-catalog" }
+dap-storage   = { path = "crates/dap-storage" }
+dap-runtime   = { path = "crates/dap-runtime" }
+dap-planner   = { path = "crates/dap-planner" }
+dap-ingest    = { path = "crates/dap-ingest" }
+dap-views     = { path = "crates/dap-views" }
+dap-dhis2     = { path = "crates/dap-dhis2" }
+dap-security  = { path = "crates/dap-security" }
+dap-serving   = { path = "crates/dap-serving" }
+dap-admin     = { path = "crates/dap-admin" }
+
+# external
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+bincode          = "1.3"
+thiserror        = "1"
+anyhow           = "1"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio            = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "signal"] }
+axum             = "0.7"
+tower            = "0.5"
+tower-http       = { version = "0.6", features = ["trace", "cors"] }
+zstd             = { version = "0.13", default-features = false }
+lz4_flex         = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
+ahash            = "0.8"
+xxhash-rust      = { version = "0.8", features = ["xxh3"] }
+crc32fast        = "1.4"
+blake3           = "1.5"
+proptest         = "1"
+insta            = { version = "1", features = ["yaml"] }
+criterion        = { version = "0.5", features = ["html_reports"] }
+tempfile         = "3"
+smallvec         = "1"
+parking_lot      = "0.12"
+once_cell        = "1"
+bytes            = "1"
+byteorder        = "1"
+hex              = "0.4"
+rand             = "0.8"
+rand_chacha      = "0.3"
+humantime        = "2"
+clap             = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto       = "thin"
+codegen-units = 1
+debug     = false
+strip     = "symbols"
+
+[profile.bench]
+opt-level = 3
+lto       = "thin"
+debug     = true
+
+[profile.dev]
+opt-level = 0
+debug     = true

@@ -1,0 +1,26 @@
+[package]
+name = "dap-benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reproducible benchmark harness (criterion) + synthetic fact generator"
+
+[dependencies]
+dap-core    = { workspace = true }
+dap-storage = { workspace = true }
+dap-runtime = { workspace = true }
+dap-catalog = { workspace = true }
+serde       = { workspace = true }
+rand        = { workspace = true }
+rand_chacha = { workspace = true }
+tempfile    = { workspace = true }
+
+[dev-dependencies]
+criterion   = { workspace = true }
+
+[[bench]]
+name = "scan_filter_aggregate"
+harness = false

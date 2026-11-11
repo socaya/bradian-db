@@ -1,0 +1,23 @@
+[package]
+name = "dap-views"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Incremental materialized views + retractions"
+
+[dependencies]
+dap-core    = { workspace = true }
+dap-catalog = { workspace = true }
+dap-storage = { workspace = true }
+dap-runtime = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+ahash       = { workspace = true }
+parking_lot = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
