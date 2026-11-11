@@ -38,7 +38,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | INC-004 | M | Freshness + invalidation metadata | PART | `dap-serving`, `dap-views` | /freshness endpoint + FreshnessStamp |
 | DHI-001 | M | Aggregate (option combos/period/OU) semantics | DONE | `dap-dhis2`, `dap-planner` | aggregate query DSL + e2e test |
 | DHI-002 | M | Event + Tracker fact models | DEFER | `dap-dhis2` | multi-enrollment/stage fixture |
-| DHI-003 | M | Program indicator expression compiler | DONE | `dap-dhis2` | parser + interpreter + 8 fixture tests |
+| DHI-003 | M | Program indicator expression compiler | DONE | `dap-dhis2` | PI parser + 8 tests; Indicator (num/denom/factor) + 10 tests |
 | DHI-004 | M | Relationship + cohort measures | DEFER | `dap-dhis2` | reference datasets |
 | DST-001 | M | Autonomous site analytics without WAN | PART | `dap-storage`, `dap-runtime` | partition runs offline; sync DEFER |
 | DST-002 | M | Secure edge-server reconciliation | DEFER | `dap-distributed`, `dap-ingest` | reordered WAN replay |
