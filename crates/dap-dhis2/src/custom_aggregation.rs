@@ -49,6 +49,12 @@ pub enum AggregatorKind {
     Variance,
     /// Percentile with the probability captured at compile time (0 ≤ p ≤ 1).
     Percentile(u32),
+    /// Median: shorthand for `percentile(V{value}, 0.5)`.
+    Median,
+    /// Spearman rank autocorrelation across successive values of the stream.
+    SpearmanAutocorr,
+    /// Kendall tau-b rank autocorrelation across successive values.
+    KendallAutocorr,
 }
 
 impl AggregatorKind {
@@ -70,6 +76,9 @@ impl AggregatorKind {
                 }
                 Ok(Self::Percentile((pv * 1_000_000.0).round() as u32))
             }
+            ("median", [_]) => Ok(Self::Median),
+            ("spearman_autocorr", [_]) => Ok(Self::SpearmanAutocorr),
+            ("kendall_autocorr", [_]) => Ok(Self::KendallAutocorr),
             (other, _) => Err(DapError::UnsupportedFeature(format!(
                 "custom aggregation function '{other}' is not implemented"
             ))),
@@ -88,7 +97,8 @@ impl AggregatorKind {
                 mean: 0.0,
                 m2: 0.0,
             },
-            Self::Percentile(_) => AggState::Collect(Vec::new()),
+            Self::Percentile(_) | Self::Median => AggState::Collect(Vec::new()),
+            Self::SpearmanAutocorr | Self::KendallAutocorr => AggState::Collect(Vec::new()),
         }
     }
 }
@@ -207,7 +217,18 @@ fn validate_non_aggregator_calls(ast: &ExpressionAst) -> DapResult<()> {
 fn is_aggregator(name: &str) -> bool {
     matches!(
         name,
-        "sum" | "avg" | "average" | "count" | "min" | "max" | "stddev" | "variance" | "percentile"
+        "sum"
+            | "avg"
+            | "average"
+            | "count"
+            | "min"
+            | "max"
+            | "stddev"
+            | "variance"
+            | "percentile"
+            | "median"
+            | "spearman_autocorr"
+            | "kendall_autocorr"
     )
 }
 
@@ -305,7 +326,111 @@ fn finalize(kind: AggregatorKind, state: AggState) -> Option<f64> {
                 Some(v[lo] * (1.0 - frac) + v[hi] * frac)
             }
         }
+        (AggregatorKind::Median, AggState::Collect(mut v)) if !v.is_empty() => {
+            v.sort_by(|a, b| a.total_cmp(b));
+            let n = v.len();
+            if n % 2 == 1 {
+                Some(v[n / 2])
+            } else {
+                Some((v[n / 2 - 1] + v[n / 2]) / 2.0)
+            }
+        }
+        (AggregatorKind::SpearmanAutocorr, AggState::Collect(v)) if v.len() >= 2 => {
+            let pairs: Vec<(f64, f64)> = v.windows(2).map(|w| (w[0], w[1])).collect();
+            Some(spearman_rho(&pairs))
+        }
+        (AggregatorKind::KendallAutocorr, AggState::Collect(v)) if v.len() >= 2 => {
+            let pairs: Vec<(f64, f64)> = v.windows(2).map(|w| (w[0], w[1])).collect();
+            Some(kendall_tau(&pairs))
+        }
         _ => None,
+    }
+}
+
+fn spearman_rho(pairs: &[(f64, f64)]) -> f64 {
+    if pairs.len() < 2 {
+        return f64::NAN;
+    }
+    let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+    let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+    let rx = midrank(&xs);
+    let ry = midrank(&ys);
+    pearson(&rx, &ry)
+}
+
+fn kendall_tau(pairs: &[(f64, f64)]) -> f64 {
+    let n = pairs.len();
+    if n < 2 {
+        return f64::NAN;
+    }
+    let mut concordant = 0i64;
+    let mut discordant = 0i64;
+    let mut ties_x = 0i64;
+    let mut ties_y = 0i64;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = pairs[i].0 - pairs[j].0;
+            let dy = pairs[i].1 - pairs[j].1;
+            if dx == 0.0 && dy == 0.0 {
+                ties_x += 1;
+                ties_y += 1;
+            } else if dx == 0.0 {
+                ties_x += 1;
+            } else if dy == 0.0 {
+                ties_y += 1;
+            } else if dx.signum() == dy.signum() {
+                concordant += 1;
+            } else {
+                discordant += 1;
+            }
+        }
+    }
+    let total = (n * (n - 1) / 2) as i64;
+    let denom = (((total - ties_x) * (total - ties_y)) as f64).sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        (concordant - discordant) as f64 / denom
+    }
+}
+
+fn midrank(xs: &[f64]) -> Vec<f64> {
+    let n = xs.len();
+    let mut indexed: Vec<(usize, f64)> = xs.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut ranks = vec![0.0; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && indexed[j].1 == indexed[i].1 {
+            j += 1;
+        }
+        let rank = (i + 1 + j) as f64 / 2.0;
+        for k in i..j {
+            ranks[indexed[k].0] = rank;
+        }
+        i = j;
+    }
+    ranks
+}
+
+fn pearson(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len() as f64;
+    let mean_x = xs.iter().sum::<f64>() / n;
+    let mean_y = ys.iter().sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut dx2 = 0.0;
+    let mut dy2 = 0.0;
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        num += (x - mean_x) * (y - mean_y);
+        dx2 += (x - mean_x).powi(2);
+        dy2 += (y - mean_y).powi(2);
+    }
+    let denom = (dx2 * dy2).sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        num / denom
     }
 }
 
@@ -432,6 +557,38 @@ mod tests {
             .as_number()
             .unwrap();
         assert!((v - 4.5).abs() < 1e-9, "median = {v}");
+    }
+
+    #[test]
+    fn median_matches_middle_value() {
+        let plan = compile_custom_aggregation("median(V{value})").unwrap();
+        let v = evaluate_custom_aggregation(&plan, stream(&[1.0, 3.0, 2.0, 5.0, 4.0]))
+            .unwrap()
+            .as_number()
+            .unwrap();
+        assert_eq!(v, 3.0);
+    }
+
+    #[test]
+    fn spearman_autocorr_detects_monotonic_series() {
+        // Strictly increasing values pair as (1,2), (2,3), (3,4), (4,5) → perfect positive
+        // Spearman rank correlation of 1.0.
+        let plan = compile_custom_aggregation("spearman_autocorr(V{value})").unwrap();
+        let v = evaluate_custom_aggregation(&plan, stream(&[1.0, 2.0, 3.0, 4.0, 5.0]))
+            .unwrap()
+            .as_number()
+            .unwrap();
+        assert!((v - 1.0).abs() < 1e-9, "got {v}");
+    }
+
+    #[test]
+    fn kendall_autocorr_detects_decreasing_series() {
+        let plan = compile_custom_aggregation("kendall_autocorr(V{value})").unwrap();
+        let v = evaluate_custom_aggregation(&plan, stream(&[5.0, 4.0, 3.0, 2.0, 1.0]))
+            .unwrap()
+            .as_number()
+            .unwrap();
+        assert!((v - 1.0).abs() < 1e-9, "got {v}");
     }
 
     #[test]

@@ -782,19 +782,10 @@ fn eval_d2(
                     "d2:validatePattern: pattern must be a string, got {other:?}"
                 ))),
             };
-            // No regex dependency yet; fall back to simple substring / anchored equality.
-            // Patterns `^xxx$` match exact string equality; other patterns are substring
-            // matches. Documented limitation — full Java regex lands with the `regex` crate
-            // dependency in a later iteration.
-            let m = if let (Some(stripped), true) =
-                (pattern.strip_prefix('^'), pattern.ends_with('$'))
-            {
-                let anchored = stripped.trim_end_matches('$');
-                text == anchored
-            } else {
-                text.contains(&pattern)
-            };
-            Ok(EValue::Bool(m))
+            let regex = regex::Regex::new(&pattern).map_err(|e| {
+                DapError::invalid_value(format!("d2:validatePattern: pattern compile: {e}"))
+            })?;
+            Ok(EValue::Bool(regex.is_match(&text)))
         }
         _ => Err(DapError::UnsupportedFeature(format!(
             "d2 function '{name}' is not implemented"
@@ -1688,6 +1679,22 @@ mod tests {
             evaluate_expr(&ast, &mut r_under).unwrap(),
             EValue::Number(0.0)
         );
+    }
+
+    #[test]
+    fn d2_validate_pattern_uses_regex_engine() {
+        let ast = compile("d2:validatePattern('ABC-123', '^[A-Z]{3}-[0-9]+$')").unwrap();
+        let mut r = |_: &RefKind| Ok(EValue::Null);
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Bool(true));
+
+        let ast = compile("d2:validatePattern('male', '^(male|female|other)$')").unwrap();
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Bool(true));
+
+        let ast = compile("d2:validatePattern('abc', '^[0-9]+$')").unwrap();
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Bool(false));
+
+        let ast = compile("d2:validatePattern('x', '[')").unwrap();
+        assert!(evaluate_expr(&ast, &mut r).is_err());
     }
 
     #[test]

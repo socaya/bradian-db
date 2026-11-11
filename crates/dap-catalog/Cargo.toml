@@ -16,6 +16,13 @@ thiserror   = { workspace = true }
 blake3      = { workspace = true }
 parking_lot = { workspace = true }
 ahash       = { workspace = true }
+reqwest     = { workspace = true, optional = true }
+url         = { workspace = true, optional = true }
+tokio       = { workspace = true, optional = true }
+
+[features]
+default = []
+http = ["dep:reqwest", "dep:url", "dep:tokio"]
 
 [dev-dependencies]
 proptest    = { workspace = true }

@@ -78,6 +78,9 @@ rand             = "0.8"
 rand_chacha      = "0.3"
 humantime        = "2"
 clap             = { version = "4", features = ["derive"] }
+reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+regex            = "1"
+url              = "2"
 
 [profile.release]
 opt-level = 3

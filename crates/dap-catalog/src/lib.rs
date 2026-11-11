@@ -7,11 +7,15 @@
 #![warn(rust_2018_idioms)]
 
 pub mod dhis2_adapter;
+#[cfg(feature = "http")]
+pub mod dhis2_http;
 pub mod lineage;
 pub mod metadata;
 pub mod registry;
 
 pub use dhis2_adapter::{apply_dhis2_bundle, apply_dhis2_metadata_json, Dhis2MetadataBundle};
+#[cfg(feature = "http")]
+pub use dhis2_http::{Dhis2Auth, Dhis2HttpClient, Dhis2LoadReport};
 pub use lineage::{Lineage, LineageEdge, LineageKind};
 pub use metadata::{
     CategoryCombo, CategoryOptionCombo, DataElement, Dataset, Indicator, MetadataObject,

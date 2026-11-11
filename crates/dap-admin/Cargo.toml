@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 dap-core    = { workspace = true }
-dap-catalog = { workspace = true }
+dap-catalog = { workspace = true, features = ["http"] }
 dap-storage = { workspace = true }
 dap-serving = { workspace = true }
 anyhow      = { workspace = true }

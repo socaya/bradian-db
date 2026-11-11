@@ -28,6 +28,8 @@ enum Cmd {
     InspectSnapshot(InspectSnapshotArgs),
     /// Apply a DHIS2 `/api/metadata` JSON bundle to a new catalog and summarise it.
     LoadDhis2Metadata(LoadDhis2Args),
+    /// Pull a live DHIS2 `/api/metadata` bundle over HTTP and apply it.
+    FetchDhis2Metadata(FetchDhis2Args),
     /// Compact every visible segment of a partition into a single merged segment.
     CompactPartition(CompactArgs),
 }
@@ -78,6 +80,25 @@ struct LoadDhis2Args {
 }
 
 #[derive(Parser)]
+struct FetchDhis2Args {
+    /// DHIS2 base URL (e.g. https://play.dhis2.org/dev).
+    #[arg(long)]
+    base_url: String,
+    /// Basic-auth username (or omit when using --token).
+    #[arg(long)]
+    username: Option<String>,
+    /// Basic-auth password. Read from the DAP_DHIS2_PASSWORD env var if missing.
+    #[arg(long)]
+    password: Option<String>,
+    /// Alternate bearer token (preempts username/password when set).
+    #[arg(long)]
+    token: Option<String>,
+    /// HTTP timeout (e.g. "30s", "5min").
+    #[arg(long, default_value = "60s")]
+    timeout: humantime::Duration,
+}
+
+#[derive(Parser)]
 struct CompactArgs {
     #[arg(long)]
     root: PathBuf,
@@ -107,8 +128,35 @@ fn main() -> anyhow::Result<()> {
         Cmd::RestoreSnapshot(a) => do_restore(a)?,
         Cmd::InspectSnapshot(a) => do_inspect(a)?,
         Cmd::LoadDhis2Metadata(a) => do_load_dhis2(a)?,
+        Cmd::FetchDhis2Metadata(a) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(do_fetch_dhis2(a))?;
+        }
         Cmd::CompactPartition(a) => do_compact(a)?,
     }
+    Ok(())
+}
+
+async fn do_fetch_dhis2(a: FetchDhis2Args) -> anyhow::Result<()> {
+    let auth = if let Some(token) = a.token {
+        dap_catalog::Dhis2Auth::Bearer(token)
+    } else {
+        let username = a
+            .username
+            .ok_or_else(|| anyhow::anyhow!("--username or --token required"))?;
+        let password = a
+            .password
+            .or_else(|| std::env::var("DAP_DHIS2_PASSWORD").ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("--password or DAP_DHIS2_PASSWORD env var required")
+            })?;
+        dap_catalog::Dhis2Auth::Basic { username, password }
+    };
+    let client =
+        dap_catalog::Dhis2HttpClient::new(a.base_url, auth)?.with_timeout(a.timeout.into());
+    let catalog = dap_catalog::Catalog::new();
+    let report = client.load_metadata(&catalog).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
