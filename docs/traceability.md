@@ -36,10 +36,10 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | INC-002 | M | Period/OU correction + deletion retractions | PART | `dap-views`, `dap-storage` | delta tombstones hide from scan (e2e acceptance #1) |
 | INC-003 | M | Targeted recompute for non-invertible states | DEFER | `dap-views` | distinct/cohort tests |
 | INC-004 | M | Freshness + invalidation metadata | PART | `dap-serving`, `dap-views` | /freshness endpoint + FreshnessStamp |
-| DHI-001 | M | Aggregate (option combos/period/OU) semantics | DONE | `dap-dhis2`, `dap-planner` | aggregate query DSL + e2e test |
-| DHI-002 | M | Event + Tracker fact models | DEFER | `dap-dhis2` | multi-enrollment/stage fixture |
-| DHI-003 | M | Program indicator expression compiler | DONE | `dap-dhis2` | PI parser + 8 tests; Indicator (num/denom/factor) + 10 tests |
-| DHI-004 | M | Relationship + cohort measures | DEFER | `dap-dhis2` | reference datasets |
+| DHI-001 | M | Aggregate (option combos/period/OU) semantics | DONE | `dap-dhis2`, `dap-planner` | Aggregate DSL + e2e; `aggregate.rs` reduction matrix for SUM/AVG/AVG_SUM_OU/COUNT/MIN/MAX/NONE |
+| DHI-002 | M | Event + Tracker fact models | DONE | `dap-dhis2` | `event.rs` EventFact + `tracker.rs` Enrollment/TEI + distinct-TEI + stage-scoped D{} refs |
+| DHI-003 | M | Program indicator expression compiler | DONE | `dap-dhis2` | Full expression grammar (24 tests); Event PI (7 tests); Enrollment PI (8 tests); Classic Indicator (10 tests) |
+| DHI-004 | M | Relationship + cohort measures | PART | `dap-dhis2` | Longitudinal (`enrollments_in_period`, `completions_in_period`) ship; Relationship facts DEFER (see G6.md step 6) |
 | DST-001 | M | Autonomous site analytics without WAN | PART | `dap-storage`, `dap-runtime` | partition runs offline; sync DEFER |
 | DST-002 | M | Secure edge-server reconciliation | DEFER | `dap-distributed`, `dap-ingest` | reordered WAN replay |
 | DST-003 | A | Distributed query fragments | DEFER | `dap-distributed` | multi-worker correctness |

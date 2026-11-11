@@ -21,7 +21,7 @@
 use dap_core::{DapError, DapResult};
 use serde::{Deserialize, Serialize};
 
-use crate::expression::{compile, evaluate, ExpressionAst};
+use crate::expression::{compile, evaluate, validate_functions, ExpressionAst, RefKind};
 
 /// Trait describing how to resolve a `#{DE}` or `#{DE.COC}` reference into a numeric value
 /// for the evaluation context (typically a single OU/period/aocc group).
@@ -66,12 +66,18 @@ pub fn compile_indicator(
     denominator_src: &str,
     factor: i64,
 ) -> DapResult<IndicatorPlan> {
-    let numerator = compile(numerator_src).map_err(|e| {
-        DapError::invalid_value(format!("indicator numerator: {e}"))
-    })?;
-    let denominator = compile(denominator_src).map_err(|e| {
-        DapError::invalid_value(format!("indicator denominator: {e}"))
-    })?;
+    let numerator = compile(numerator_src)
+        .and_then(|ast| {
+            validate_functions(&ast)?;
+            Ok(ast)
+        })
+        .map_err(|e| DapError::invalid_value(format!("indicator numerator: {e}")))?;
+    let denominator = compile(denominator_src)
+        .and_then(|ast| {
+            validate_functions(&ast)?;
+            Ok(ast)
+        })
+        .map_err(|e| DapError::invalid_value(format!("indicator denominator: {e}")))?;
     Ok(IndicatorPlan {
         numerator,
         denominator,
@@ -96,12 +102,24 @@ pub fn evaluate_indicator(
 
 fn collect_refs(ast: &ExpressionAst, out: &mut Vec<(String, Option<String>)>) {
     match ast {
-        ExpressionAst::Number(_) => {}
-        ExpressionAst::DataElement { de, coc } => out.push((de.clone(), coc.clone())),
-        ExpressionAst::Neg(inner) => collect_refs(inner, out),
-        ExpressionAst::BinaryOp { lhs, rhs, .. } => {
+        ExpressionAst::Null
+        | ExpressionAst::Number(_)
+        | ExpressionAst::Bool(_)
+        | ExpressionAst::String(_) => {}
+        ExpressionAst::Ref(r) => {
+            if let RefKind::DataElement { de, coc, .. } = r {
+                out.push((de.clone(), coc.clone()));
+            }
+        }
+        ExpressionAst::Unary { inner, .. } => collect_refs(inner, out),
+        ExpressionAst::Binary { lhs, rhs, .. } => {
             collect_refs(lhs, out);
             collect_refs(rhs, out);
+        }
+        ExpressionAst::Call { args, .. } => {
+            for a in args {
+                collect_refs(a, out);
+            }
         }
     }
 }
