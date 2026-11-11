@@ -11,6 +11,7 @@ description = "Authentication, authorization, audit, cache keying"
 [dependencies]
 dap-core    = { workspace = true }
 dap-catalog = { workspace = true }
+dap-runtime = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
@@ -21,3 +22,4 @@ ahash       = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
+tempfile    = { workspace = true }
