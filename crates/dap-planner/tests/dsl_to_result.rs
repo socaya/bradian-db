@@ -255,3 +255,99 @@ fn oracle_parity_holds_over_random_filter() {
     }
     assert_eq!(exec_map, oracle_map);
 }
+
+#[test]
+fn explain_uses_zone_map_null_fraction_for_is_null() {
+    // Seed has 7 rows, exactly one with Value::Null in the `value` column, so the zone
+    // map should drive IsNull(value) selectivity close to 1/7 and IsNotNull close to 6/7
+    // — a materially better estimate than the historic 0.5 constant.
+    let dir = tempdir().unwrap();
+    let catalog = seed_catalog();
+    let part = seed_partition(dir.path());
+
+    let is_null_req = QueryRequest::Aggregate(AggregateQuery {
+        dataset: uid("dsAAAAAAAAA"),
+        partition: "p1".into(),
+        measures: vec![AggregationSpec::CountStar],
+        group_by: vec!["ou".into()],
+        period: None,
+        org_unit: None,
+        filters: vec![FilterSpec::IsNull { column: "value".into() }],
+        order_by: vec![],
+        limit: None,
+        consistency: Default::default(),
+    });
+    let ctx = PlanContext {
+        catalog: catalog.clone(),
+        options: PlanOptions::default(),
+    };
+    let plan = LogicalPlan::build(&ctx, &is_null_req, part.clone()).unwrap();
+
+    let explained = dap_planner::explain::explain(&plan, "rev-1");
+    // HashAggregate → Filter → Scan
+    let filter = &explained.root.children[0];
+    assert_eq!(filter.name, "Filter");
+    let scan_rows = filter.children[0].estimated_rows.unwrap();
+    assert_eq!(scan_rows, 7, "seed_partition wrote 7 rows");
+    let filter_rows = filter.estimated_rows.unwrap();
+    // 1 null of 7 rows: 7 * 1/7 = 1.0 (round(1.0) = 1).
+    assert_eq!(filter_rows, 1, "IsNull selectivity = null_count / row_count");
+    assert!(
+        filter.details.contains("selectivity"),
+        "Filter details carries the selectivity figure: '{}'",
+        filter.details
+    );
+
+    // Flip to IsNotNull and verify the complementary estimate.
+    let is_not_null_req = QueryRequest::Aggregate(AggregateQuery {
+        dataset: uid("dsAAAAAAAAA"),
+        partition: "p1".into(),
+        measures: vec![AggregationSpec::CountStar],
+        group_by: vec!["ou".into()],
+        period: None,
+        org_unit: None,
+        filters: vec![FilterSpec::IsNotNull { column: "value".into() }],
+        order_by: vec![],
+        limit: None,
+        consistency: Default::default(),
+    });
+    let plan2 = LogicalPlan::build(&ctx, &is_not_null_req, part).unwrap();
+    let explained2 = dap_planner::explain::explain(&plan2, "rev-1");
+    let filter2 = &explained2.root.children[0];
+    // 6 non-null of 7: 7 * 6/7 = 6.
+    assert_eq!(filter2.estimated_rows.unwrap(), 6);
+}
+
+#[test]
+fn explain_scalar_aggregate_estimates_single_row() {
+    let dir = tempdir().unwrap();
+    let catalog = seed_catalog();
+    let part = seed_partition(dir.path());
+
+    let request = QueryRequest::Aggregate(AggregateQuery {
+        dataset: uid("dsAAAAAAAAA"),
+        partition: "p1".into(),
+        measures: vec![AggregationSpec::Sum("value".into())],
+        // No group_by → scalar aggregate.
+        group_by: vec![],
+        period: None,
+        org_unit: None,
+        filters: vec![],
+        order_by: vec![],
+        limit: None,
+        consistency: Default::default(),
+    });
+    let ctx = PlanContext {
+        catalog,
+        options: PlanOptions::default(),
+    };
+    let plan = LogicalPlan::build(&ctx, &request, part).unwrap();
+    let explained = dap_planner::explain::explain(&plan, "rev-1");
+
+    assert_eq!(explained.root.name, "HashAggregate");
+    assert_eq!(
+        explained.root.estimated_rows.unwrap(),
+        1,
+        "scalar aggregate produces exactly one row"
+    );
+}

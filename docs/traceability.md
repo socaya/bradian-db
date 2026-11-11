@@ -30,7 +30,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | RUN-004 | M | Parallel single-node execution | DEFER | `dap-runtime` | deterministic concurrency |
 | RUN-005 | A | Joins, windows, runtime filters | DEFER | `dap-runtime` | join oracle + spill + skew |
 | OPT-001 | M | Logical rewrites + pruning | PART | `dap-planner` | predicate injection done; segment-level zone-map pruning covers Compare/In/IsNull/IsNotNull; multi-page pruning DEFER |
-| OPT-002 | M | Cardinality/cost stats + EXPLAIN | PART | `dap-planner` | EXPLAIN tree landed; true CBO stats DEFER |
+| OPT-002 | M | Cardinality/cost stats + EXPLAIN | PART | `dap-planner` | EXPLAIN tree landed; zone-map-driven Filter selectivity for True/False/IsNull/IsNotNull + conjunction/disjunction/not composition; scalar aggregate reports exact 1-row output; per-column NDV histograms DEFER |
 | OPT-003 | A | CBO joins, MV rewrite, adaptive | DEFER | `dap-planner` | comparative bench + rollback |
 | INC-001 | M | Incremental dependency-based materialization | PART | `dap-views` | DAG + materialize module for classic + event + enrollment PI over OU×period grid; incremental retraction refresh is next-iter work |
 | INC-002 | M | Period/OU correction + deletion retractions | PART | `dap-views`, `dap-storage` | delta tombstones hide from scan (e2e acceptance #1); MV retraction refresh next-iter |
