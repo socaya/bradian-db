@@ -1,5 +1,22 @@
-//! `.derc` segment format, WAL, manifests, delta, compaction.
+//! DAP storage: native columnar segments (`.derc`), WAL, manifests, delta, compaction.
 //!
-//! Scaffold — real implementation lands under tasks #4 and #5 (STO-001..006).
+//! Format spec: `docs/adr/0002-derc-segment-format.md`.
+//!
+//! Hot paths avoid `unsafe`. The one place we work with raw bytes (page codecs) stays within
+//! documented bounds-checked slices.
 #![deny(unsafe_code)]
 #![warn(rust_2018_idioms)]
+
+pub mod bitmap;
+pub mod checksum;
+pub mod codec;
+pub mod column;
+pub mod segment;
+pub mod zonemap;
+
+pub use column::{ColumnBuffer, ColumnValue};
+pub use segment::{
+    SegmentFooter, SegmentReader, SegmentWriter, SegmentWriterOptions, ColumnMeta, PageMeta,
+    CodecId, FeatureFlags, SEGMENT_MAGIC, SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
+};
+pub use zonemap::ZoneMap;

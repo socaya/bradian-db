@@ -8,23 +8,18 @@ use serde::{Deserialize, Serialize};
 use crate::fingerprint::Fingerprint;
 
 /// Consistency mode requested (or applied) for a query.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConsistencyMode {
     /// Return the freshest local state the edge has observed, including unacknowledged data.
     EdgeLatest,
     /// Return state the edge considers durable on local disk, excluding in-flight ingest.
+    #[default]
     EdgeStable,
     /// Return state the central server has durably acknowledged.
     CentralAcknowledged,
     /// Return a specific snapshot timestamp (ms since epoch).
     AsOf(i64),
-}
-
-impl Default for ConsistencyMode {
-    fn default() -> Self {
-        ConsistencyMode::EdgeStable
-    }
 }
 
 /// Coverage report per contributing site.

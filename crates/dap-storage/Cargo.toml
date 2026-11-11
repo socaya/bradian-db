@@ -18,6 +18,7 @@ zstd        = { workspace = true }
 lz4_flex    = { workspace = true }
 crc32fast   = { workspace = true }
 blake3      = { workspace = true }
+ahash       = { workspace = true }
 byteorder   = { workspace = true }
 parking_lot = { workspace = true }
 smallvec    = { workspace = true }

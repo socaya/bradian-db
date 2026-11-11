@@ -27,7 +27,7 @@ are in bytes.
 |   optional_flags u64 = optional-feature bitset    |
 |   created_at    u64  = unix millis                |
 |   writer_id     u64  = truncated BLAKE3           |
-|   reserved     [16]  = 0                          |
+|   reserved     [20]  = 0                          |
 +---------------------------------------------------+
 |                    COLUMN PAGES                   |
 |  (contiguous; column pages are keyed from footer) |
