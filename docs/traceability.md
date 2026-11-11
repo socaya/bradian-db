@@ -49,7 +49,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | API-003 | M | Async jobs, cancel, bounded export | PART | `dap-serving` | submit / list / get / cancel wired + tested; async query jobs enforce `max_output_rows` cap (default 100k) with precise diagnostic when exceeded; file-spilled large export (`/exports/<id>`) DEFER |
 | SEC-001 | M | Row/column/OU/program/site policy | DONE | `dap-security` | policy_predicate + e2e acceptance test |
 | SEC-002 | M | Context-safe caching + diagnostics | DONE | `dap-security` | cache_key fingerprint test |
-| SEC-003 | M | Encryption + governed deletion + export audit | PART | `dap-security` | AuditLog in place; encryption DEFER |
+| SEC-003 | M | Encryption + governed deletion + export audit | PART | `dap-security` | AuditLog + ChaCha20-Poly1305 `seal` / `unseal` with AAD binding + key-ring rotation + governed deletion (`KeyRing::revoke`, `revoke_and_rotate`) ship with 9 encryption tests; storage-layer integration (seal `.derc` payloads end-to-end) DEFER |
 | OPS-001 | M | Metrics, tracing, profiling, query history | DONE | `dap-serving` | /engine/health + query history ring |
 | OPS-002 | M | Capture isolation + bounded background | DEFER | `dap-runtime`, `dap-admin` | Capture latency co-load bench |
 | OPS-003 | M | Snapshot restore + source-log rebuild | DONE | `dap-storage`, `dap-admin` | WAL replay covers runtime restart; `export_snapshot` + `restore_snapshot` + `inspect-snapshot` CLI ship with round-trip + refuse-overwrite + refuse-non-empty-target + missing-header tests |

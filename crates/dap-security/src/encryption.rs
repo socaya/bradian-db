@@ -85,6 +85,41 @@ impl KeyRing {
         Ok(())
     }
 
+    /// Governed deletion (SEC-003). Remove the identified key from the ring so any
+    /// sealed payload referencing it can no longer be unsealed. Refuses to revoke the
+    /// current primary key — rotate first via [`add_key`] with `make_primary = true`
+    /// and then revoke, or use [`revoke_and_rotate`] for the combined operation. The
+    /// key material is dropped on return and is not persisted anywhere by the ring.
+    pub fn revoke(&self, id: &KeyId) -> DapResult<()> {
+        if self.primary.read().as_ref() == Some(id) {
+            return Err(DapError::invariant(
+                "refuse to revoke the primary key — rotate to a new primary first",
+            ));
+        }
+        if self.keys.write().remove(id).is_none() {
+            return Err(DapError::NotFound(format!("unknown key id {id:?}")));
+        }
+        Ok(())
+    }
+
+    /// Convenience: install `new_key` as the new primary, then revoke `old` in one
+    /// call. Fails closed if `old` is not currently in the ring so a stale rotate does
+    /// not leave both keys live.
+    pub fn revoke_and_rotate(
+        &self,
+        old: &KeyId,
+        new_id: KeyId,
+        new_key: DataKey,
+    ) -> DapResult<()> {
+        if !self.keys.read().contains_key(old) {
+            return Err(DapError::NotFound(format!("unknown key id {old:?}")));
+        }
+        self.add_key(new_id, new_key, true);
+        // Safe: primary is now new_id, so the revoke guard above will not trip.
+        self.keys.write().remove(old);
+        Ok(())
+    }
+
     pub fn primary_id(&self) -> Option<KeyId> {
         self.primary.read().clone()
     }
@@ -216,5 +251,80 @@ mod tests {
     fn missing_primary_key_refuses_seal() {
         let ring = KeyRing::new();
         assert!(seal(&ring, b"x", b"aad").is_err());
+    }
+
+    #[test]
+    fn revoked_key_cannot_decrypt_old_payload() {
+        let ring = KeyRing::new();
+        ring.add_key(KeyId::new("k1"), DataKey::generate(), true);
+        let sealed = sealed_with(&ring, b"old data");
+
+        // Rotate to new primary, then revoke the old key — past sealed payloads
+        // become permanently unreadable.
+        ring.add_key(KeyId::new("k2"), DataKey::generate(), true);
+        ring.revoke(&KeyId::new("k1")).unwrap();
+
+        let err = unseal(&ring, &sealed, b"aad").expect_err("revoked key cannot unseal");
+        assert!(
+            err.to_string().contains("k1"),
+            "diagnostic names the missing key id: {err}"
+        );
+    }
+
+    #[test]
+    fn revoke_primary_is_rejected() {
+        let ring = KeyRing::new();
+        ring.add_key(KeyId::new("k1"), DataKey::generate(), true);
+        let err = ring
+            .revoke(&KeyId::new("k1"))
+            .expect_err("primary cannot be revoked in place");
+        assert!(err.to_string().contains("primary"));
+    }
+
+    #[test]
+    fn revoke_unknown_key_is_not_found() {
+        let ring = KeyRing::new();
+        ring.add_key(KeyId::new("k1"), DataKey::generate(), true);
+        let err = ring
+            .revoke(&KeyId::new("kX"))
+            .expect_err("unknown id rejected");
+        assert!(err.to_string().contains("kX"));
+    }
+
+    #[test]
+    fn revoke_and_rotate_atomic() {
+        let ring = KeyRing::new();
+        ring.add_key(KeyId::new("k1"), DataKey::generate(), true);
+        let sealed_old = sealed_with(&ring, b"legacy");
+
+        ring.revoke_and_rotate(&KeyId::new("k1"), KeyId::new("k2"), DataKey::generate())
+            .unwrap();
+        assert_eq!(ring.primary_id().unwrap().as_str(), "k2");
+        assert_eq!(ring.len(), 1, "old key removed from ring");
+
+        // New seals use k2.
+        let sealed_new = sealed_with(&ring, b"current");
+        assert_eq!(&sealed_new.0[2..4], b"k2");
+        unseal(&ring, &sealed_new, b"aad").unwrap();
+
+        // Old seal fails because its key was governed-deleted.
+        assert!(unseal(&ring, &sealed_old, b"aad").is_err());
+    }
+
+    #[test]
+    fn revoke_and_rotate_unknown_old_key_is_rejected() {
+        let ring = KeyRing::new();
+        ring.add_key(KeyId::new("k1"), DataKey::generate(), true);
+        let err = ring
+            .revoke_and_rotate(&KeyId::new("kX"), KeyId::new("k2"), DataKey::generate())
+            .expect_err("stale rotate rejected");
+        assert!(err.to_string().contains("kX"));
+        // Ring is unchanged: still exactly k1, still primary.
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.primary_id().unwrap().as_str(), "k1");
+    }
+
+    fn sealed_with(ring: &KeyRing, plaintext: &[u8]) -> SealedPayload {
+        seal(ring, plaintext, b"aad").unwrap()
     }
 }
