@@ -546,6 +546,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dap-e2e"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "dap-catalog",
+ "dap-core",
+ "dap-ingest",
+ "dap-planner",
+ "dap-runtime",
+ "dap-security",
+ "dap-serving",
+ "dap-storage",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "dap-ingest"
 version = "0.1.0"
 dependencies = [

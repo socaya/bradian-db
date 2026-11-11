@@ -13,6 +13,7 @@ members = [
     "crates/dap-serving",
     "crates/dap-admin",
     "crates/dap-benchmark",
+    "tests/dap-e2e",
 ]
 
 [workspace.package]
