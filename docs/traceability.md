@@ -26,7 +26,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | ING-003 | M | Bounded buffering, backfill, quarantine | PART | `dap-ingest` | quarantine log in place; `Ingester::with_max_batch_size` fails oversized batches closed (no partial side effects); long-horizon backfill harness DEFER |
 | RUN-001 | M | Typed vector batches + ownership | DONE | `dap-runtime` | scalar oracle equivalence test |
 | RUN-002 | M | Scan, filter, project, hash aggregate, sort | DONE | `dap-runtime` | unit + e2e |
-| RUN-003 | M | Resource budgets, spill, cancel, fairness | PART | `dap-runtime` | ExecContext + budget guard + hash-aggregate disk spill (bincode state files, merge on finish, `spilled_bytes` metric wired); sort spill + priority fairness DEFER |
+| RUN-003 | M | Resource budgets, spill, cancel, fairness | PART | `dap-runtime` | ExecContext + budget guard + hash-aggregate disk spill (bincode state files, merge on finish, `spilled_bytes` metric wired); TopK operator eagerly trims to ~2k rows regardless of input size; external-merge sort + priority fairness DEFER |
 | RUN-004 | M | Parallel single-node execution | DEFER | `dap-runtime` | deterministic concurrency |
 | RUN-005 | A | Joins, windows, runtime filters | DEFER | `dap-runtime` | join oracle + spill + skew |
 | OPT-001 | M | Logical rewrites + pruning | PART | `dap-planner` | predicate injection done; segment-level zone-map pruning covers Compare/In/IsNull/IsNotNull; multi-page pruning DEFER |
