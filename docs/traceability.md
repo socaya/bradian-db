@@ -16,7 +16,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | STO-004 | M | Snapshot-consistent delta/segment reads | DONE | `dap-storage`, `dap-runtime` | `Partition::snapshot_rows` + scan merges delta |
 | STO-005 | M | Stable PK, revision fences, upsert/delete | DONE | `dap-storage` | version-fence + idempotent-replay tests |
 | STO-006 | M | Safe compaction + tombstone GC | PART | `dap-storage` | flush-compaction + snapshot refs (multi-seg merge is DEFER) |
-| STO-007 | M | Partition/segment/page stats + pruning | PART | `dap-storage`, `dap-planner` | zone maps stored; planner-side pruning DEFER |
+| STO-007 | M | Partition/segment/page stats + pruning | PART | `dap-storage`, `dap-planner` | zone maps stored; segment-level planner pruning covers Compare/In/IsNull/IsNotNull; multi-page pruning DEFER (v1 writers emit single-page columns) |
 | STO-008 | A | Adaptive indexes + storage tiering | DEFER | `dap-storage` | measured cost/benefit |
 | CAT-001 | M | Versioned DHIS2 semantic catalog | DONE | `dap-catalog` | registry tests + lineage |
 | CAT-002 | M | Dependency + lineage graph | DONE | `dap-catalog`, `dap-views` | transitive_dependents + views DAG test |
@@ -29,7 +29,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | RUN-003 | M | Resource budgets, spill, cancel, fairness | PART | `dap-runtime` | ExecContext + budget guard; disk spill DEFER |
 | RUN-004 | M | Parallel single-node execution | DEFER | `dap-runtime` | deterministic concurrency |
 | RUN-005 | A | Joins, windows, runtime filters | DEFER | `dap-runtime` | join oracle + spill + skew |
-| OPT-001 | M | Logical rewrites + pruning | PART | `dap-planner` | predicate injection done; zone-map pruning DEFER |
+| OPT-001 | M | Logical rewrites + pruning | PART | `dap-planner` | predicate injection done; segment-level zone-map pruning covers Compare/In/IsNull/IsNotNull; multi-page pruning DEFER |
 | OPT-002 | M | Cardinality/cost stats + EXPLAIN | PART | `dap-planner` | EXPLAIN tree landed; true CBO stats DEFER |
 | OPT-003 | A | CBO joins, MV rewrite, adaptive | DEFER | `dap-planner` | comparative bench + rollback |
 | INC-001 | M | Incremental dependency-based materialization | PART | `dap-views` | DAG + materialize module for classic + event + enrollment PI over OU×period grid; incremental retraction refresh is next-iter work |
