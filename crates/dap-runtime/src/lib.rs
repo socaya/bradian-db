@@ -14,6 +14,7 @@ pub mod batch;
 pub mod budget;
 pub mod expr;
 pub mod oracle;
+pub mod parallel;
 pub mod scan;
 pub mod sort;
 
@@ -21,5 +22,6 @@ pub use aggregate::{AggregateKind, HashAggregator};
 pub use batch::{RecordBatch, RecordBatchBuilder};
 pub use budget::{ExecContext, MemoryBudget, RuntimeMetrics};
 pub use expr::{Expr, Predicate};
+pub use parallel::parallel_filter_aggregate;
 pub use scan::{scan_partition, scan_segments, ScanOptions};
 pub use sort::{sort_batch, SortSpec, TopK};

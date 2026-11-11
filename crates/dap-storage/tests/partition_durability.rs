@@ -167,6 +167,68 @@ fn version_fence_drops_stale_replay() {
 }
 
 #[test]
+fn compact_all_segments_merges_and_deduplicates() {
+    let dir = tempdir().unwrap();
+    let p = open_part(dir.path().to_path_buf());
+
+    // Flush three segments; the second flush updates the same key (ouAAAAAAAAA/202601/
+    // deAAAAAAAAA) with a higher data revision so compaction must keep only the latest.
+    p.upsert_row(
+        vec![
+            Value::Str("ouAAAAAAAAA".into()),
+            Value::Str("202601".into()),
+            Value::Str("deAAAAAAAAA".into()),
+            Value::F64(10.0),
+        ],
+        1,
+    )
+    .unwrap();
+    p.flush().unwrap();
+
+    p.upsert_row(
+        vec![
+            Value::Str("ouAAAAAAAAA".into()),
+            Value::Str("202601".into()),
+            Value::Str("deAAAAAAAAA".into()),
+            Value::F64(999.0),
+        ],
+        2,
+    )
+    .unwrap();
+    p.flush().unwrap();
+
+    p.upsert_row(
+        vec![
+            Value::Str("ouBBBBBBBBB".into()),
+            Value::Str("202601".into()),
+            Value::Str("deAAAAAAAAA".into()),
+            Value::F64(20.0),
+        ],
+        1,
+    )
+    .unwrap();
+    p.flush().unwrap();
+
+    assert_eq!(p.visible_segments().len(), 3);
+
+    let merged = p
+        .compact_all_segments()
+        .unwrap()
+        .expect("compaction produced a segment");
+    assert_eq!(p.visible_segments().len(), 1);
+    assert_eq!(merged.row_count, 2, "deduped by primary key");
+
+    // Verify the newer value survived.
+    let key = PrimaryKey(vec![
+        Value::Str("ouAAAAAAAAA".into()),
+        Value::Str("202601".into()),
+        Value::Str("deAAAAAAAAA".into()),
+    ]);
+    let row = p.get(&key).unwrap().unwrap();
+    assert_eq!(row.0[3], Value::F64(999.0));
+}
+
+#[test]
 fn snapshot_prevents_compaction_from_breaking_reader() {
     // v1: compaction is only a delta flush; the previous generation's segments stay on disk
     // regardless of snapshot references (nothing deletes them yet). We assert the snapshot

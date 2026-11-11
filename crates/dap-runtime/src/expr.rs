@@ -17,7 +17,7 @@ pub enum Expr {
     Lit(Value),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CmpOp {
     Eq,
     NotEq,

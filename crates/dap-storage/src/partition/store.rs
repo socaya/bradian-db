@@ -219,6 +219,126 @@ impl Partition {
         self.flush_locked(&mut inner, &mut wal)
     }
 
+    /// Multi-segment compaction (STO-006). Reads every visible segment, deduplicates rows
+    /// by primary key (keeping the one from the highest `data_revision` segment), writes a
+    /// single new segment and atomically retires the old ones. The flush path is reused
+    /// for its atomic-manifest + WAL-checkpoint protocol.
+    pub fn compact_all_segments(&self) -> DapResult<Option<ManifestSegment>> {
+        let mut wal = self.wal.lock();
+        let mut inner = self.inner.write();
+        if inner.manifest.visible_segments.len() < 2 {
+            return Ok(None);
+        }
+
+        // Collect segments by ascending data_revision so later rows overwrite earlier.
+        let mut segments = inner.manifest.visible_segments.clone();
+        segments.sort_by_key(|s| s.data_revision);
+
+        let mut keyed: ahash::AHashMap<PrimaryKey, Row> = ahash::AHashMap::default();
+        let mut max_watermark = 0i64;
+        let mut max_revision = 0u64;
+        for seg in &segments {
+            let mut reader = SegmentReader::open(&seg.path)?;
+            let n = reader.footer().row_count as usize;
+            if n == 0 {
+                continue;
+            }
+            let mut columns = Vec::with_capacity(self.options.schema.len());
+            for c in &self.options.schema.columns {
+                columns.push(reader.read_column(&c.name)?);
+            }
+            for i in 0..n {
+                let mut row = Vec::with_capacity(self.options.schema.len());
+                for col in &columns {
+                    row.push(col.value_at(i)?);
+                }
+                let key = self.extract_key(&row)?;
+                keyed.insert(key, Row(row));
+            }
+            if seg.watermark_ms > max_watermark {
+                max_watermark = seg.watermark_ms;
+            }
+            if seg.data_revision > max_revision {
+                max_revision = seg.data_revision;
+            }
+        }
+
+        if keyed.is_empty() {
+            return Ok(None);
+        }
+
+        // Write the merged segment through the writer so it follows the same atomic
+        // publish path as a normal flush.
+        let segment_id = format!("seg-{:08}.derc", inner.next_segment_id);
+        inner.next_segment_id += 1;
+        let path = self.dir.join("segments").join(&segment_id);
+
+        let data_rev = inner.next_data_revision.max(max_revision + 1);
+        inner.next_data_revision = data_rev + 1;
+
+        let writer_opts = SegmentWriterOptions {
+            dataset_id: self.options.dataset_id.clone(),
+            partition_id: self.options.partition_id.clone(),
+            segment_id: segment_id.clone(),
+            compress: true,
+            dict_cardinality_threshold: 0.5,
+            watermark_ms: max_watermark,
+            data_revision: data_rev,
+            metadata_revision: inner.manifest.metadata_revision,
+        };
+        let mut writer = SegmentWriter::new(self.options.schema.clone(), writer_opts);
+        let mut row_count = 0u64;
+        for (_, row) in keyed {
+            writer.append_row(&row.0)?;
+            row_count += 1;
+        }
+        let written = writer.finish_to_path(&path)?;
+
+        let seg_meta = ManifestSegment {
+            segment_id: segment_id.clone(),
+            path: written.path.clone(),
+            size_bytes: written.size_bytes,
+            row_count,
+            watermark_ms: max_watermark,
+            data_revision: data_rev,
+        };
+
+        // Retire old segments, publish new manifest. The old files remain on disk until
+        // every snapshot referencing the previous generation has dropped. In the current
+        // single-process model we simply remove them after the manifest flip. A later gate
+        // will delay deletion until the SnapshotRefs count hits zero.
+        let old_paths: Vec<PathBuf> =
+            inner.manifest.visible_segments.iter().map(|s| s.path.clone()).collect();
+
+        let generation = inner.manifest.generation + 1;
+        inner.manifest.generation = generation;
+        inner.manifest.visible_segments = vec![seg_meta.clone()];
+        inner.manifest.wal_truncation_lsn = inner.next_lsn.saturating_sub(1);
+        inner.manifest.save(&self.dir)?;
+
+        wal.append_and_sync(&WalRecord::Checkpoint {
+            lsn: inner.next_lsn,
+            visible_generation: generation,
+            watermark_ms: max_watermark,
+        })?;
+        inner.next_lsn += 1;
+        wal.truncate()?;
+        inner.delta_version += 1;
+
+        // Remove the retired segment files only if no snapshot still references the prior
+        // generation. The snapshot-ref counter only tracks the current + previous runs;
+        // for safety we delete only when the counter is empty.
+        if !self.snapshot_refs.lock().is_referenced(generation - 1) {
+            for p in old_paths {
+                if p != seg_meta.path {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
+
+        Ok(Some(seg_meta))
+    }
+
     /// Read the live state for a key. Checks the delta first, then any visible segment where
     /// the schema primary-key columns match. Returns `None` if the row is tombstoned or absent.
     pub fn get(&self, key: &PrimaryKey) -> DapResult<Option<Row>> {

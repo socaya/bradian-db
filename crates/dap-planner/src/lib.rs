@@ -9,6 +9,7 @@
 pub mod dsl;
 pub mod explain;
 pub mod plan;
+pub mod pruning;
 pub mod runner;
 
 pub use dsl::{
@@ -17,4 +18,5 @@ pub use dsl::{
 };
 pub use explain::{ExplainPlan, OperatorNode};
 pub use plan::{LogicalPlan, PhysicalPlan, PlanContext, PlanOptions};
+pub use pruning::{prune_segments, segment_can_contribute};
 pub use runner::{QueryExecutor, QueryResult};

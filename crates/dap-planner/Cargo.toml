@@ -22,3 +22,4 @@ ahash       = { workspace = true }
 [dev-dependencies]
 proptest    = { workspace = true }
 tempfile    = { workspace = true }
+dap-storage = { workspace = true }

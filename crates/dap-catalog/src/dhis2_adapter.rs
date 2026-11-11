@@ -328,13 +328,25 @@ fn parse_period_type(raw: &str) -> DapResult<PeriodType> {
     Ok(match raw {
         "Daily" => PeriodType::Daily,
         "Weekly" => PeriodType::Weekly,
+        "WeeklyWednesday" => PeriodType::WeeklyWednesday,
+        "WeeklyThursday" => PeriodType::WeeklyThursday,
+        "WeeklySaturday" => PeriodType::WeeklySaturday,
+        "WeeklySunday" => PeriodType::WeeklySunday,
+        "BiWeekly" => PeriodType::BiWeekly,
         "Monthly" => PeriodType::Monthly,
+        "BiMonthly" => PeriodType::BiMonthly,
         "Quarterly" => PeriodType::Quarterly,
+        "SixMonthly" => PeriodType::SixMonthly,
+        "SixMonthlyApril" => PeriodType::SixMonthlyApril,
         "Yearly" => PeriodType::Yearly,
+        "FinancialApril" => PeriodType::FinancialApril,
+        "FinancialJuly" => PeriodType::FinancialJuly,
+        "FinancialOct" | "FinancialOctober" => PeriodType::FinancialOctober,
+        "FinancialNov" | "FinancialNovember" => PeriodType::FinancialNovember,
         other => {
             return Err(DapError::UnsupportedFeature(format!(
-                "DHIS2 periodType '{other}' is not supported in v1 (Weekly variants, \
-                 fiscal years and relative periods are deferred)"
+                "DHIS2 periodType '{other}' is not supported (relative periods are the \
+                 remaining DEFER)"
             )))
         }
     })
