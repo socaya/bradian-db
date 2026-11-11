@@ -1,0 +1,140 @@
+/* App shell — design guidance: launch from the existing App Launcher, reuse the global
+   application chrome, avoid duplicate navigation, calm neutral surfaces.
+   Lists / details / edit forms must remain SEPARATE full-page routes (no master-detail
+   split inside a single route). */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--nav-width) 1fr;
+  height: 100vh;
+  background: var(--surface-page);
+}
+
+.nav {
+  background: var(--surface-nav);
+  color: var(--text-inverse);
+  padding: var(--sp-5) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  overflow-y: auto;
+}
+
+.nav .brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-size: var(--fs-13);
+  color: #e5e7eb;
+}
+.nav .brand .mark {
+  background: #1f2937;
+  border-radius: var(--r-4);
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+}
+
+.nav .section-label {
+  font-size: var(--fs-11);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9ca3af;
+  padding: 0 var(--sp-2);
+  margin-bottom: var(--sp-1);
+}
+
+.nav .nav-group { display: flex; flex-direction: column; gap: 2px; }
+
+.nav a {
+  color: #d1d5db;
+  text-decoration: none;
+  padding: 6px var(--sp-2);
+  border-radius: var(--r-4);
+  font-size: var(--fs-13);
+  line-height: 1.2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.nav a:hover { background: #1f2937; color: #f4f4f4; }
+.nav a.active { background: var(--surface-nav-active); color: #ffffff; }
+.nav a .hint {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  color: #6b7280;
+}
+
+.nav .footer {
+  margin-top: auto;
+  font-size: var(--fs-11);
+  color: #6b7280;
+  padding: 0 var(--sp-2);
+}
+
+/* ── Main content area ─────────────────────────────────────────────────── */
+.main {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--content-pad);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-panel);
+}
+.topbar .crumbs {
+  display: flex;
+  gap: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--fs-13);
+}
+.topbar .crumbs .sep { color: var(--text-muted); }
+.topbar .status {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+}
+
+.content {
+  padding: var(--content-pad);
+  overflow-y: auto;
+  min-height: 0;
+}
+.content .stack {
+  max-width: var(--app-max);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+.content h1 { margin-bottom: var(--sp-1); }
+.content .page-sub {
+  color: var(--text-secondary);
+  font-size: var(--fs-13);
+  margin-bottom: var(--sp-4);
+}
+
+/* Two-column layout used for detail routes where a secondary diagnostic column is
+   contextual (not editable). Per we never put an editable form here. */
+.two-col {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--sp-5);
+}
+@media (max-width: 1024px) {
+  .shell { grid-template-columns: 1fr; }
+  .nav { display: none; }
+  .two-col { grid-template-columns: 1fr; }
+}

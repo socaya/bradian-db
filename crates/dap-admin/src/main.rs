@@ -32,6 +32,22 @@ enum Cmd {
     FetchDhis2Metadata(FetchDhis2Args),
     /// Compact every visible segment of a partition into a single merged segment.
     CompactPartition(CompactArgs),
+    /// Start the HTTP engine (API + optional static UI).
+    Serve(ServeArgs),
+}
+
+#[derive(Parser)]
+struct ServeArgs {
+    /// Analytics root directory.
+    #[arg(long)]
+    root: PathBuf,
+    /// Bind address.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    bind: String,
+    /// Optional directory with the built `dap-ui` bundle. When set, non-API routes serve
+    /// the UI.
+    #[arg(long)]
+    ui_dir: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -133,7 +149,26 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(do_fetch_dhis2(a))?;
         }
         Cmd::CompactPartition(a) => do_compact(a)?,
+        Cmd::Serve(a) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(do_serve(a))?;
+        }
     }
+    Ok(())
+}
+
+async fn do_serve(a: ServeArgs) -> anyhow::Result<()> {
+    use std::sync::Arc;
+    let catalog = Arc::new(dap_catalog::Catalog::new());
+    let engine = Arc::new(dap_serving::AnalyticsEngine::new(a.root, catalog));
+    let state = dap_serving::ServerState::new(engine);
+    let app = match a.ui_dir {
+        Some(dir) => dap_serving::routes::router_with_static_ui(state, dir),
+        None => dap_serving::router(state),
+    };
+    let listener = tokio::net::TcpListener::bind(&a.bind).await?;
+    tracing::info!(addr = %a.bind, "dap engine listening");
+    axum::serve(listener, app).await?;
     Ok(())
 }
 

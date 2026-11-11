@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -20,18 +20,38 @@ use crate::state::{QueryHistoryEntry, SharedState};
 
 static QUERY_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Canonical API router. Mounts the DAP analytical endpoints plus the DHIS2
+/// compatibility routes. Add the admin UI with [`router_with_static_ui`].
 pub fn router(state: SharedState) -> Router {
+    api_router(state)
+}
+
+pub fn api_router(state: SharedState) -> Router {
     Router::new()
         .route("/api/analytics/v1/engine/health", get(engine_health))
         .route("/api/analytics/v1/catalog", get(catalog_summary))
-        .route("/api/analytics/v1/freshness", get(freshness))
+        .route("/api/analytics/v1/freshness", post(freshness))
         .route("/api/analytics/v1/query", post(run_query))
         .route("/api/analytics/v1/query/explain", post(explain_query))
         .route("/api/analytics/v1/drilldown", post(drilldown))
-        .route("/api/analytics/v1/data-products", get(list_data_products))
-        .route("/api/analytics/v1/data-products", post(register_data_product))
+        .route("/api/analytics/v1/data-products", get(list_data_products).post(register_data_product))
+        .route("/api/analytics/v1/jobs", get(list_jobs).post(submit_async_query))
+        .route("/api/analytics/v1/jobs/:id", get(get_job))
+        .route("/api/analytics/v1/jobs/:id/cancel", post(cancel_job))
         .route("/healthz", get(healthz))
+        .merge(crate::dhis2_compat::dhis2_routes())
         .with_state(state)
+}
+
+/// Serve the API alongside a built static UI. `ui_dir` must contain `index.html` plus
+/// Vite build output. Non-API paths resolve to `index.html` so SPA routing works.
+pub fn router_with_static_ui(state: SharedState, ui_dir: std::path::PathBuf) -> Router {
+    let index = ui_dir.join("index.html");
+    let fallback = tower_http::services::ServeFile::new(index);
+    let static_service = tower_http::services::ServeDir::new(ui_dir)
+        .append_index_html_on_directories(true)
+        .fallback(fallback);
+    api_router(state).fallback_service(static_service)
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -67,11 +87,7 @@ async fn freshness(
     let partition = state.engine.get_partition(&params.dataset, &params.partition)?;
     let segments = partition.visible_segments();
     let max_watermark = segments.iter().map(|s| s.watermark_ms).max().unwrap_or(0);
-    let data_revision = segments
-        .iter()
-        .map(|s| s.data_revision)
-        .max()
-        .unwrap_or(0);
+    let data_revision = segments.iter().map(|s| s.data_revision).max().unwrap_or(0);
     Ok(Json(json!({
         "dataset": params.dataset,
         "partition": params.partition,
@@ -86,12 +102,12 @@ struct QueryEnvelope {
     pub request: QueryRequest,
 }
 
-#[derive(Serialize)]
-struct QueryEnvelopeResponse {
-    columns: Vec<String>,
-    rows: Vec<Vec<Value>>,
-    provenance: dap_core::Provenance,
-    metrics: dap_runtime::budget::Snapshot,
+#[derive(Clone, Serialize)]
+pub(crate) struct QueryEnvelopeResponse {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    pub provenance: dap_core::Provenance,
+    pub metrics: dap_runtime::budget::Snapshot,
 }
 
 async fn run_query(
@@ -129,12 +145,8 @@ async fn explain_query(
 #[derive(Serialize, Deserialize, Debug)]
 struct DrilldownRequest {
     pub request: QueryRequest,
-    /// Additional filters applied on top of the base request before execution. Typical
-    /// usage: the caller clicked a cell in the aggregate output and wants a bounded
-    /// line-listing-like result for that cell.
     #[serde(default)]
     pub drill_filters: Vec<dap_planner::dsl::FilterSpec>,
-    /// Max rows to return. Caps at 10 000 to keep the endpoint bounded.
     #[serde(default = "default_drill_limit")]
     pub limit: usize,
 }
@@ -162,9 +174,7 @@ async fn drilldown(
     Ok(Json(response))
 }
 
-/// A registered analytical data product (spec §8.5). Consumers discover products through
-/// `GET /data-products`; operators register them through `POST /data-products` after
-/// publishing the underlying materialised view.
+/// Registered analytical data product. Published alongside a materialised view.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DataProduct {
     pub id: String,
@@ -182,8 +192,6 @@ pub struct DataProduct {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FreshnessContract {
-    /// SLA for data staleness in seconds. A consumer asking for a product with a tighter
-    /// SLA than the engine can meet gets back an explicit `partial` provenance note.
     pub max_staleness_seconds: u64,
     pub consistency: dap_core::ConsistencyMode,
 }
@@ -208,6 +216,74 @@ async fn register_data_product(
     Ok(Json(product))
 }
 
+// ── Async jobs (API-003) ────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SubmitJobRequest {
+    pub request: QueryRequest,
+    #[serde(default)]
+    pub submitted_by: Option<String>,
+}
+
+async fn submit_async_query(
+    State(state): State<SharedState>,
+    Json(body): Json<SubmitJobRequest>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    let job_id = format!("job-{}", uuid_like());
+    let state_clone = state.clone();
+    let request = body.request.clone();
+    let record = state.jobs.submit(
+        job_id.clone(),
+        "query",
+        body.submitted_by,
+        move |_cancel, progress| async move {
+            progress.set(json!({"step": "planning"}));
+            let response = tokio::task::spawn_blocking(move || {
+                execute_request(&state_clone, &request)
+            })
+            .await
+            .map_err(|e| dap_core::DapError::other(format!("spawn_blocking: {e}")))??;
+            progress.set(json!({"step": "complete", "output_rows": response.metrics.output_rows}));
+            serde_json::to_value(response).map_err(dap_core::DapError::from)
+        },
+    );
+    Ok((StatusCode::ACCEPTED, Json(record)))
+}
+
+async fn list_jobs(State(state): State<SharedState>) -> impl IntoResponse {
+    Json(state.jobs.list())
+}
+
+async fn get_job(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    state
+        .jobs
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| dap_core::DapError::NotFound(format!("job {id}")).into())
+}
+
+async fn cancel_job(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    state.jobs.cancel(&id)?;
+    Ok(Json(json!({"id": id, "status": "CANCELLED"})))
+}
+
+fn uuid_like() -> String {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let salt = std::process::id() as u128;
+    let digest = blake3::hash(&(ns ^ salt).to_le_bytes());
+    let hex = digest.to_hex();
+    hex[..16].to_string()
+}
+
 fn build_plan(state: &SharedState, request: &QueryRequest) -> DapResult<LogicalPlan> {
     let (dataset, partition_id) = match request {
         QueryRequest::Aggregate(aq) => (aq.dataset.as_str().to_string(), aq.partition.clone()),
@@ -223,11 +299,13 @@ fn build_plan(state: &SharedState, request: &QueryRequest) -> DapResult<LogicalP
     LogicalPlan::build(&ctx, request, partition)
 }
 
-fn execute_request(state: &SharedState, request: &QueryRequest) -> DapResult<QueryEnvelopeResponse> {
+pub(crate) fn execute_request(
+    state: &SharedState,
+    request: &QueryRequest,
+) -> DapResult<QueryEnvelopeResponse> {
     let plan = build_plan(state, request)?;
     let exec = ExecContext::default();
     let result = QueryExecutor::execute(&plan, &exec)?;
-
     let columns = result
         .batch
         .schema

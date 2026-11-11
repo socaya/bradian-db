@@ -1,0 +1,31 @@
+# Example DHIS2 configuration pointing analytics at a DAP engine.
+# Drop this file under $DHIS2_HOME/dhis.conf (or your orchestrator's secret store).
+
+# ---- Connection to DHIS2's transactional PostgreSQL (unchanged) ----
+connection.dialect  = org.hibernate.dialect.PostgreSQLDialect
+connection.driver   = org.postgresql.Driver
+connection.url      = jdbc:postgresql://dhis2-db:5432/dhis2
+connection.username = dhis
+connection.password = ${DHIS_PG_PASSWORD}
+
+# ---- Analytics engine: switch from "postgresql" / "doris" / "clickhouse" to "dap" ----
+analytics.database               = dap
+analytics.database.base_url      = https://dap.internal:8443
+analytics.database.auth          = basic
+analytics.database.auth.username = dhis2-reader
+analytics.database.auth.password = ${DAP_READER_PASSWORD}
+
+# Timeouts and retries.
+analytics.database.connect_timeout_ms = 5000
+analytics.database.read_timeout_ms    = 60000
+analytics.database.retry.max_attempts = 3
+
+# Provenance mode: strict / warn / lenient. "warn" matches DHIS2's current soft-fail
+# semantics for ClickHouse / Doris fallbacks.
+analytics.database.provenance = warn
+
+# Optional: pin the logical partition prefix DAP uses for this DHIS2 instance.
+analytics.database.partition_prefix = p
+
+# Optional: allow DAP to perform cross-site federation. Comma-separated worker URLs.
+# analytics.database.federation.workers = https://dap-site-a:8443,https://dap-site-b:8443

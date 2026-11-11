@@ -1,0 +1,150 @@
+/* Design tokens — design guidance: calm neutral surfaces, restrained accents, readable font
+   sizes, compact tables, clear hierarchy, no gradients, no decorative badges. */
+
+:root {
+  /* Surface — three neutral planes only. */
+  --surface-page:       #fbfbfc;
+  --surface-panel:      #ffffff;
+  --surface-muted:      #f3f4f6;
+  --surface-nav:        #111827;
+  --surface-nav-active: #1f2937;
+
+  /* Borders, hairlines, dividers. */
+  --border-subtle:      #e4e6eb;
+  --border-strong:      #cfd3da;
+
+  /* Text. */
+  --text-primary:       #111827;
+  --text-secondary:     #4b5563;
+  --text-muted:         #6b7280;
+  --text-inverse:       #f9fafb;
+  --text-link:          #1d4ed8;
+
+  /* State pills — meaning first, colour is a hint, not a decoration. */
+  --state-ok-fg:        #065f46;
+  --state-ok-bg:        #d1fae5;
+  --state-warn-fg:      #92400e;
+  --state-warn-bg:      #fef3c7;
+  --state-err-fg:       #991b1b;
+  --state-err-bg:       #fee2e2;
+  --state-info-fg:      #1e3a8a;
+  --state-info-bg:      #dbeafe;
+  --state-neutral-fg:   #374151;
+  --state-neutral-bg:   #e5e7eb;
+
+  /* Focus ring (keyboard-first). */
+  --focus-ring:         0 0 0 2px #2563eb44;
+
+  /* Typography. */
+  --font-sans:          "Inter", "SF Pro Text", system-ui, -apple-system, Segoe UI,
+                        Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:          "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+                        Menlo, Consolas, monospace;
+
+  --fs-11: 0.6875rem;
+  --fs-12: 0.75rem;
+  --fs-13: 0.8125rem;
+  --fs-14: 0.875rem;
+  --fs-16: 1rem;
+  --fs-18: 1.125rem;
+  --fs-22: 1.375rem;
+  --fs-28: 1.75rem;
+
+  --lh-tight: 1.25;
+  --lh-normal: 1.5;
+
+  /* Spacing (4px base). */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* Radii. */
+  --r-2: 2px;
+  --r-4: 4px;
+  --r-6: 6px;
+  --r-8: 8px;
+
+  /* Elevation (one level only — avoid shadows that read as decorative). */
+  --shadow-1: 0 1px 2px rgba(17, 24, 39, 0.04),
+              0 1px 1px rgba(17, 24, 39, 0.03);
+
+  /* Layout. */
+  --nav-width: 220px;
+  --app-max: 1400px;
+  --content-pad: var(--sp-6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-page:       #0b0d12;
+    --surface-panel:      #11141b;
+    --surface-muted:      #171b24;
+    --surface-nav:        #080a0f;
+    --surface-nav-active: #1a1f2b;
+    --border-subtle:      #232735;
+    --border-strong:      #323849;
+    --text-primary:       #e5e7eb;
+    --text-secondary:     #9ca3af;
+    --text-muted:         #6b7280;
+    --text-inverse:       #0b0d12;
+    --text-link:          #93c5fd;
+    --state-ok-fg:        #a7f3d0;
+    --state-ok-bg:        #053228;
+    --state-warn-fg:      #fde68a;
+    --state-warn-bg:      #3d2e05;
+    --state-err-fg:       #fecaca;
+    --state-err-bg:       #3a0a0a;
+    --state-info-fg:      #bfdbfe;
+    --state-info-bg:      #0b1e3d;
+    --state-neutral-fg:   #d1d5db;
+    --state-neutral-bg:   #222733;
+    --shadow-1: none;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-14);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: var(--text-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre, .mono { font-family: var(--font-mono); font-size: var(--fs-12); }
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-4);
+}
+
+/* Reset common elements to a calm baseline. */
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin: 0;
+}
+h1 { font-size: var(--fs-22); line-height: var(--lh-tight); }
+h2 { font-size: var(--fs-18); line-height: var(--lh-tight); }
+h3 { font-size: var(--fs-16); line-height: var(--lh-tight); }
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
