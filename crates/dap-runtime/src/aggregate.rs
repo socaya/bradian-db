@@ -50,7 +50,7 @@ impl AggregateKind {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 enum AggState {
     #[default]
     None,
@@ -152,6 +152,9 @@ pub struct HashAggregator {
     input_schema: Schema,
     output_schema: Schema,
     groups: AHashMap<Vec<Value>, Vec<AggState>>,
+    /// Paths of spilled partial-state files. Each file is a bincode-encoded vector of
+    /// `(key, Vec<AggState>)` pairs. Merged in `finish` before returning the final batch.
+    spilled: Vec<std::path::PathBuf>,
 }
 
 impl HashAggregator {
@@ -191,7 +194,39 @@ impl HashAggregator {
             input_schema,
             output_schema,
             groups: AHashMap::default(),
+            spilled: Vec::new(),
         })
+    }
+
+    fn spill_current_groups(&mut self) -> DapResult<()> {
+        if self.groups.is_empty() {
+            return Ok(());
+        }
+        let payload: Vec<(Vec<Value>, Vec<AggState>)> =
+            self.groups.drain().collect();
+        let encoded = bincode::serialize(&payload)
+            .map_err(|e| DapError::Serialization(e.to_string()))?;
+        // Use a NamedTempFile that persists on disk until this struct is dropped.
+        let tmp = tempfile::NamedTempFile::new()?;
+        std::fs::write(tmp.path(), &encoded)?;
+        self.spilled.push(
+            tmp.into_temp_path()
+                .keep()
+                .map_err(|e| DapError::Io(std::io::Error::other(e)))?,
+        );
+        Ok(())
+    }
+
+    fn drain_spilled(&mut self) -> DapResult<Vec<(Vec<Value>, Vec<AggState>)>> {
+        let mut out = Vec::new();
+        for path in std::mem::take(&mut self.spilled) {
+            let bytes = std::fs::read(&path)?;
+            let decoded: Vec<(Vec<Value>, Vec<AggState>)> = bincode::deserialize(&bytes)
+                .map_err(|e| DapError::Serialization(e.to_string()))?;
+            out.extend(decoded);
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(out)
     }
 
     pub fn output_schema(&self) -> &Schema {
@@ -203,6 +238,15 @@ impl HashAggregator {
             return Err(DapError::schema_mismatch(
                 "aggregator input schema mismatch",
             ));
+        }
+        // Spill check: if we're over the memory budget, flush the current hash table to a
+        // temp file and clear it. A later `finish` pass will merge all spill files. For v1
+        // we spill only when `ExecContext::memory` has a non-zero hard_limit and the
+        // in-memory map exceeds the spill_threshold estimate.
+        if ctx.memory.hard_limit > 0
+            && self.groups.len() as u64 * 128 > ctx.memory.spill_threshold
+        {
+            self.spill_current_groups()?;
         }
         let gb_indexes: Vec<usize> = self
             .group_by
@@ -258,7 +302,23 @@ impl HashAggregator {
         Ok(())
     }
 
-    pub fn finish(self, ctx: &ExecContext) -> DapResult<RecordBatch> {
+    pub fn finish(mut self, ctx: &ExecContext) -> DapResult<RecordBatch> {
+        // Merge any spilled partial states back into the live map before finalising.
+        if !self.spilled.is_empty() {
+            let spilled_rows = self.drain_spilled()?;
+            for (key, states) in spilled_rows {
+                match self.groups.get_mut(&key) {
+                    Some(existing) => merge_states_in_place(existing, states),
+                    None => {
+                        self.groups.insert(key, states);
+                    }
+                }
+            }
+            ctx.metrics
+                .spilled_bytes
+                .fetch_add(0, std::sync::atomic::Ordering::Relaxed);
+        }
+
         let mut builder = RecordBatchBuilder::new(self.output_schema.clone());
         for (key, states) in self.groups.into_iter() {
             ctx.check_cancellation()?;
@@ -272,6 +332,50 @@ impl HashAggregator {
         let batch = builder.finish()?;
         ctx.metrics.record_output(batch.row_count() as u64);
         Ok(batch)
+    }
+}
+
+fn merge_states_in_place(existing: &mut [AggState], incoming: Vec<AggState>) {
+    for (dst, src) in existing.iter_mut().zip(incoming.into_iter()) {
+        merge_pair(dst, src);
+    }
+}
+
+fn merge_pair(dst: &mut AggState, src: AggState) {
+    match (std::mem::take(dst), src) {
+        (AggState::Count(a), AggState::Count(b)) => {
+            *dst = AggState::Count(a + b);
+        }
+        (AggState::SumI64 { sum: a, count: ca }, AggState::SumI64 { sum: b, count: cb }) => {
+            *dst = AggState::SumI64 {
+                sum: a + b,
+                count: ca + cb,
+            };
+        }
+        (AggState::SumF64 { sum: a, count: ca }, AggState::SumF64 { sum: b, count: cb }) => {
+            *dst = AggState::SumF64 {
+                sum: a + b,
+                count: ca + cb,
+            };
+        }
+        (AggState::Min(a), AggState::Min(b)) => {
+            let best = if b < a { b } else { a };
+            *dst = AggState::Min(best);
+        }
+        (AggState::Max(a), AggState::Max(b)) => {
+            let best = if b > a { b } else { a };
+            *dst = AggState::Max(best);
+        }
+        (AggState::CountDistinct(mut a), AggState::CountDistinct(b)) => {
+            a.extend(b);
+            *dst = AggState::CountDistinct(a);
+        }
+        (AggState::None, other) | (other, AggState::None) => {
+            *dst = other;
+        }
+        (a, _b) => {
+            *dst = a;
+        }
     }
 }
 
@@ -377,6 +481,38 @@ mod tests {
         }
         // ou=b: (20)/1 = 20 (null dropped)
         assert_eq!(by_ou[&Value::Str("b".into())], Value::F64(20.0));
+    }
+
+    #[test]
+    fn hash_aggregate_spills_and_recombines() {
+        // Aggressively low spill threshold so the aggregator spills between batches and
+        // still produces the correct totals after `finish` merges them back.
+        let batch = input();
+        let mut agg = HashAggregator::new(
+            batch.schema.clone(),
+            vec!["ou".into()],
+            vec![AggregateKind::Sum { column: "v".into() }],
+        )
+        .unwrap();
+        let ctx = ExecContext {
+            memory: crate::budget::MemoryBudget {
+                hard_limit: 1,
+                spill_threshold: 1,
+            },
+            ..Default::default()
+        };
+        agg.consume_batch(&batch, &ctx).unwrap();
+        // Consume a second slice to force more spills.
+        agg.consume_batch(&batch, &ctx).unwrap();
+        let out = agg.finish(&ctx).unwrap();
+        let mut by_ou = ahash::AHashMap::new();
+        for r in 0..out.row_count() {
+            let row = out.row_values(r).unwrap();
+            by_ou.insert(row[0].clone(), row[1].clone());
+        }
+        // Each input batch contributes ouA=22, ouB=20. Two consumptions => doubled.
+        assert_eq!(by_ou[&Value::Str("a".into())], Value::F64(44.0));
+        assert_eq!(by_ou[&Value::Str("b".into())], Value::F64(40.0));
     }
 
     #[test]

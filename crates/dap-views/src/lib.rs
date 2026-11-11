@@ -13,11 +13,13 @@
 
 pub mod dag;
 pub mod freshness;
+pub mod incremental;
 pub mod materialize;
 pub mod view;
 
 pub use dag::{DependencyDag, NodeId};
 pub use freshness::{FreshnessStamp, Staleness};
+pub use incremental::{AggCell, AggKind, IncrementalAggregate};
 pub use materialize::{
     materialize_aggregate_indicator, materialize_enrollment_program_indicator,
     materialize_event_program_indicator, PiMaterialization,
