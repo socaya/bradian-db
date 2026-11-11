@@ -5,31 +5,31 @@
                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>org.dap</groupId>
-    <artifactId>dap-dhis2-plugin</artifactId>
+    <groupId>org.hisp.dhis</groupId>
+    <artifactId>dhis-analytics-dap</artifactId>
     <version>0.1.0</version>
     <packaging>jar</packaging>
 
-    <name>DAP DHIS2 Analytics Plugin</name>
+    <name>DHIS2 analytics backend — DAP (reference sources)</name>
     <description>
-        Service-provider implementation of DHIS2's AnalyticsDatabase interface that
-        delegates to a running DAP HTTP engine. Targets DHIS2 2.41 and later (the first
-        DHIS2 release that ships a pluggable analytics-engine SPI). Java 17 minimum —
-        matches DHIS2 2.41's JDK requirement. Configured via dhis.conf — see
-        docs/adr/0005-dhis2-analytics-engine.md and docs/dhis.conf.example at the repo
-        root.
+        Source files DHIS2 upstream rebases into its own tree to add DAP as a first-class
+        analytics backend. Mirrors the model DHIS2 v43 used for Apache Doris — the
+        classes live under org.hisp.dhis.analytics.dap and are compiled by the DHIS2
+        build itself, not deployed as a plugin.
+
+        This standalone Maven build exists so we can run compile + unit tests on the
+        sources in isolation, and so the wire shape (request + response) is covered by
+        our own CI. The real DHIS2 tests land in the DHIS2 PR.
+
+        Compatibility: DHIS2 2.41+ (2.41 introduced the AnalyticsDatabase enum we add
+        the DAP constant to; earlier DHIS2 versions hard-wired PostgreSQL). Java 17
+        minimum.
     </description>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-
-        <!-- DHIS2 compatibility window. 2.41 introduced the pluggable analytics-engine
-             service-provider contract this plugin targets. Later minor releases remain
-             backwards-compatible; bump the max when a DHIS2 release changes the SPI. -->
-        <dhis2.min.version>2.41</dhis2.min.version>
-        <dhis2.max.version>2.43</dhis2.max.version>
 
         <jackson.version>2.17.2</jackson.version>
         <junit.version>5.11.0</junit.version>

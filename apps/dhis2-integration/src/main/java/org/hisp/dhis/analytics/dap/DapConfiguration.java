@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.dap.dhis2;
+package org.hisp.dhis.analytics.dap;
 
 import java.net.URI;
 import java.time.Duration;
@@ -7,14 +7,16 @@ import java.util.Objects;
 import java.util.Properties;
 
 /**
- * Parses the {@code analytics.database.*} subset of DHIS2's {@code dhis.conf} into a
- * typed configuration object. Fails fast on missing / malformed values so operators see
- * a clear diagnostic at startup rather than during the first analytics request.
+ * Typed read of the {@code analytics.database.*} properties DHIS2's
+ * {@code DhisConfigurationProvider} resolves from {@code dhis.conf}.
+ *
+ * <p>Field-for-field mirror of the {@code DorisConfiguration} class DHIS2 ships in v43;
+ * every operator-facing property has a direct parallel so moving a deployment from
+ * Doris to DAP is a one-line change (and back).
  */
-public final class Dhis2PluginConfig {
+public final class DapConfiguration {
 
     public enum AuthMode { BASIC, BEARER, NONE }
-
     public enum ProvenanceMode { STRICT, WARN, LENIENT }
 
     private final URI baseUrl;
@@ -25,13 +27,15 @@ public final class Dhis2PluginConfig {
     private final Duration connectTimeout;
     private final Duration readTimeout;
     private final int retryMaxAttempts;
+    private final int ingestBatchRows;
+    private final int ingestMaxConcurrency;
     private final String partitionPrefix;
     private final ProvenanceMode provenance;
 
-    public Dhis2PluginConfig(URI baseUrl, AuthMode authMode, String username, String password,
-                             String bearerToken, Duration connectTimeout, Duration readTimeout,
-                             int retryMaxAttempts, String partitionPrefix,
-                             ProvenanceMode provenance) {
+    public DapConfiguration(URI baseUrl, AuthMode authMode, String username, String password,
+                            String bearerToken, Duration connectTimeout, Duration readTimeout,
+                            int retryMaxAttempts, int ingestBatchRows, int ingestMaxConcurrency,
+                            String partitionPrefix, ProvenanceMode provenance) {
         this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
         this.authMode = Objects.requireNonNull(authMode, "authMode");
         this.username = username;
@@ -40,6 +44,8 @@ public final class Dhis2PluginConfig {
         this.connectTimeout = Objects.requireNonNull(connectTimeout, "connectTimeout");
         this.readTimeout = Objects.requireNonNull(readTimeout, "readTimeout");
         this.retryMaxAttempts = retryMaxAttempts;
+        this.ingestBatchRows = ingestBatchRows;
+        this.ingestMaxConcurrency = ingestMaxConcurrency;
         this.partitionPrefix = partitionPrefix == null ? "p" : partitionPrefix;
         this.provenance = Objects.requireNonNull(provenance, "provenance");
     }
@@ -52,10 +58,12 @@ public final class Dhis2PluginConfig {
     public Duration connectTimeout() { return connectTimeout; }
     public Duration readTimeout() { return readTimeout; }
     public int retryMaxAttempts() { return retryMaxAttempts; }
+    public int ingestBatchRows() { return ingestBatchRows; }
+    public int ingestMaxConcurrency() { return ingestMaxConcurrency; }
     public String partitionPrefix() { return partitionPrefix; }
     public ProvenanceMode provenance() { return provenance; }
 
-    public static Dhis2PluginConfig fromProperties(Properties p) {
+    public static DapConfiguration fromProperties(Properties p) {
         String baseUrl = requireProp(p, "analytics.database.base_url");
         AuthMode auth;
         try {
@@ -80,8 +88,10 @@ public final class Dhis2PluginConfig {
                 "analytics.database.connect_timeout_ms", 5_000));
         Duration readTimeout = Duration.ofMillis(parseLong(p,
                 "analytics.database.read_timeout_ms", 60_000));
-        int retry = Integer.parseInt(p.getProperty(
-                "analytics.database.retry.max_attempts", "3"));
+        int retry = (int) parseLong(p, "analytics.database.retry.max_attempts", 3);
+        int ingestBatch = (int) parseLong(p, "analytics.database.ingest.batch_rows", 10_000);
+        int ingestConcurrency = (int) parseLong(p,
+                "analytics.database.ingest.max_concurrency", 4);
         String prefix = p.getProperty("analytics.database.partition_prefix", "p");
         ProvenanceMode provenance;
         try {
@@ -91,9 +101,10 @@ public final class Dhis2PluginConfig {
             throw new IllegalArgumentException(
                     "analytics.database.provenance must be strict / warn / lenient", e);
         }
-        return new Dhis2PluginConfig(
+        return new DapConfiguration(
                 URI.create(baseUrl), auth, username, password, bearer,
-                connectTimeout, readTimeout, retry, prefix, provenance);
+                connectTimeout, readTimeout, retry, ingestBatch, ingestConcurrency,
+                prefix, provenance);
     }
 
     private static String requireProp(Properties p, String key) {

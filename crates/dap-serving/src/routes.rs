@@ -34,6 +34,7 @@ pub fn api_router(state: SharedState) -> Router {
         .route("/api/analytics/v1/query", post(run_query))
         .route("/api/analytics/v1/query/explain", post(explain_query))
         .route("/api/analytics/v1/drilldown", post(drilldown))
+        .route("/api/analytics/v1/ingest", post(ingest_batch))
         .route("/api/analytics/v1/data-products", get(list_data_products).post(register_data_product))
         .route("/api/analytics/v1/jobs", get(list_jobs).post(submit_async_query))
         .route("/api/analytics/v1/jobs/:id", get(get_job))
@@ -214,6 +215,50 @@ async fn register_data_product(
         .write()
         .insert(product.id.clone(), product.clone());
     Ok(Json(product))
+}
+
+// ── Bulk ingest (used by the DHIS2 analytics-table rebuild) ─────────────────
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct IngestBatchRequest {
+    pub dataset: String,
+    pub partition: String,
+    pub changes: Vec<dap_ingest::Change>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct IngestBatchResponse {
+    pub applied: u64,
+    pub deletes: u64,
+    pub dropped_stale: u64,
+    pub quarantined: u64,
+}
+
+async fn ingest_batch(
+    State(state): State<SharedState>,
+    Json(body): Json<IngestBatchRequest>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    // Reach for the matching partition. Operators point DHIS2 at a dataset+partition
+    // pair they created through the admin CLI; the ingest endpoint refuses unknown
+    // partitions rather than silently creating one (STO-005 version fences live on the
+    // partition, not on the ingest envelope).
+    let partition = state.engine.get_partition(&body.dataset, &body.partition)?;
+    let pk = partition
+        .schema()
+        .columns
+        .iter()
+        .take_while(|c| c.name != "value")
+        .map(|c| c.name.clone())
+        .collect::<Vec<_>>();
+    let quarantine = dap_ingest::QuarantineLog::open(partition.dir())?;
+    let ingester = dap_ingest::Ingester::new(partition.clone(), quarantine, pk);
+    let report = ingester.apply_batch(&body.changes)?;
+    Ok(Json(IngestBatchResponse {
+        applied: report.accepted,
+        deletes: report.deletes,
+        dropped_stale: report.dropped_stale,
+        quarantined: report.quarantined,
+    }))
 }
 
 // ── Async jobs (API-003) ────────────────────────────────────────────────────

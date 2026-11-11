@@ -1,163 +1,148 @@
-# ADR 0005 — DAP as a DHIS2 analytics engine
+# ADR 0005 — DAP as a native DHIS2 analytics backend (Doris v43 model)
 
-**Status:** Accepted · 2026-11-11
+**Status:** Accepted · revised 2026-11-11
 **Spec sections:** §1, §8, §10 · requirements DHI-001..004, API-001
+**Supersedes:** the earlier revision of this ADR that proposed a service-loader plugin.
 
 ## Context
 
-DHIS2 can be configured to delegate its analytics workload to an external engine. Today
-the two external engines in production use are Apache Doris and ClickHouse, wired via
-`dhis.conf` properties like:
+DHIS2 lets operators swap the analytics backend without changing application code. Up
+to v42 the only choice was the in-process PostgreSQL build; v43 added Apache Doris as a
+**first-class, upstream-native** backend. Operators select it with a single property:
 
 ```properties
 analytics.database = doris
-analytics.database.jdbc.url      = jdbc:mysql://...
-analytics.database.jdbc.username = ...
 ```
 
-DHIS2 then invokes the engine for its analytics-table build, indicator evaluation and
-reporting routes. The in-process Postgres path remains the default.
+The Doris implementation is **not a plugin**. DHIS2 v43 shipped the Doris classes
+directly in the DHIS2 source tree (`org.hisp.dhis.analytics.doris.*`): a `DorisAnalytics
+Manager`, a `DorisAnalyticsTableManager`, an entry in the `AnalyticsDatabase` enum, and
+the matching wiring in `AnalyticsManagerFactory` / `AnalyticsTableManagerFactory` /
+`DhisConfigurationProvider`. Operators do not install a JAR; the DHIS2 release itself
+contains the implementation.
 
-DAP is a general-purpose analytical platform (ADR 0004) that already speaks DHIS2
-semantics via `dap-dhis2` and the live metadata adapter (`dap-catalog::dhis2_http`). We
-want the same `dhis.conf` ergonomics so a DHIS2 operator can swap Doris / ClickHouse for
-DAP without changing the DHIS2 server code they ship. This ADR pins the contract and the
-on-disk / on-wire shape.
+## Decision
 
-## Scope — DHIS2 2.41 and later
+Mirror the v43 Doris pattern. DAP becomes a native DHIS2 analytics backend by landing
+source files inside DHIS2 upstream — not a plugin, not a JAR to copy, not a service-
+loader descriptor.
 
-DHIS2 2.41 is the first release that ships the pluggable analytics-engine SPI this
-contract rides on (`org.hisp.dhis.analytics.AnalyticsDatabase`). Earlier DHIS2 versions
-hard-wire the in-process PostgreSQL engine and cannot be re-pointed at an external
-backend without a DHIS2 source patch. The adapter is therefore scoped to:
+Repo layout:
 
-- **DHIS2 2.41** — supported, pinned via `apps/dhis2-plugin/pom.xml`.
-- **DHIS2 2.42 / 2.43** — supported; the SPI is stable across minor releases and the
-  plug-in ships a compatibility test matrix at
-  `apps/dhis2-plugin/src/test/java/org/dap/dhis2/*`.
-- **DHIS2 2.44+** — accepted as long as the SPI contract does not change. Bump
-  `${dhis2.max.version}` in the pom and re-run the compat matrix.
-- **DHIS2 2.40 and earlier** — not supported. Operators on 2.40 or lower either stay on
-  the in-process PostgreSQL engine or upgrade DHIS2.
+```
+apps/dhis2-integration/              <- the sources that land in DHIS2 upstream
+  src/main/java/
+    org/hisp/dhis/analytics/
+      AnalyticsDatabase.java         # local copy of DHIS2's enum, with DAP added
+      AnalyticsManager.java          # local copy of DHIS2's interface
+      AnalyticsTableManager.java     # local copy of DHIS2's interface
+    org/hisp/dhis/analytics/dap/     # new package DHIS2 adds under its tree
+      DapAnalyticsBackend.java       # single entry-point the factories dispatch to
+      DapConfiguration.java          # typed read of analytics.database.* properties
+      DapHttpClient.java             # java.net.http.HttpClient wrapper
+      DapAnalyticsManager.java       # implements AnalyticsManager
+      DapAnalyticsTableManager.java  # implements AnalyticsTableManager
+      DapRequestEnvelope.java        # wire shape, mirrors the Rust struct
+      DapResponseEnvelope.java       # wire shape, mirrors the Rust struct
+      DapIngestBatch.java            # batch of canonical changes, posted during rebuild
+```
 
-Java **17** is the minimum JDK, matching DHIS2 2.41's own JDK requirement.
+The local stand-ins for the three DHIS2 interfaces (`AnalyticsDatabase`,
+`AnalyticsManager`, `AnalyticsTableManager`) exist only so this directory is buildable
+outside a DHIS2 checkout. When the PR lands, the DHIS2 build swaps them for the
+authoritative copies.
 
-## Decision — HTTP-first, JDBC-optional
+## PR plan
 
-DHIS2's analytics-engine interface is JDBC-shaped today. DAP exposes an HTTP contract
-(see §10 of the spec) because it is simpler, cheaper to run on edge sites, and avoids a
-proprietary wire protocol. We bridge the two with:
+1. Open a DHIS2 issue requesting a new `AnalyticsDatabase.DAP` entry. Reference this
+   ADR and the integration directory.
+2. Rebase the sources onto a DHIS2 fork under:
+   - `dhis-2/dhis-api/src/main/java/org/hisp/dhis/analytics/AnalyticsDatabase.java`
+     (add the enum constant)
+   - `dhis-2/dhis-services/dhis-service-analytics/src/main/java/org/hisp/dhis/analytics/dap/`
+     (every other file)
+3. Add DAP to DHIS2's existing factories so `analytics.database = dap` resolves to
+   `DapAnalyticsBackend`. Mirror the Doris wiring in `AnalyticsManagerFactory` and
+   `AnalyticsTableManagerFactory`.
+4. Add a DHIS2 parity test that runs reference queries against DAP and diffs the
+   result against DHIS2's PostgreSQL backend.
+5. Submit the PR with ADR 0005 attached.
 
-1. **Rust-side HTTP contract** — the `dap-serving::dhis2_compat` module. Routes mirror
-   the DHIS2 public analytics surface:
-   - `POST /api/analytics.json` — aggregate analytics (DONE, v1)
-   - `POST /api/analytics/events/query.json` — event analytics (adapter scheduled)
-   - `POST /api/analytics/enrollments/query.json` — tracker analytics (adapter scheduled)
-   - `POST /api/analytics/rawData.json` — deliberately rejected; DHIS2 operators should
-     use `/api/analytics/v1/drilldown` with an explicit limit.
-2. **DHIS2-side plug-in** — a thin Java module (ships separately under
-   `apps/dhis2-plugin/` once DHIS2 version compatibility is pinned) that implements
-   DHIS2's `AnalyticsDatabase` service provider. It builds query envelopes from DHIS2's
-   internal AST, posts them to the DAP base URL and lifts the response.
+Until the PR lands, operators building their own DHIS2 image can apply these files as
+a source patch — but there is no runtime plugin to install.
 
-The HTTP contract is sufficient for every DHIS2 analytics user journey (visualiser,
-pivot tables, event reports, enrollment line listings) because DHIS2 never pushes raw
-SQL to the engine — it submits a structured request object.
+## Compatibility
+
+- **DHIS2 2.41+**. 2.41 introduced the `AnalyticsDatabase` abstraction; DAP targets 2.41
+  as the minimum. Earlier DHIS2 versions hard-wire PostgreSQL and cannot accommodate the
+  enum extension.
+- **Tested matrix:** 2.41, 2.42, 2.43 (where Doris is production-pinned). 2.44+ accepted
+  pending SPI check.
+- **Java 17** minimum, matching DHIS2 2.41's JDK requirement.
+
+## Runtime shape
+
+### Query path
+
+DHIS2 call → `AnalyticsManagerFactory.get("dap")` → `DapAnalyticsManager.aggregate(...)`
+→ `DapHttpClient.postAnalytics("/api/analytics.json", envelope)` → DAP serves the
+response from `.derc` segments + delta → JSON envelope back to DHIS2 → DHIS2 lifts rows
+into its `Grid` → user sees the result.
+
+### Rebuild path
+
+Nightly at `analytics.rebuild.cron` →
+`AnalyticsTableManagerFactory.get("dap").prepareRebuild()` → DHIS2 streams rows out of
+the operational PostgreSQL in batches of `analytics.database.ingest.batch_rows` →
+`ingestBatch(...)` POSTs each batch to `/api/analytics/v1/ingest` → DAP applies via the
+same canonical-change path as any other source (`dap-ingest`), with version fences +
+quarantine → `finaliseRebuild()` → the engine flushes + compacts on its own schedule.
+
+## Guarantees DAP keeps for DHIS2
+
+Unchanged from the previous revision of this ADR:
+
+1. Correct aggregation-type roll-ups (DHI-001).
+2. Full DHIS2 period semantics (daily / weekly variants / bi-weekly / monthly /
+   bi-monthly / quarterly / six-monthly / six-monthly-April / yearly / all four
+   financial-year variants).
+3. Reporting rates (`#{dsUid.REPORTING_RATE}` and friends).
+4. Fail-closed on unsupported constructs.
+5. Provenance on every response.
 
 ## `dhis.conf` properties
 
 ```properties
-# DHIS2 version 2.41 onwards.
 analytics.database               = dap
-
-# DAP base URL. Must speak HTTPS in production. Trailing slash optional.
 analytics.database.base_url      = https://dap.internal:8443
-
-# Authentication: basic | bearer | none.
 analytics.database.auth          = basic
-analytics.database.auth.username = dhis2-reader
-analytics.database.auth.password = ${DAP_READER_PASSWORD}
+analytics.database.auth.username = dhis2
+analytics.database.auth.password = ${DAP_PASSWORD}
 
-# Optional: override timeouts (ms). Defaults: connect=5000, read=60000.
+# Rebuild knobs (analytics-table build path).
+analytics.database.ingest.batch_rows       = 10000
+analytics.database.ingest.max_concurrency  = 4
+
+# Timeouts.
 analytics.database.connect_timeout_ms = 5000
 analytics.database.read_timeout_ms    = 60000
+analytics.database.retry.max_attempts = 3
 
-# Optional: pin a partition id prefix. DAP partitions are logical, so the plug-in
-# derives `{dataset}/{partition_prefix}-{yearly | monthly | all}` by default.
-analytics.database.partition_prefix = p
-
-# Optional: provenance mode surfaced in DHIS2 responses. One of:
-#   strict  — fail the request if DAP returns `is_exact=false`.
-#   warn    — surface a warning header but return the rows.
-#   lenient — ignore provenance stamps (not recommended).
+# Provenance mode: strict / warn / lenient. Mirrors how DHIS2 v43 treats Doris
+# availability — "warn" is the production-default.
 analytics.database.provenance = warn
+
+# Optional: pin the logical partition prefix DAP uses for this DHIS2 instance.
+analytics.database.partition_prefix = p
 ```
 
-## Response envelope
+See `docs/dhis.conf.example` for a full reference.
 
-DAP's `dhis2_compat` layer emits the DHIS2 analytics envelope so the DHIS2 server can
-parse it without special-casing:
+## Not implemented (deliberately)
 
-```json
-{
-  "headers": [
-    { "name": "ou", "column": "ou", "valueType": "TEXT", "type": "java.lang.String",
-      "hidden": false, "meta": false },
-    { "name": "period", "column": "period", "valueType": "TEXT", "type": "java.lang.String",
-      "hidden": false, "meta": false },
-    { "name": "sum_value", "column": "sum_value", "valueType": "NUMBER", "type": "java.lang.String",
-      "hidden": false, "meta": false }
-  ],
-  "rows": [
-    ["ouAAAAAAAAA", "202601", 42.0]
-  ],
-  "metaData": { "items": {}, "dimensions": {} },
-  "width": 3,
-  "height": 1,
-  "rowContext": {},
-  "provenance": {
-    "data_revision": 3,
-    "metadata_revision": "…",
-    "watermark_ms": 1700000000000,
-    "is_exact": true,
-    "engine": "dap"
-  }
-}
-```
-
-The DHIS2 shape is preserved; the extra `provenance` block is DAP-specific and lets
-DHIS2 clients decide whether to surface a "stale" or "partial" badge in the UI.
-
-## Guarantees DAP keeps for DHIS2
-
-1. **Correct aggregation-type roll-ups** (DHI-001). Every value the engine emits applied
-   the right time + OU reduction for that data element's `aggregationType` (`aggregate`
-   module).
-2. **Period semantics** (DHIS2 periods). Weekly variants, bi-monthly, six-monthly,
-   financial years all resolve the same way the DHIS2 reference implementation resolves
-   them (`dap_core::period`).
-3. **Reporting rates** (`#{dsUid.REPORTING_RATE}` and friends). Resolved through the
-   `completion` fact store; zero expected ⇒ `NULL`.
-4. **Fail-closed on unsupported constructs**. Unknown `d2:` functions, nested CUSTOM
-   aggregators, or references to data elements the catalog does not know reject with a
-   precise diagnostic. Never a silent approximation.
-5. **Provenance on every response**. Data revision, metadata revision, watermark, site
-   coverage, exact / approximate flag. DHIS2 operators can audit staleness directly.
-
-## Routes DAP intentionally does not implement
-
-- **`/api/analytics/rawData.json`** — unbounded line listings do not fit DAP's bounded
-  export contract. Use `/api/analytics/v1/drilldown` with an explicit limit.
-- **Arbitrary SQL endpoints** — spec §11 explicitly forbids them. DHIS2 never asks for
-  arbitrary SQL from an external engine so this is not a regression.
-
-## Migration from Doris / ClickHouse
-
-1. Freeze DHIS2's analytics-table build while DAP ingests the existing DataValue table
-   via the DAP SQL-CDC adapter (`dap-sources::sql_cdc`).
-2. Point DHIS2's `dhis.conf` at DAP by setting `analytics.database = dap`.
-3. Compare parity for N days with DAP in warn mode and DHIS2's existing engine in strict
-   mode. The `dhis2-parity` matrix in the UI surfaces diffs per analytical family.
-4. Flip the primary engine when parity has held.
-
-Rollback is a one-line change in `dhis.conf`.
+- **JDBC/ODBC wire protocol.** DHIS2 uses it for Doris because Doris speaks MySQL
+  natively; DAP is HTTP-first. The sources in `apps/dhis2-integration/` carry the full
+  HTTP translation so DHIS2 does not need JDBC access to DAP.
+- **Arbitrary SQL endpoints.** Spec §11 forbids them.
+- **`/api/analytics/rawData.json`.** Unbounded line listings do not fit DAP's bounded
+  export contract. Use the drilldown endpoint with an explicit limit.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.dap.dhis2;
+package org.hisp.dhis.analytics.dap;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -7,10 +7,11 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Request envelope posted to {@code /api/analytics.json}. Mirrors the Rust
- * {@code Dhis2AnalyticsRequest} struct in {@code dap-serving::dhis2_compat}.
+ * Serialisable request envelope posted to the DAP engine. Mirrors the Rust
+ * {@code dap_serving::dhis2_compat::Dhis2AnalyticsRequest} struct.
  */
-public final class DapAnalyticsRequest {
+public final class DapRequestEnvelope
+        implements org.hisp.dhis.analytics.AnalyticsManager.DapRequest {
 
     public final String dataset;
     public final String program;
@@ -24,7 +25,7 @@ public final class DapAnalyticsRequest {
     public final List<Filter> filter;
     public final Integer limit;
 
-    private DapAnalyticsRequest(Builder b) {
+    private DapRequestEnvelope(Builder b) {
         this.dataset = b.dataset;
         this.program = b.program;
         this.indicator = b.indicator;
@@ -38,9 +39,7 @@ public final class DapAnalyticsRequest {
         this.limit = b.limit;
     }
 
-    public static Builder newBuilder() {
-        return new Builder();
-    }
+    public static Builder newBuilder() { return new Builder(); }
 
     public static final class Filter {
         public final String column;
@@ -79,11 +78,11 @@ public final class DapAnalyticsRequest {
         public Builder filter(Filter f)    { this.filter.add(f); return this; }
         public Builder limit(Integer v)    { this.limit = v; return this; }
 
-        public DapAnalyticsRequest build() {
+        public DapRequestEnvelope build() {
             if (dataset == null && program == null) {
                 throw new IllegalStateException("dataset or program must be set");
             }
-            return new DapAnalyticsRequest(this);
+            return new DapRequestEnvelope(this);
         }
     }
 }

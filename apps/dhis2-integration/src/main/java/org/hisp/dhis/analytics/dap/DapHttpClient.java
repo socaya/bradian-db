@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.dap.dhis2;
+package org.hisp.dhis.analytics.dap;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,23 +14,23 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 /**
- * Thin HTTP client the plug-in uses to talk to a DAP engine. Synchronous — DHIS2's
- * analytics-service runs on a worker thread pool. One client instance per DHIS2 server;
- * HttpClient is internally thread-safe.
+ * Low-level HTTP client wrapping {@link java.net.http.HttpClient}. Owned by {@link
+ * DapAnalyticsManager} and {@link DapAnalyticsTableManager}; one instance per DHIS2
+ * server.
  */
-public final class DapAnalyticsClient {
+public final class DapHttpClient {
 
-    private final Dhis2PluginConfig config;
+    private final DapConfiguration config;
     private final HttpClient http;
     private final ObjectMapper mapper;
 
-    public DapAnalyticsClient(Dhis2PluginConfig config) {
+    public DapHttpClient(DapConfiguration config) {
         this(config, HttpClient.newBuilder()
                 .connectTimeout(config.connectTimeout())
                 .build());
     }
 
-    DapAnalyticsClient(Dhis2PluginConfig config, HttpClient http) {
+    DapHttpClient(DapConfiguration config, HttpClient http) {
         this.config = config;
         this.http = http;
         this.mapper = new ObjectMapper()
@@ -38,30 +38,26 @@ public final class DapAnalyticsClient {
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
-    public DapAnalyticsResponse aggregateAnalytics(DapAnalyticsRequest request)
+    public DapConfiguration config() { return config; }
+
+    public DapResponseEnvelope postAnalytics(String path, DapRequestEnvelope req)
             throws IOException, InterruptedException {
-        return post("/api/analytics.json", request);
+        return postJson(path, req, DapResponseEnvelope.class);
     }
 
-    public DapAnalyticsResponse eventAnalytics(DapAnalyticsRequest request)
-            throws IOException, InterruptedException {
-        return post("/api/analytics/events/query.json", request);
+    public void postIngest(DapIngestBatch batch) throws IOException, InterruptedException {
+        postJson("/api/analytics/v1/ingest", batch, Void.class);
     }
 
-    public DapAnalyticsResponse enrollmentAnalytics(DapAnalyticsRequest request)
+    private <T> T postJson(String path, Object body, Class<T> type)
             throws IOException, InterruptedException {
-        return post("/api/analytics/enrollments/query.json", request);
-    }
-
-    private DapAnalyticsResponse post(String path, DapAnalyticsRequest request)
-            throws IOException, InterruptedException {
-        byte[] body = mapper.writeValueAsBytes(request);
+        byte[] bytes = mapper.writeValueAsBytes(body);
         URI uri = config.baseUrl().resolve(path);
         HttpRequest.Builder b = HttpRequest.newBuilder(uri)
                 .timeout(config.readTimeout())
                 .header("content-type", "application/json")
                 .header("accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
+                .POST(HttpRequest.BodyPublishers.ofByteArray(bytes));
         applyAuth(b);
 
         IOException last = null;
@@ -71,8 +67,10 @@ public final class DapAnalyticsClient {
                         HttpResponse.BodyHandlers.ofByteArray());
                 int status = resp.statusCode();
                 if (status >= 200 && status < 300) {
-                    DapAnalyticsResponse parsed = mapper.readValue(resp.body(),
-                            DapAnalyticsResponse.class);
+                    if (type == Void.class || resp.body().length == 0) {
+                        return null;
+                    }
+                    T parsed = mapper.readValue(resp.body(), type);
                     enforceProvenance(parsed);
                     return parsed;
                 }
@@ -80,7 +78,6 @@ public final class DapAnalyticsClient {
                         StandardCharsets.UTF_8);
                 if (status >= 500) {
                     last = new IOException(msg);
-                    // Retry 5xx; fall through.
                 } else {
                     throw new IOException(msg);
                 }
@@ -104,16 +101,12 @@ public final class DapAnalyticsClient {
         }
     }
 
-    private void enforceProvenance(DapAnalyticsResponse response) throws IOException {
-        if (response.provenance == null) return;
-        boolean exact = response.provenance.isExact;
-        switch (config.provenance()) {
-            case STRICT -> {
-                if (!exact) {
-                    throw new IOException("DAP response is not exact; strict provenance mode");
-                }
-            }
-            case WARN, LENIENT -> { /* DHIS2 handler decides */ }
+    private <T> void enforceProvenance(T parsed) throws IOException {
+        if (!(parsed instanceof DapResponseEnvelope resp)) return;
+        if (resp.provenance == null) return;
+        if (config.provenance() == DapConfiguration.ProvenanceMode.STRICT
+                && !resp.provenance.isExact) {
+            throw new IOException("DAP response is not exact; strict provenance mode");
         }
     }
 }
