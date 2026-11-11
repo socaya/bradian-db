@@ -52,6 +52,11 @@ struct Inner {
     next_lsn: u64,
     next_data_revision: u64,
     next_segment_id: u64,
+    /// Segment files that compaction retired while a live snapshot still referenced
+    /// their generation. Deleted lazily at the start of the next flush / compaction
+    /// once the generation is no longer referenced. Keyed by the generation that
+    /// retired them so we can re-check safety on each sweep.
+    pending_deletions: Vec<(u64, PathBuf)>,
 }
 
 impl Partition {
@@ -135,6 +140,7 @@ impl Partition {
                 next_lsn,
                 next_data_revision,
                 next_segment_id,
+                pending_deletions: Vec::new(),
             }),
             wal: Mutex::new(wal),
             snapshot_refs: Arc::new(Mutex::new(SnapshotRefs::default())),
@@ -216,6 +222,7 @@ impl Partition {
     pub fn flush(&self) -> DapResult<Option<ManifestSegment>> {
         let mut wal = self.wal.lock();
         let mut inner = self.inner.write();
+        sweep_pending_locked(&mut inner, &self.snapshot_refs);
         self.flush_locked(&mut inner, &mut wal)
     }
 
@@ -226,6 +233,7 @@ impl Partition {
     pub fn compact_all_segments(&self) -> DapResult<Option<ManifestSegment>> {
         let mut wal = self.wal.lock();
         let mut inner = self.inner.write();
+        sweep_pending_locked(&mut inner, &self.snapshot_refs);
         if inner.manifest.visible_segments.len() < 2 {
             return Ok(None);
         }
@@ -325,18 +333,38 @@ impl Partition {
         wal.truncate()?;
         inner.delta_version += 1;
 
-        // Remove the retired segment files only if no snapshot still references the prior
-        // generation. The snapshot-ref counter only tracks the current + previous runs;
-        // for safety we delete only when the counter is empty.
-        if !self.snapshot_refs.lock().is_referenced(generation - 1) {
-            for p in old_paths {
-                if p != seg_meta.path {
-                    let _ = std::fs::remove_file(p);
-                }
+        // Defer segment-file deletion while any live snapshot still references the prior
+        // generation. Files that cannot be removed now go on the pending list; the next
+        // flush / compaction sweeps them once their generation is no longer referenced.
+        let prior_gen = generation - 1;
+        let refs = self.snapshot_refs.lock();
+        for p in old_paths {
+            if p == seg_meta.path {
+                continue;
+            }
+            if refs.is_referenced(prior_gen) {
+                inner.pending_deletions.push((prior_gen, p));
+            } else {
+                let _ = std::fs::remove_file(p);
             }
         }
+        drop(refs);
 
         Ok(Some(seg_meta))
+    }
+
+    /// Delete any retired segment file whose referencing generation is no longer live.
+    /// Returns the number of files reaped. Idempotent and side-effect-only on the
+    /// filesystem; the manifest is not touched.
+    pub fn cleanup_pending_deletions(&self) -> usize {
+        let mut inner = self.inner.write();
+        sweep_pending_locked(&mut inner, &self.snapshot_refs)
+    }
+
+    /// Number of segment files currently queued for deferred deletion. Used by tests and
+    /// operator diagnostics; always 0 outside of compaction run under a live snapshot.
+    pub fn pending_deletion_count(&self) -> usize {
+        self.inner.read().pending_deletions.len()
     }
 
     /// Read the live state for a key. Checks the delta first, then any visible segment where
@@ -546,4 +574,27 @@ impl Partition {
 
 fn partition_dir(root: &Path, dataset: &str, partition: &str) -> PathBuf {
     root.join("datasets").join(dataset).join("partitions").join(partition)
+}
+
+/// Remove retired segment files from `inner.pending_deletions` whose referencing
+/// generation is no longer held by any live snapshot. The partition lock on `inner` is
+/// already held by the caller; filesystem `remove_file` happens outside the snapshot-ref
+/// lock. Returns the number of files reaped.
+fn sweep_pending_locked(inner: &mut Inner, refs: &SnapshotRef) -> usize {
+    if inner.pending_deletions.is_empty() {
+        return 0;
+    }
+    let (ready, still_held): (Vec<_>, Vec<_>) = {
+        let r = refs.lock();
+        inner
+            .pending_deletions
+            .drain(..)
+            .partition(|(gen, _)| !r.is_referenced(*gen))
+    };
+    inner.pending_deletions = still_held;
+    let count = ready.len();
+    for (_, path) in ready {
+        let _ = std::fs::remove_file(path);
+    }
+    count
 }

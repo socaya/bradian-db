@@ -230,9 +230,6 @@ fn compact_all_segments_merges_and_deduplicates() {
 
 #[test]
 fn snapshot_prevents_compaction_from_breaking_reader() {
-    // v1: compaction is only a delta flush; the previous generation's segments stay on disk
-    // regardless of snapshot references (nothing deletes them yet). We assert the snapshot
-    // generation stamp at the moment of capture.
     let dir = tempdir().unwrap();
     let p = open_part(dir.path().to_path_buf());
 
@@ -254,4 +251,120 @@ fn snapshot_prevents_compaction_from_breaking_reader() {
     let _seg = p.flush().unwrap().unwrap();
     let s1 = p.snapshot();
     assert_eq!(s1.generation(), 1);
+}
+
+#[test]
+fn compaction_defers_segment_deletion_while_snapshot_is_live() {
+    use std::path::PathBuf;
+
+    let dir = tempdir().unwrap();
+    let p = open_part(dir.path().to_path_buf());
+
+    // Two separate flushes → two segments.
+    p.upsert_row(
+        vec![
+            Value::Str("ouAAAAAAAAA".into()),
+            Value::Str("202601".into()),
+            Value::Str("deAAAAAAAAA".into()),
+            Value::F64(1.0),
+        ],
+        1,
+    )
+    .unwrap();
+    p.flush().unwrap();
+    p.upsert_row(
+        vec![
+            Value::Str("ouBBBBBBBBB".into()),
+            Value::Str("202601".into()),
+            Value::Str("deAAAAAAAAA".into()),
+            Value::F64(2.0),
+        ],
+        1,
+    )
+    .unwrap();
+    p.flush().unwrap();
+
+    let pre_paths: Vec<PathBuf> =
+        p.visible_segments().iter().map(|s| s.path.clone()).collect();
+    assert_eq!(pre_paths.len(), 2);
+
+    // Hold a snapshot pinned to the pre-compaction generation.
+    let snap = p.snapshot();
+    let pinned_gen = snap.generation();
+
+    p.compact_all_segments().unwrap();
+
+    // Both pre-compaction segment files must still be on disk — the snapshot still
+    // references them. The new merged segment is a third file, separate from the two.
+    let compacted = p.visible_segments();
+    assert_eq!(compacted.len(), 1);
+    for p0 in &pre_paths {
+        assert!(
+            p0.exists(),
+            "retired segment {p0:?} must stay on disk while snapshot gen {pinned_gen} is live"
+        );
+    }
+    assert_eq!(p.pending_deletion_count(), 2);
+
+    // Drop the snapshot and request an explicit cleanup. Both retired files are reaped.
+    drop(snap);
+    let reaped = p.cleanup_pending_deletions();
+    assert_eq!(reaped, 2);
+    assert_eq!(p.pending_deletion_count(), 0);
+    for p0 in &pre_paths {
+        assert!(
+            !p0.exists(),
+            "retired segment {p0:?} must be deleted once no snapshot references it"
+        );
+    }
+    // The merged segment is untouched.
+    assert!(compacted[0].path.exists());
+}
+
+#[test]
+fn next_flush_sweeps_pending_deletions() {
+    use std::path::PathBuf;
+
+    let dir = tempdir().unwrap();
+    let p = open_part(dir.path().to_path_buf());
+
+    for (i, ou) in ["ouAAAAAAAAA", "ouBBBBBBBBB"].iter().enumerate() {
+        p.upsert_row(
+            vec![
+                Value::Str((*ou).into()),
+                Value::Str("202601".into()),
+                Value::Str("deAAAAAAAAA".into()),
+                Value::F64(i as f64),
+            ],
+            1,
+        )
+        .unwrap();
+        p.flush().unwrap();
+    }
+
+    let retired: Vec<PathBuf> =
+        p.visible_segments().iter().map(|s| s.path.clone()).collect();
+
+    let snap = p.snapshot();
+    p.compact_all_segments().unwrap();
+    assert_eq!(p.pending_deletion_count(), 2);
+    drop(snap);
+
+    // A subsequent write + flush sweeps pending deletions as a side effect.
+    p.upsert_row(
+        vec![
+            Value::Str("ouCCCCCCCCC".into()),
+            Value::Str("202601".into()),
+            Value::Str("deAAAAAAAAA".into()),
+            Value::F64(42.0),
+        ],
+        1,
+    )
+    .unwrap();
+    p.flush().unwrap();
+
+    assert_eq!(p.pending_deletion_count(), 0);
+    for r in &retired {
+        assert!(!r.exists(), "{r:?} swept by next flush");
+    }
 }

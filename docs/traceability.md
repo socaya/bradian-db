@@ -15,7 +15,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | STO-003 | M | Typed pages, NULL masks, dictionaries, compression | DONE | `dap-storage` | codec roundtrips + dict codec selection test |
 | STO-004 | M | Snapshot-consistent delta/segment reads | DONE | `dap-storage`, `dap-runtime` | `Partition::snapshot_rows` + scan merges delta |
 | STO-005 | M | Stable PK, revision fences, upsert/delete | DONE | `dap-storage` | version-fence + idempotent-replay tests |
-| STO-006 | M | Safe compaction + tombstone GC | PART | `dap-storage` | flush-compaction + snapshot refs (multi-seg merge is DEFER) |
+| STO-006 | M | Safe compaction + tombstone GC | DONE | `dap-storage` | `compact_all_segments` dedupes by PK + atomic manifest flip + WAL checkpoint; retired files deferred via `pending_deletions` when a live snapshot pins the prior generation and swept on the next flush / compact / `cleanup_pending_deletions()` call |
 | STO-007 | M | Partition/segment/page stats + pruning | PART | `dap-storage`, `dap-planner` | zone maps stored; segment-level planner pruning covers Compare/In/IsNull/IsNotNull; multi-page pruning DEFER (v1 writers emit single-page columns) |
 | STO-008 | A | Adaptive indexes + storage tiering | DEFER | `dap-storage` | measured cost/benefit |
 | CAT-001 | M | Versioned DHIS2 semantic catalog | DONE | `dap-catalog` | registry tests + lineage |
