@@ -240,6 +240,58 @@ impl Partition {
         Ok(None)
     }
 
+    /// Materialise the logical state of the partition as a vector of rows, merging visible
+    /// segments with the in-memory delta. Delta upserts supersede segment rows with the same
+    /// primary key; delta tombstones remove segment rows.
+    ///
+    /// Snapshot-consistent: the method reads the manifest + delta under the read lock, then
+    /// opens segment files without the lock held. Compaction cannot delete pages referenced
+    /// here because the caller retains a `Snapshot` handle for the duration of the scan.
+    pub fn snapshot_rows(&self) -> DapResult<Vec<Row>> {
+        let inner = self.inner.read();
+        let segments = inner.manifest.visible_segments.clone();
+        let delta_entries: Vec<_> = inner
+            .delta
+            .iter()
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect();
+        drop(inner);
+
+        let mut keyed: ahash::AHashMap<PrimaryKey, Row> = ahash::AHashMap::default();
+        for seg in &segments {
+            let mut reader = SegmentReader::open(&seg.path)?;
+            let n = reader.footer().row_count as usize;
+            if n == 0 {
+                continue;
+            }
+            let mut columns = Vec::with_capacity(self.options.schema.len());
+            for c in &self.options.schema.columns {
+                columns.push(reader.read_column(&c.name)?);
+            }
+            for i in 0..n {
+                let mut row = Vec::with_capacity(self.options.schema.len());
+                for col in &columns {
+                    row.push(col.value_at(i)?);
+                }
+                let key = self.extract_key(&row)?;
+                keyed.insert(key, Row(row));
+            }
+        }
+
+        for (key, entry) in delta_entries {
+            match entry.row {
+                None => {
+                    keyed.remove(&key);
+                }
+                Some(r) => {
+                    keyed.insert(key, r);
+                }
+            }
+        }
+
+        Ok(keyed.into_values().collect())
+    }
+
     fn segment_lookup(&self, seg: &ManifestSegment, key: &PrimaryKey) -> DapResult<Option<Row>> {
         let mut reader = SegmentReader::open(&seg.path)?;
         let n = reader.footer().row_count as usize;
