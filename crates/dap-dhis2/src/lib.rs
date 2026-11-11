@@ -30,21 +30,30 @@
 #![warn(rust_2018_idioms)]
 
 pub mod aggregate;
+pub mod completion;
 pub mod event;
 pub mod expression;
 pub mod indicator;
+pub mod program_rule;
+pub mod relationship;
 pub mod tracker;
 
-pub use aggregate::{collapse_cells, Combiner, Reduction, ReductionPair};
+pub use aggregate::{collapse_cells, collapse_cells_ts, Combiner, Reduction, ReductionPair};
+pub use completion::{CompletionFact, CompletionKey, CompletionStore};
 pub use event::{
     evaluate_event_program_indicator, AnalyticsType, EventFact, EventStatus, PIResult,
     ProgramIndicatorPlan,
 };
 pub use expression::{
     compile, evaluate, evaluate_expr, validate_functions, EValue, ExpressionAst, RefKind,
-    Resolver, SUPPORTED_FUNCTIONS,
+    ReportingRateVariant, Resolver, SUPPORTED_FUNCTIONS,
 };
 pub use indicator::{compile_indicator, evaluate_indicator, IndicatorPlan, IndicatorResolver};
+pub use program_rule::{RuleProvenance, RuleSource};
+pub use relationship::{
+    Relationship, RelationshipEndpoint, RelationshipEndpointKind, RelationshipIndex,
+    RelationshipType,
+};
 pub use tracker::{
     completions_in_period, distinct_tei_count, enrollments_in_period, events_by_enrollment,
     evaluate_enrollment_program_indicator, Enrollment, EnrollmentContext, EnrollmentResolver,

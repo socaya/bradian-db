@@ -230,6 +230,9 @@ impl<'a> Resolver for EventResolver<'a> {
             RefKind::Days => EValue::Null, // unknown at event grain
             RefKind::Constant(_) => EValue::Null, // resolved by host; event resolver does not know
             RefKind::Indicator(_) => EValue::Null,
+            // Period offset and reporting rate are meaningless at event grain; the planner
+            // rewrites them away before dispatching. If they ever reach here, return NULL.
+            RefKind::PeriodOffset { .. } | RefKind::ReportingRate { .. } => EValue::Null,
         })
     }
 }
@@ -239,6 +242,7 @@ impl<'a> Resolver for EventResolver<'a> {
 pub(crate) struct AggCombiner {
     kind: AggregationType,
     state: AggState,
+    ts: i64,
 }
 
 #[derive(Debug, Default)]
@@ -250,26 +254,24 @@ enum AggState {
     Min(f64),
     Max(f64),
     Avg { sum: f64, count: i64 },
+    Welford { count: i64, mean: f64, m2: f64 },
+    LastPick { value: f64, ts: i64 },
 }
 
 impl AggCombiner {
     pub fn new(kind: AggregationType) -> DapResult<Self> {
-        match kind {
-            AggregationType::Sum
-            | AggregationType::Count
-            | AggregationType::Average
-            | AggregationType::AverageSumOrgUnit
-            | AggregationType::Min
-            | AggregationType::Max
-            | AggregationType::Custom
-            | AggregationType::None => Ok(Self {
-                kind,
-                state: AggState::Empty,
-            }),
-        }
+        Ok(Self {
+            kind,
+            state: AggState::Empty,
+            ts: i64::MIN,
+        })
     }
 
     pub fn ingest(&mut self, v: Option<f64>) {
+        self.ingest_at(v, i64::MIN);
+    }
+
+    pub fn ingest_at(&mut self, v: Option<f64>, ts: i64) {
         let v = match v {
             Some(v) => v,
             None => return,
@@ -295,8 +297,50 @@ impl AggCombiner {
                     count: count + 1,
                 }
             }
+            (AggregationType::StdDev | AggregationType::Variance, AggState::Empty) => {
+                AggState::Welford {
+                    count: 1,
+                    mean: v,
+                    m2: 0.0,
+                }
+            }
+            (
+                AggregationType::StdDev | AggregationType::Variance,
+                AggState::Welford { count, mean, m2 },
+            ) => {
+                let new_count = count + 1;
+                let delta = v - mean;
+                let new_mean = mean + delta / new_count as f64;
+                let delta2 = v - new_mean;
+                AggState::Welford {
+                    count: new_count,
+                    mean: new_mean,
+                    m2: m2 + delta * delta2,
+                }
+            }
+            (AggregationType::Last | AggregationType::LastInPeriod, AggState::Empty) => {
+                self.ts = ts;
+                AggState::LastPick { value: v, ts }
+            }
+            (
+                AggregationType::Last | AggregationType::LastInPeriod,
+                AggState::LastPick {
+                    value: old_v,
+                    ts: old_ts,
+                },
+            ) => {
+                if ts >= old_ts {
+                    self.ts = ts;
+                    AggState::LastPick { value: v, ts }
+                } else {
+                    AggState::LastPick {
+                        value: old_v,
+                        ts: old_ts,
+                    }
+                }
+            }
             (AggregationType::Custom, _) | (AggregationType::None, _) => AggState::Empty,
-            (_, other) => other, // mismatched; should not happen because `new` locks kind
+            (_, other) => other,
         };
     }
 
@@ -307,6 +351,16 @@ impl AggCombiner {
             AggState::Count(c) => Some(c as f64),
             AggState::Avg { sum, count } if count > 0 => Some(sum / count as f64),
             AggState::Avg { .. } => None,
+            AggState::Welford { count, m2, .. } if count > 0 => {
+                let variance = m2 / count as f64;
+                if matches!(self.kind, AggregationType::StdDev) {
+                    Some(variance.sqrt())
+                } else {
+                    Some(variance)
+                }
+            }
+            AggState::Welford { .. } => None,
+            AggState::LastPick { value, .. } => Some(value),
         }
     }
 }

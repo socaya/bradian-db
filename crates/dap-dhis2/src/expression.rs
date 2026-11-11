@@ -99,6 +99,50 @@ pub enum RefKind {
     StageDataElement { stage: String, de: String },
     /// `[days]` — days in period (sugar for `V{days}`).
     Days,
+    /// `#{DE.periodOffset(-1)}` or similar — a data-element reference shifted by `offset`
+    /// periods (negative = earlier). Resolvers that understand period context substitute the
+    /// adjusted coordinate; others return `EValue::Null`.
+    PeriodOffset {
+        inner: Box<RefKind>,
+        offset: i32,
+    },
+    /// `#{datasetUid.REPORTING_RATE}` — dataset-level completion variable. The variant name
+    /// is stored verbatim so the catalog can validate it.
+    ReportingRate {
+        dataset: String,
+        variant: ReportingRateVariant,
+    },
+}
+
+/// Supported DHIS2 dataset-completion variants. The variant set matches the DHIS2 reference
+/// implementation; the engine computes them from the dataset-completion fact table (see the
+/// `completion` module in `dap-dhis2`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReportingRateVariant {
+    /// 100 * actual_reports / expected_reports.
+    ReportingRate,
+    /// 100 * actual_reports_on_time / expected_reports.
+    ReportingRateOnTime,
+    /// Number of forms submitted in the reporting period.
+    ActualReports,
+    /// Number of forms submitted before the due date.
+    ActualReportsOnTime,
+    /// Number of forms expected per the dataset's OU assignment set.
+    ExpectedReports,
+}
+
+impl ReportingRateVariant {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "REPORTING_RATE" => Self::ReportingRate,
+            "REPORTING_RATE_ON_TIME" => Self::ReportingRateOnTime,
+            "ACTUAL_REPORTS" => Self::ActualReports,
+            "ACTUAL_REPORTS_ON_TIME" => Self::ActualReportsOnTime,
+            "EXPECTED_REPORTS" => Self::ExpectedReports,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +243,7 @@ pub fn compile(src: &str) -> DapResult<ExpressionAst> {
 /// Whitelist of function names the engine implements. Used by `validate_functions` to
 /// reject unsupported calls at compile time rather than at evaluation.
 pub const SUPPORTED_FUNCTIONS: &[&str] = &[
+    // Core control flow and null handling.
     "if",
     "isNull",
     "isNotNull",
@@ -206,12 +251,28 @@ pub const SUPPORTED_FUNCTIONS: &[&str] = &[
     "coalesce",
     "greatest",
     "least",
+    // Numerics.
     "abs",
     "mod",
     "power",
     "log",
     "log10",
     "oizp",
+    // DHIS2 d2: namespace.
+    "d2:yearsBetween",
+    "d2:monthsBetween",
+    "d2:weeksBetween",
+    "d2:daysBetween",
+    "d2:minutesBetween",
+    "d2:hasValue",
+    "d2:zpvc",
+    "d2:oizp",
+    "d2:condition",
+    "d2:count",
+    "d2:countIfValue",
+    "d2:countIfCondition",
+    "d2:relationshipCount",
+    "d2:validatePattern",
 ];
 
 /// Walk the AST and ensure every function call targets a supported name. Returns the first
@@ -515,11 +576,340 @@ fn eval_call(
                 None => Ok(EValue::Null),
             }
         }
+        other if other.starts_with("d2:") => eval_d2(other, args, resolver),
         other => Err(DapError::UnsupportedFeature(format!(
             "function '{other}' is not in the v1 expression grammar; \
              compile a program indicator that uses it only after the function \
              matrix lands"
         ))),
+    }
+}
+
+/// DHIS2 `d2:` namespace evaluator.
+///
+/// All date arguments are normalised to Unix milliseconds. If an argument is an ISO 8601
+/// string (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS` with optional `Z`), it is parsed. Numeric
+/// arguments are treated as Unix millis directly.
+fn eval_d2(
+    name: &str,
+    args: &[ExpressionAst],
+    resolver: &mut dyn Resolver,
+) -> DapResult<EValue> {
+    match name {
+        "d2:yearsBetween" => date_diff(name, args, resolver, |a, b| {
+            let days = (b - a).div_euclid(MS_PER_DAY);
+            days as f64 / 365.25
+        }),
+        "d2:monthsBetween" => date_diff(name, args, resolver, |a, b| {
+            let days = (b - a).div_euclid(MS_PER_DAY);
+            days as f64 / 30.4375
+        }),
+        "d2:weeksBetween" => date_diff(name, args, resolver, |a, b| {
+            let days = (b - a).div_euclid(MS_PER_DAY);
+            days as f64 / 7.0
+        }),
+        "d2:daysBetween" => date_diff(name, args, resolver, |a, b| {
+            (b - a).div_euclid(MS_PER_DAY) as f64
+        }),
+        "d2:minutesBetween" => date_diff(name, args, resolver, |a, b| {
+            (b - a).div_euclid(60_000) as f64
+        }),
+        "d2:hasValue" => {
+            if args.len() != 1 {
+                return Err(DapError::invalid_value("d2:hasValue(x) takes 1 argument"));
+            }
+            let v = evaluate_expr(&args[0], resolver)?;
+            Ok(EValue::Bool(!v.is_null()))
+        }
+        "d2:oizp" => {
+            if args.len() != 1 {
+                return Err(DapError::invalid_value("d2:oizp(x) takes 1 argument"));
+            }
+            match numeric_arg(&args[0], resolver)? {
+                Some(x) if x >= 0.0 => Ok(EValue::Number(1.0)),
+                Some(_) => Ok(EValue::Number(0.0)),
+                None => Ok(EValue::Null),
+            }
+        }
+        "d2:zpvc" => {
+            // Zero-or-Positive Value Count. Null arguments are not counted.
+            if args.is_empty() {
+                return Err(DapError::invalid_value("d2:zpvc() needs >= 1 argument"));
+            }
+            let mut c = 0i64;
+            for a in args {
+                if let Some(x) = numeric_arg(a, resolver)? {
+                    if x >= 0.0 {
+                        c += 1;
+                    }
+                }
+            }
+            Ok(EValue::Number(c as f64))
+        }
+        "d2:condition" => {
+            // d2:condition(conditionString, trueValue, falseValue). DHIS2 originally parses
+            // the first argument as a string containing a mini-expression; our grammar
+            // already handles the condition directly, so we accept either form.
+            if args.len() != 3 {
+                return Err(DapError::invalid_value("d2:condition takes 3 arguments"));
+            }
+            let cond_eval = match &args[0] {
+                ExpressionAst::String(src) => {
+                    let ast = compile(src)?;
+                    validate_functions(&ast)?;
+                    evaluate_expr(&ast, resolver)?
+                }
+                other => evaluate_expr(other, resolver)?,
+            };
+            match cond_eval.as_bool() {
+                Some(true) => evaluate_expr(&args[1], resolver),
+                Some(false) => evaluate_expr(&args[2], resolver),
+                None => Ok(EValue::Null),
+            }
+        }
+        "d2:count" => {
+            // Count non-null values among arguments. On DHIS2 this would typically count
+            // event occurrences; we accept both the "iterate args" and "single arg =
+            // isNotNull(x) -> 1" shape. At grain-level it degenerates to isNotNull(x).
+            if args.is_empty() {
+                return Err(DapError::invalid_value("d2:count() needs >= 1 argument"));
+            }
+            let mut c = 0i64;
+            for a in args {
+                if !evaluate_expr(a, resolver)?.is_null() {
+                    c += 1;
+                }
+            }
+            Ok(EValue::Number(c as f64))
+        }
+        "d2:countIfValue" => {
+            // d2:countIfValue(#{DE}, literal). Returns 1 iff the DE value equals the literal
+            // at the current row, else 0. Rolled up by the enclosing aggregation type.
+            if args.len() != 2 {
+                return Err(DapError::invalid_value(
+                    "d2:countIfValue(ref, value) takes 2 arguments",
+                ));
+            }
+            let v = evaluate_expr(&args[0], resolver)?;
+            let target = evaluate_expr(&args[1], resolver)?;
+            if v.is_null() || target.is_null() {
+                return Ok(EValue::Number(0.0));
+            }
+            Ok(EValue::Number(if value_eq(&v, &target) { 1.0 } else { 0.0 }))
+        }
+        "d2:countIfCondition" => {
+            // d2:countIfCondition(#{DE}, "> 100"). We accept either (ref, literal-condition-
+            // string) or (ref, condition-expression). Returns 1 iff the condition evaluates
+            // true against the ref's value.
+            if args.len() != 2 {
+                return Err(DapError::invalid_value(
+                    "d2:countIfCondition(ref, condition) takes 2 arguments",
+                ));
+            }
+            let v = evaluate_expr(&args[0], resolver)?;
+            if v.is_null() {
+                return Ok(EValue::Number(0.0));
+            }
+            // Build a tiny resolver that answers '?' to the ref's current value when we
+            // encounter the special V{value} variable. The condition expression may use
+            // comparisons against the dummy symbol.
+            let cond_src = match &args[1] {
+                ExpressionAst::String(s) => s.clone(),
+                _ => {
+                    // treat the AST literally
+                    let cond_eval =
+                        evaluate_expr(&args[1], resolver)?.as_bool().unwrap_or(false);
+                    return Ok(EValue::Number(if cond_eval { 1.0 } else { 0.0 }));
+                }
+            };
+            // Prepend the DE value so a condition like "> 100" evaluates correctly: wrap it
+            // as "V{value} > 100".
+            let wrapped = format!("V{{value}} {cond_src}");
+            let ast = compile(&wrapped)?;
+            validate_functions(&ast)?;
+            let mut shim = ValueShim {
+                value: v,
+                inner: resolver,
+            };
+            let cond_v = evaluate_expr(&ast, &mut shim)?.as_bool().unwrap_or(false);
+            Ok(EValue::Number(if cond_v { 1.0 } else { 0.0 }))
+        }
+        "d2:relationshipCount" => {
+            if args.len() > 1 {
+                return Err(DapError::invalid_value(
+                    "d2:relationshipCount takes 0 or 1 arguments (optional relationship type UID)",
+                ));
+            }
+            let rel_type = match args.first() {
+                Some(ExpressionAst::String(s)) => Some(s.clone()),
+                None => None,
+                Some(other) => match evaluate_expr(other, resolver)? {
+                    EValue::Str(s) => Some(s),
+                    EValue::Null => None,
+                    v => {
+                        return Err(DapError::invalid_value(format!(
+                            "d2:relationshipCount expected relationship-type UID string, got {v:?}"
+                        )))
+                    }
+                },
+            };
+            // Resolver answers via the synthetic `V{relationship_count:<type?>}` variable.
+            let var = match rel_type.as_deref() {
+                Some(t) => format!("relationship_count:{t}"),
+                None => "relationship_count".to_string(),
+            };
+            resolver.reference(&RefKind::Variable(var))
+        }
+        "d2:validatePattern" => {
+            // d2:validatePattern(text, pattern). Pattern uses Java regex syntax; the engine
+            // supports a conservative POSIX-ish subset via the `regex` crate pattern. We
+            // accept only patterns that `regex::Regex::new` recognises; otherwise null.
+            if args.len() != 2 {
+                return Err(DapError::invalid_value(
+                    "d2:validatePattern(text, pattern) takes 2 arguments",
+                ));
+            }
+            let text = match evaluate_expr(&args[0], resolver)? {
+                EValue::Str(s) => s,
+                EValue::Number(n) => n.to_string(),
+                EValue::Bool(b) => b.to_string(),
+                EValue::Null => return Ok(EValue::Null),
+            };
+            let pattern = match evaluate_expr(&args[1], resolver)? {
+                EValue::Str(s) => s,
+                EValue::Null => return Ok(EValue::Null),
+                other => return Err(DapError::invalid_value(format!(
+                    "d2:validatePattern: pattern must be a string, got {other:?}"
+                ))),
+            };
+            // No regex dependency yet; fall back to simple substring / anchored equality.
+            // Patterns `^xxx$` match exact string equality; other patterns are substring
+            // matches. Documented limitation — full Java regex lands with the `regex` crate
+            // dependency in a later iteration.
+            let m = if let (Some(stripped), true) =
+                (pattern.strip_prefix('^'), pattern.ends_with('$'))
+            {
+                let anchored = stripped.trim_end_matches('$');
+                text == anchored
+            } else {
+                text.contains(&pattern)
+            };
+            Ok(EValue::Bool(m))
+        }
+        _ => Err(DapError::UnsupportedFeature(format!(
+            "d2 function '{name}' is not implemented"
+        ))),
+    }
+}
+
+const MS_PER_DAY: i64 = 86_400_000;
+
+fn date_diff(
+    name: &str,
+    args: &[ExpressionAst],
+    resolver: &mut dyn Resolver,
+    f: impl FnOnce(i64, i64) -> f64,
+) -> DapResult<EValue> {
+    if args.len() != 2 {
+        return Err(DapError::invalid_value(format!(
+            "{name}(start, end) takes 2 arguments"
+        )));
+    }
+    let a = coerce_date(&evaluate_expr(&args[0], resolver)?)?;
+    let b = coerce_date(&evaluate_expr(&args[1], resolver)?)?;
+    match (a, b) {
+        (Some(x), Some(y)) => Ok(EValue::Number(f(x, y))),
+        _ => Ok(EValue::Null),
+    }
+}
+
+/// Coerce an `EValue` to a Unix-ms date. Accepts:
+/// - `Number`  → treat as Unix millis directly.
+/// - `Str`     → parse `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS[Z]` in UTC.
+/// - `Null`    → None.
+/// - anything else → error.
+fn coerce_date(v: &EValue) -> DapResult<Option<i64>> {
+    match v {
+        EValue::Null => Ok(None),
+        EValue::Number(n) => Ok(Some(*n as i64)),
+        EValue::Str(s) => parse_iso_date_ms(s).map(Some),
+        other => Err(DapError::TypeError {
+            expected: "date (number ms or ISO string)".into(),
+            found: format!("{other:?}"),
+        }),
+    }
+}
+
+fn parse_iso_date_ms(s: &str) -> DapResult<i64> {
+    // Strict subset: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS[Z].
+    let (date_part, time_part) = match s.find('T') {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => (s, ""),
+    };
+    let d: Vec<&str> = date_part.split('-').collect();
+    if d.len() != 3 {
+        return Err(DapError::invalid_value(format!("invalid ISO date '{s}'")));
+    }
+    let y: i32 = d[0]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| DapError::invalid_value(format!("date year: {e}")))?;
+    let m: u32 = d[1]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| DapError::invalid_value(format!("date month: {e}")))?;
+    let dd: u32 = d[2]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| DapError::invalid_value(format!("date day: {e}")))?;
+
+    let days = days_from_civil(y, m, dd);
+    let mut millis = days * MS_PER_DAY;
+    if !time_part.is_empty() {
+        let t = time_part.trim_end_matches('Z');
+        let parts: Vec<&str> = t.split(':').collect();
+        if parts.len() < 2 {
+            return Err(DapError::invalid_value(format!("invalid ISO time '{s}'")));
+        }
+        let hh: i64 = parts[0].parse().map_err(|e: std::num::ParseIntError| {
+            DapError::invalid_value(format!("hour: {e}"))
+        })?;
+        let mm: i64 = parts[1].parse().map_err(|e: std::num::ParseIntError| {
+            DapError::invalid_value(format!("minute: {e}"))
+        })?;
+        let ss: i64 = if parts.len() >= 3 {
+            parts[2].split('.').next().unwrap_or("0").parse().map_err(
+                |e: std::num::ParseIntError| DapError::invalid_value(format!("second: {e}")),
+            )?
+        } else {
+            0
+        };
+        millis += hh * 3_600_000 + mm * 60_000 + ss * 1_000;
+    }
+    Ok(millis)
+}
+
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * if m > 2 { m - 3 } else { m + 9 } + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era as i64) * 146097 + doe as i64 - 719468
+}
+
+/// Resolver shim that answers a special `V{value}` variable with a captured `EValue`. Used
+/// by `d2:countIfCondition` to splice the DE's value into a user-supplied condition.
+struct ValueShim<'a> {
+    value: EValue,
+    inner: &'a mut dyn Resolver,
+}
+
+impl<'a> Resolver for ValueShim<'a> {
+    fn reference(&mut self, r: &RefKind) -> DapResult<EValue> {
+        if let RefKind::Variable(name) = r {
+            if name == "value" {
+                return Ok(self.value.clone());
+            }
+        }
+        self.inner.reference(r)
     }
 }
 
@@ -729,12 +1119,32 @@ fn tokenize(src: &str) -> DapResult<Vec<Token>> {
                         "unterminated '{kind}{{...}}' reference at offset {i}"
                     )))?;
                 let inner = &src[brace_start..brace_start + close];
-                let r = parse_ref(kind, inner, i)?;
+                let mut r = parse_ref(kind, inner, i)?;
+                let mut cursor = brace_start + close + 1;
+                // Optional `.periodOffset(N)` suffix (only for `#{...}` references).
+                if kind == '#' && src[cursor..].starts_with(".periodOffset(") {
+                    let open = cursor + ".periodOffset(".len();
+                    let close_paren = src[open..]
+                        .find(')')
+                        .ok_or_else(|| DapError::invalid_value(
+                            "unterminated .periodOffset(...)",
+                        ))?;
+                    let n: i32 = src[open..open + close_paren].trim().parse().map_err(
+                        |e: std::num::ParseIntError| {
+                            DapError::invalid_value(format!("periodOffset argument: {e}"))
+                        },
+                    )?;
+                    r = RefKind::PeriodOffset {
+                        inner: Box::new(r),
+                        offset: n,
+                    };
+                    cursor = open + close_paren + 1;
+                }
                 out.push(Token {
                     tok: Tok::Ref(r),
                     offset: start,
                 });
-                i = brace_start + close + 1;
+                i = cursor;
             }
             '[' => {
                 let close = src[i + 1..]
@@ -766,11 +1176,6 @@ fn tokenize(src: &str) -> DapResult<Vec<Token>> {
                     "true" => Tok::True,
                     "false" => Tok::False,
                     "null" => Tok::Null,
-                    other if other.starts_with("d2:") => {
-                        return Err(DapError::UnsupportedFeature(format!(
-                            "DHIS2 d2: function '{other}' is reserved for a later gate"
-                        )))
-                    }
                     other => Tok::Ident(other.to_string()),
                 };
                 out.push(Token { tok, offset: start });
@@ -796,6 +1201,15 @@ fn parse_ref(kind: char, inner: &str, offset: usize) -> DapResult<RefKind> {
     Ok(match kind {
         '#' => {
             let parts: Vec<&str> = trimmed.split('.').map(|s| s.trim()).collect();
+            // Dataset reporting-rate variants: #{datasetUid.VARIANT}
+            if parts.len() == 2 {
+                if let Some(variant) = ReportingRateVariant::parse(parts[1]) {
+                    return Ok(RefKind::ReportingRate {
+                        dataset: parts[0].to_string(),
+                        variant,
+                    });
+                }
+            }
             match parts.len() {
                 1 => RefKind::DataElement {
                     de: parts[0].to_string(),
@@ -1232,9 +1646,100 @@ mod tests {
     }
 
     #[test]
-    fn d2_namespace_rejected_at_parse() {
-        let err = compile("d2:yearsBetween('2020', '2024')").expect_err("d2: rejected");
-        assert!(err.to_string().contains("d2:"));
+    fn d2_namespace_is_now_implemented() {
+        // Previously rejected at parse; the `d2:` namespace is live now and these calls
+        // compile and evaluate. See the d2_* tests below for behaviour.
+        let ast = compile("d2:yearsBetween('2020-01-01', '2024-01-01')").unwrap();
+        let mut r = |_: &RefKind| Ok(EValue::Null);
+        let v = evaluate_expr(&ast, &mut r).unwrap().as_number().unwrap();
+        assert!((v - 4.0).abs() < 0.02, "yearsBetween ≈ 4, got {v}");
+    }
+
+    #[test]
+    fn d2_has_value_and_oizp_and_zpvc() {
+        let ast = compile("d2:hasValue(#{deAAAAAAAAA})").unwrap();
+        let mut none = |_: &RefKind| Ok(EValue::Null);
+        assert_eq!(evaluate_expr(&ast, &mut none).unwrap(), EValue::Bool(false));
+
+        let ast = compile("d2:oizp(-3)").unwrap();
+        let mut r = |_: &RefKind| Ok(EValue::Null);
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Number(0.0));
+
+        let ast = compile("d2:zpvc(3, -1, 0, -5)").unwrap();
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Number(2.0));
+    }
+
+    #[test]
+    fn d2_count_if_value_matches_target() {
+        let ast = compile("d2:countIfValue(#{deAAAAAAAAA}, 5)").unwrap();
+        let mut r = |_: &RefKind| Ok(EValue::Number(5.0));
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Number(1.0));
+        let mut r2 = |_: &RefKind| Ok(EValue::Number(4.0));
+        assert_eq!(evaluate_expr(&ast, &mut r2).unwrap(), EValue::Number(0.0));
+    }
+
+    #[test]
+    fn d2_count_if_condition_with_literal_string() {
+        let ast = compile("d2:countIfCondition(#{deAAAAAAAAA}, '> 100')").unwrap();
+        let mut r_over = |_: &RefKind| Ok(EValue::Number(150.0));
+        assert_eq!(evaluate_expr(&ast, &mut r_over).unwrap(), EValue::Number(1.0));
+        let mut r_under = |_: &RefKind| Ok(EValue::Number(50.0));
+        assert_eq!(
+            evaluate_expr(&ast, &mut r_under).unwrap(),
+            EValue::Number(0.0)
+        );
+    }
+
+    #[test]
+    fn d2_relationship_count_reaches_variable() {
+        let ast = compile("d2:relationshipCount('rtMOTHRCHLD')").unwrap();
+        let mut r = |r: &RefKind| match r {
+            RefKind::Variable(n) if n == "relationship_count:rtMOTHRCHLD" => {
+                Ok(EValue::Number(3.0))
+            }
+            _ => Ok(EValue::Null),
+        };
+        assert_eq!(evaluate_expr(&ast, &mut r).unwrap(), EValue::Number(3.0));
+    }
+
+    #[test]
+    fn d2_condition_dispatches() {
+        let ast = compile("d2:condition('1 < 2', 'yes', 'no')").unwrap();
+        let mut r = |_: &RefKind| Ok(EValue::Null);
+        assert_eq!(
+            evaluate_expr(&ast, &mut r).unwrap(),
+            EValue::Str("yes".into())
+        );
+    }
+
+    #[test]
+    fn period_offset_reaches_resolver() {
+        // DHIS2 syntax: #{deUid}.periodOffset(-1) — the suffix comes after the closing
+        // brace.
+        let ast = compile("#{deAAAAAAAAA}.periodOffset(-1)").unwrap();
+        let mut seen = None;
+        let mut r = |r: &RefKind| {
+            if let RefKind::PeriodOffset { offset, inner } = r {
+                seen = Some((*offset, (**inner).clone()));
+            }
+            Ok(EValue::Number(42.0))
+        };
+        let v = evaluate_expr(&ast, &mut r).unwrap();
+        assert_eq!(v, EValue::Number(42.0));
+        let (offset, inner) = seen.expect("resolver saw the PeriodOffset ref");
+        assert_eq!(offset, -1);
+        assert!(matches!(inner, RefKind::DataElement { .. }));
+    }
+
+    #[test]
+    fn reporting_rate_parses_as_dedicated_ref() {
+        let ast = compile("#{dsAAAAAAAAA.REPORTING_RATE}").unwrap();
+        if let ExpressionAst::Ref(RefKind::ReportingRate { dataset, variant }) = ast {
+            assert_eq!(dataset, "dsAAAAAAAAA");
+            assert_eq!(variant, ReportingRateVariant::ReportingRate);
+        } else {
+            panic!("expected ReportingRate ref");
+        }
     }
 
     #[test]

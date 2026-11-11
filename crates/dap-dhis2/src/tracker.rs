@@ -186,6 +186,7 @@ impl<'a> Resolver for EnrollmentResolver<'a> {
                 _ => EValue::Null,
             },
             RefKind::Days | RefKind::Constant(_) | RefKind::Indicator(_) => EValue::Null,
+            RefKind::PeriodOffset { .. } | RefKind::ReportingRate { .. } => EValue::Null,
         })
     }
 }

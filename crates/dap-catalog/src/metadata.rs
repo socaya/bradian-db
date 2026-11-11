@@ -60,6 +60,16 @@ pub enum AggregationType {
     Count,
     Min,
     Max,
+    /// Population standard deviation.
+    StdDev,
+    /// Population variance.
+    Variance,
+    /// Latest value in a group, keyed by timestamp. For aggregate cells the key is the
+    /// `(period, source_version)` tuple; for event / enrollment program indicators it is
+    /// `event_date`.
+    Last,
+    /// Last value inside the reporting period (period axis uses LAST, OU axis averages).
+    LastInPeriod,
     None,
     Custom,
 }
