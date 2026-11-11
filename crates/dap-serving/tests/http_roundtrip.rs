@@ -358,3 +358,117 @@ async fn explain_endpoint_returns_operator_tree() {
         "expected Filter under HashAggregate"
     );
 }
+
+async fn poll_until_terminal(
+    app: &axum::Router,
+    job_id: &str,
+) -> JsonValue {
+    for _ in 0..200 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/analytics/v1/jobs/{job_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let payload: JsonValue = serde_json::from_slice(
+                &to_bytes(resp.into_body(), 1 << 20).await.unwrap(),
+            )
+            .unwrap();
+            let status = payload["status"].as_str().unwrap_or("");
+            if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELLED") {
+                return payload;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("job {job_id} never reached a terminal state");
+}
+
+#[tokio::test]
+async fn async_query_within_max_output_rows_succeeds() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let app = router(ServerState::new(engine));
+
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou"],
+            "filters": [],
+            "order_by": [],
+        },
+        "max_output_rows": 100
+    });
+    let submit = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/jobs")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit.status(), StatusCode::ACCEPTED);
+    let record: JsonValue =
+        serde_json::from_slice(&to_bytes(submit.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let job_id = record["id"].as_str().unwrap().to_owned();
+
+    let terminal = poll_until_terminal(&app, &job_id).await;
+    assert_eq!(terminal["status"], "SUCCEEDED");
+    let rows = terminal["result"]["rows"].as_array().unwrap();
+    assert!(!rows.is_empty(), "query produced some rows");
+    assert!(rows.len() <= 100);
+}
+
+#[tokio::test]
+async fn async_query_exceeding_max_output_rows_fails_with_diagnostic() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let app = router(ServerState::new(engine));
+
+    // Seed produces rows grouped by ou (2 groups). Cap at 1 so the result exceeds it.
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou"],
+            "filters": [],
+            "order_by": [],
+        },
+        "max_output_rows": 1
+    });
+    let submit = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/jobs")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit.status(), StatusCode::ACCEPTED);
+    let record: JsonValue =
+        serde_json::from_slice(&to_bytes(submit.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let job_id = record["id"].as_str().unwrap().to_owned();
+
+    let terminal = poll_until_terminal(&app, &job_id).await;
+    assert_eq!(terminal["status"], "FAILED");
+    let err = terminal["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("max_output_rows"),
+        "diagnostic names the enforced cap: '{err}'"
+    );
+    // The oversized result payload must not have landed in the registry.
+    assert!(terminal["result"].is_null() || terminal["result"] == JsonValue::Null);
+}

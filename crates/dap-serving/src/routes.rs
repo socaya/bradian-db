@@ -293,7 +293,16 @@ struct SubmitJobRequest {
     pub request: QueryRequest,
     #[serde(default)]
     pub submitted_by: Option<String>,
+    /// Hard cap on the number of output rows the job may stash in its `result` payload.
+    /// Jobs that produce more fail with a precise diagnostic instead of landing a
+    /// pathologically large JSON blob in the registry. See [`DEFAULT_MAX_EXPORT_ROWS`].
+    #[serde(default)]
+    pub max_output_rows: Option<usize>,
 }
+
+/// Default cap on async-query output size — enough for the typical analytics export,
+/// small enough that a misconfigured client cannot OOM the engine via the job registry.
+pub const DEFAULT_MAX_EXPORT_ROWS: usize = 100_000;
 
 async fn submit_async_query(
     State(state): State<SharedState>,
@@ -302,17 +311,25 @@ async fn submit_async_query(
     let job_id = format!("job-{}", uuid_like());
     let state_clone = state.clone();
     let request = body.request.clone();
+    let cap = body.max_output_rows.unwrap_or(DEFAULT_MAX_EXPORT_ROWS);
     let record = state.jobs.submit(
         job_id.clone(),
         "query",
         body.submitted_by,
         move |_cancel, progress| async move {
-            progress.set(json!({"step": "planning"}));
+            progress.set(json!({"step": "planning", "max_output_rows": cap}));
             let response = tokio::task::spawn_blocking(move || {
                 execute_request(&state_clone, &request)
             })
             .await
             .map_err(|e| dap_core::DapError::other(format!("spawn_blocking: {e}")))??;
+            if response.rows.len() > cap {
+                return Err(dap_core::DapError::invalid_value(format!(
+                    "async query produced {} rows, exceeds max_output_rows={cap}; \
+                     narrow the query or raise max_output_rows",
+                    response.rows.len()
+                )));
+            }
             progress.set(json!({"step": "complete", "output_rows": response.metrics.output_rows}));
             serde_json::to_value(response).map_err(dap_core::DapError::from)
         },
