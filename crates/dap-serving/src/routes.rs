@@ -27,6 +27,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/analytics/v1/freshness", get(freshness))
         .route("/api/analytics/v1/query", post(run_query))
         .route("/api/analytics/v1/query/explain", post(explain_query))
+        .route("/api/analytics/v1/drilldown", post(drilldown))
+        .route("/api/analytics/v1/data-products", get(list_data_products))
+        .route("/api/analytics/v1/data-products", post(register_data_product))
         .route("/healthz", get(healthz))
         .with_state(state)
 }
@@ -121,6 +124,88 @@ async fn explain_query(
     let rev = state.engine.catalog.revision().to_string();
     let plan_doc = dap_planner::explain::explain(&plan, &rev);
     Ok(Json(plan_doc))
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DrilldownRequest {
+    pub request: QueryRequest,
+    /// Additional filters applied on top of the base request before execution. Typical
+    /// usage: the caller clicked a cell in the aggregate output and wants a bounded
+    /// line-listing-like result for that cell.
+    #[serde(default)]
+    pub drill_filters: Vec<dap_planner::dsl::FilterSpec>,
+    /// Max rows to return. Caps at 10 000 to keep the endpoint bounded.
+    #[serde(default = "default_drill_limit")]
+    pub limit: usize,
+}
+
+fn default_drill_limit() -> usize {
+    1_000
+}
+
+async fn drilldown(
+    State(state): State<SharedState>,
+    Json(body): Json<DrilldownRequest>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    let mut request = body.request;
+    match &mut request {
+        QueryRequest::Aggregate(aq) => {
+            aq.filters.extend(body.drill_filters);
+            aq.limit = Some(body.limit.min(10_000));
+        }
+        QueryRequest::ProgramIndicator(piq) => {
+            piq.filters.extend(body.drill_filters);
+            piq.limit = Some(body.limit.min(10_000));
+        }
+    }
+    let response = execute_request(&state, &request)?;
+    Ok(Json(response))
+}
+
+/// A registered analytical data product (spec §8.5). Consumers discover products through
+/// `GET /data-products`; operators register them through `POST /data-products` after
+/// publishing the underlying materialised view.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DataProduct {
+    pub id: String,
+    pub owner: String,
+    pub grain: Vec<String>,
+    pub measures: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub consumers: Vec<String>,
+    pub freshness_contract: FreshnessContract,
+    #[serde(default)]
+    pub sample_query: Option<QueryRequest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FreshnessContract {
+    /// SLA for data staleness in seconds. A consumer asking for a product with a tighter
+    /// SLA than the engine can meet gets back an explicit `partial` provenance note.
+    pub max_staleness_seconds: u64,
+    pub consistency: dap_core::ConsistencyMode,
+}
+
+async fn list_data_products(State(state): State<SharedState>) -> impl IntoResponse {
+    let catalogue = state.data_products.read();
+    let out: Vec<DataProduct> = catalogue.values().cloned().collect();
+    Json(out)
+}
+
+async fn register_data_product(
+    State(state): State<SharedState>,
+    Json(product): Json<DataProduct>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    if product.id.is_empty() {
+        return Err(dap_core::DapError::invalid_value("data product id is required").into());
+    }
+    state
+        .data_products
+        .write()
+        .insert(product.id.clone(), product.clone());
+    Ok(Json(product))
 }
 
 fn build_plan(state: &SharedState, request: &QueryRequest) -> DapResult<LogicalPlan> {

@@ -1,15 +1,18 @@
 //! Shared state carried by every handler.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 
 use crate::engine::AnalyticsEngine;
+use crate::routes::DataProduct;
 
 #[derive(Debug)]
 pub struct ServerState {
     pub engine: Arc<AnalyticsEngine>,
     pub query_history: RwLock<Vec<QueryHistoryEntry>>,
+    pub data_products: RwLock<HashMap<String, DataProduct>>,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +31,7 @@ impl ServerState {
         Arc::new(Self {
             engine,
             query_history: RwLock::new(Vec::new()),
+            data_products: RwLock::new(HashMap::new()),
         })
     }
 }

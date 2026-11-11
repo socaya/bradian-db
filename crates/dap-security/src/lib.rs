@@ -6,10 +6,12 @@
 
 pub mod audit;
 pub mod authz;
+pub mod encryption;
 pub mod principal;
 pub mod token;
 
 pub use audit::{AuditEntry, AuditLog};
-pub use authz::{PolicyContext, policy_predicate, cache_key};
+pub use authz::{cache_key, policy_predicate, PolicyContext};
+pub use encryption::{seal, unseal, DataKey, KeyId, KeyRing, SealedPayload};
 pub use principal::{Principal, Role};
 pub use token::TokenStore;

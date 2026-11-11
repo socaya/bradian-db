@@ -125,6 +125,107 @@ async fn query_endpoint_returns_rows_with_provenance() {
 }
 
 #[tokio::test]
+async fn drilldown_applies_extra_filters_and_caps_limit() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let app = router(ServerState::new(engine));
+
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou", "period"],
+            "filters": [],
+            "order_by": [],
+        },
+        "drill_filters": [
+            {"op": "eq", "column": "ou", "value": {"Str": "ouAAAAAAAAA"}}
+        ],
+        "limit": 50
+    });
+    let resp = app
+        .oneshot(
+            Request::post("/api/analytics/v1/drilldown")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let rows = payload["rows"].as_array().unwrap();
+    // seed rows have 3 OUs; the drill filter keeps only ouAAAAAAAAA which appears in two
+    // periods -> 2 rows after group_by ou+period.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r[0]["Str"] == "ouAAAAAAAAA"));
+}
+
+#[tokio::test]
+async fn data_products_register_and_list() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let app = router(ServerState::new(engine));
+
+    // Empty catalogue.
+    let empty = app
+        .clone()
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::OK);
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(empty.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 0);
+
+    // Register one product.
+    let product = json!({
+        "id": "dp_anc_monthly",
+        "owner": "ncd-team",
+        "grain": ["ou", "period"],
+        "measures": ["sum_value"],
+        "description": "ANC monthly aggregate",
+        "consumers": [],
+        "freshness_contract": {
+            "max_staleness_seconds": 3600,
+            "consistency": "EDGE_STABLE"
+        }
+    });
+    let register = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/data-products")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(product.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(register.status(), StatusCode::OK);
+
+    // List now returns one product.
+    let list = app
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(list.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 1);
+    assert_eq!(payload[0]["id"], "dp_anc_monthly");
+}
+
+#[tokio::test]
 async fn explain_endpoint_returns_operator_tree() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
