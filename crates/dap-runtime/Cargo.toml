@@ -11,7 +11,7 @@ description = "Column batches, vectorized operators, scheduler, spill"
 [dependencies]
 dap-core    = { workspace = true }
 dap-storage = { workspace = true }
-serde       = { workspace = true }
+serde       = { workspace = true, features = ["derive"] }
 thiserror   = { workspace = true }
 ahash       = { workspace = true }
 smallvec    = { workspace = true }

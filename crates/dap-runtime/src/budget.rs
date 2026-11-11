@@ -62,7 +62,7 @@ impl RuntimeMetrics {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub scanned_rows: u64,
     pub scanned_bytes: u64,
