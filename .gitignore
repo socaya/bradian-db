@@ -1,4 +1,5 @@
 /target
+**/target/
 Cargo.lock.local
 **/*.rs.bk
 .DS_Store
@@ -8,3 +9,6 @@ Cargo.lock.local
 *.swo
 /tmp/
 /benches/results/*.html
+# Maven artefacts
+**/.mvn/
+**/dependency-reduced-pom.xml
