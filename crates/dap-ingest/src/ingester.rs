@@ -25,6 +25,11 @@ pub struct Ingester {
     /// Columns composing the primary key, by name. Must be a prefix-disjoint subset of the
     /// partition schema.
     primary_key: Vec<String>,
+    /// Hard cap on the number of changes `apply_batch` will process in a single call.
+    /// `None` leaves ingest unbounded (default, preserves pre-ING-003 behaviour); `Some(n)`
+    /// fails the whole batch closed with [`DapError::invalid_value`] when `n` is exceeded,
+    /// so the caller can retry smaller without partial-application ambiguity.
+    max_batch_size: Option<usize>,
 }
 
 impl Ingester {
@@ -37,7 +42,16 @@ impl Ingester {
             partition,
             quarantine,
             primary_key,
+            max_batch_size: None,
         }
+    }
+
+    /// Set the maximum number of changes a single `apply_batch` call will accept.
+    /// Oversized batches are rejected before any side effects so the caller can retry
+    /// with smaller chunks.
+    pub fn with_max_batch_size(mut self, max: usize) -> Self {
+        self.max_batch_size = Some(max);
+        self
     }
 
     pub fn apply(&self, change: &Change) -> DapResult<Outcome> {
@@ -63,6 +77,15 @@ impl Ingester {
     }
 
     pub fn apply_batch(&self, changes: &[Change]) -> DapResult<IngestReport> {
+        if let Some(max) = self.max_batch_size {
+            if changes.len() > max {
+                return Err(DapError::invalid_value(format!(
+                    "ingest batch of {} changes exceeds configured max_batch_size={}",
+                    changes.len(),
+                    max
+                )));
+            }
+        }
         let mut report = IngestReport::default();
         for c in changes {
             match self.apply(c) {
@@ -286,5 +309,82 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got.0[3], Value::F64(99.0));
+    }
+
+    fn mk_change(id: &str, version: u64) -> Change {
+        Change {
+            change_id: id.into(),
+            site_id: None,
+            object_type: "AGGREGATE_DATA_VALUE".into(),
+            object_uid: dap_core::Uid::new("deAAAAAAAAA").unwrap(),
+            source_version: version,
+            operation: Operation::Upsert,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            metadata_revision: None,
+            payload_hash: None,
+            payload: serde_json::json!({
+                "ou": "ouAAAAAAAAA",
+                "period": "202601",
+                "de": "deAAAAAAAAA",
+                "value": 1.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn apply_batch_rejects_oversized_batch_before_side_effects() {
+        let dir = tempdir().unwrap();
+        let part = open(dir.path());
+        let q = QuarantineLog::open(dir.path()).unwrap();
+        let ing = Ingester::new(
+            part.clone(),
+            q,
+            vec!["ou".into(), "period".into(), "de".into()],
+        )
+        .with_max_batch_size(3);
+
+        let batch: Vec<Change> = (0..5)
+            .map(|i| mk_change(&format!("c{i}"), (i + 1) as u64))
+            .collect();
+
+        let err = ing.apply_batch(&batch).expect_err("oversized batch rejected");
+        assert!(
+            err.to_string().contains("max_batch_size"),
+            "error message mentions the configured ceiling: {err}"
+        );
+
+        // Nothing was accepted — the oversized batch fails closed, so no partition
+        // snapshot contains the first N-1 rows.
+        assert!(part.visible_segments().is_empty());
+        let row = part
+            .get(&dap_storage::PrimaryKey(vec![
+                Value::Str("ouAAAAAAAAA".into()),
+                Value::Str("202601".into()),
+                Value::Str("deAAAAAAAAA".into()),
+            ]))
+            .unwrap();
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn apply_batch_accepts_batch_at_exact_limit() {
+        let dir = tempdir().unwrap();
+        let part = open(dir.path());
+        let q = QuarantineLog::open(dir.path()).unwrap();
+        let ing = Ingester::new(
+            part.clone(),
+            q,
+            vec!["ou".into(), "period".into(), "de".into()],
+        )
+        .with_max_batch_size(3);
+
+        let batch: Vec<Change> = (0..3)
+            .map(|i| mk_change(&format!("c{i}"), (i + 1) as u64))
+            .collect();
+        let report = ing.apply_batch(&batch).unwrap();
+        // All three target the same PK → one accepted, two are earlier versions that get
+        // dropped as stale by the version fence. The point of this test is that the
+        // bound did not fire.
+        assert_eq!(report.accepted + report.dropped_stale, 3);
     }
 }

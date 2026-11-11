@@ -23,7 +23,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | CAT-003 | M | Query consistency + provenance contracts | DONE | `dap-core`, `dap-planner` | Provenance on every QueryResult |
 | ING-001 | M | Durable source adapters + canonical changes | DONE | `dap-ingest` | envelope + schema coercion |
 | ING-002 | M | Idempotent, ordered, checkpointed processing | DONE | `dap-ingest`, `dap-storage` | e2e acceptance #3 (10× replay = 1 effect) |
-| ING-003 | M | Bounded buffering, backfill, quarantine | PART | `dap-ingest` | quarantine log in place; bounded buffers DEFER |
+| ING-003 | M | Bounded buffering, backfill, quarantine | PART | `dap-ingest` | quarantine log in place; `Ingester::with_max_batch_size` fails oversized batches closed (no partial side effects); long-horizon backfill harness DEFER |
 | RUN-001 | M | Typed vector batches + ownership | DONE | `dap-runtime` | scalar oracle equivalence test |
 | RUN-002 | M | Scan, filter, project, hash aggregate, sort | DONE | `dap-runtime` | unit + e2e |
 | RUN-003 | M | Resource budgets, spill, cancel, fairness | PART | `dap-runtime` | ExecContext + budget guard; disk spill DEFER |
