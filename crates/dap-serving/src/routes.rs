@@ -36,6 +36,7 @@ pub fn api_router(state: SharedState) -> Router {
         .route("/api/analytics/v1/drilldown", post(drilldown))
         .route("/api/analytics/v1/ingest", post(ingest_batch))
         .route("/api/analytics/v1/data-products", get(list_data_products).post(register_data_product))
+        .route("/api/analytics/v1/data-products/:id", get(get_data_product).delete(delete_data_product))
         .route("/api/analytics/v1/jobs", get(list_jobs).post(submit_async_query))
         .route("/api/analytics/v1/jobs/:id", get(get_job))
         .route("/api/analytics/v1/jobs/:id/cancel", post(cancel_job))
@@ -215,6 +216,30 @@ async fn register_data_product(
         .write()
         .insert(product.id.clone(), product.clone());
     Ok(Json(product))
+}
+
+async fn get_data_product(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    state
+        .data_products
+        .read()
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| dap_core::DapError::NotFound(format!("data product {id}")).into())
+}
+
+async fn delete_data_product(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiErrorResponse> {
+    let removed = state.data_products.write().remove(&id);
+    if removed.is_none() {
+        return Err(dap_core::DapError::NotFound(format!("data product {id}")).into());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── Bulk ingest (used by the DHIS2 analytics-table rebuild) ─────────────────

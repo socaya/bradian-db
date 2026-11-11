@@ -226,6 +226,103 @@ async fn data_products_register_and_list() {
 }
 
 #[tokio::test]
+async fn data_product_get_by_id_and_delete() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let app = router(ServerState::new(engine));
+
+    // Register.
+    let product = json!({
+        "id": "dp_malaria_weekly",
+        "owner": "malaria-team",
+        "grain": ["ou", "period"],
+        "measures": ["sum_cases"],
+        "description": "Malaria weekly aggregate",
+        "consumers": [],
+        "freshness_contract": {
+            "max_staleness_seconds": 600,
+            "consistency": "CENTRAL_ACKNOWLEDGED"
+        }
+    });
+    let register = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/data-products")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(product.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(register.status(), StatusCode::OK);
+
+    // GET by id returns the product.
+    let fetch = app
+        .clone()
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fetch.status(), StatusCode::OK);
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(fetch.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload["id"], "dp_malaria_weekly");
+    assert_eq!(payload["owner"], "malaria-team");
+
+    // GET for an unknown id returns 404.
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products/does_not_exist")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    // DELETE removes it.
+    let remove = app
+        .clone()
+        .oneshot(
+            Request::delete("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remove.status(), StatusCode::NO_CONTENT);
+
+    // Follow-up DELETE for the same id yields 404.
+    let remove_again = app
+        .clone()
+        .oneshot(
+            Request::delete("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remove_again.status(), StatusCode::NOT_FOUND);
+
+    // And the list is empty again.
+    let list = app
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(list.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn explain_endpoint_returns_operator_tree() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());

@@ -45,7 +45,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | DST-003 | A | Distributed query fragments | DEFER | `dap-distributed` | multi-worker correctness |
 | DST-004 | A | Safe merging + residency policy | DEFER | `dap-distributed`, `dap-security` | cross-site distinct/privacy |
 | API-001 | M | Typed, versioned secure query API | DONE | `dap-serving` | router + HTTP roundtrip tests |
-| API-002 | M | Data product + freshness + drilldown APIs | PART | `dap-serving` | freshness landed; drilldown + data products DEFER |
+| API-002 | M | Data product + freshness + drilldown APIs | DONE | `dap-serving` | freshness + drilldown + full data-product CRUD (list / register / get-by-id / delete), all covered by integration tests in `http_roundtrip.rs` |
 | API-003 | M | Async jobs, cancel, bounded export | DEFER | `dap-serving` | large dataset + revocation |
 | SEC-001 | M | Row/column/OU/program/site policy | DONE | `dap-security` | policy_predicate + e2e acceptance test |
 | SEC-002 | M | Context-safe caching + diagnostics | DONE | `dap-security` | cache_key fingerprint test |
