@@ -248,4 +248,36 @@ mod tests {
         let err = export_snapshot(&part, &root).expect_err("second export rejected");
         assert!(err.to_string().contains("already"));
     }
+
+    #[test]
+    fn restore_refuses_non_empty_target() {
+        let src = tempdir().unwrap();
+        let part = open_part(src.path());
+        write_one_segment(&part, "ouAAAAAAAAA", 1.5);
+
+        let export_dir = tempdir().unwrap();
+        let export_root = export_dir.path().join("snap");
+        export_snapshot(&part, &export_root).unwrap();
+
+        // Pre-populate the target so restore must fail closed rather than clobber.
+        let target_dir = tempdir().unwrap();
+        fs::create_dir_all(target_dir.path()).unwrap();
+        fs::write(target_dir.path().join("pre-existing"), b"do not delete").unwrap();
+
+        let err = restore_snapshot(&export_root, target_dir.path())
+            .expect_err("restore rejected into a non-empty target");
+        assert!(err.to_string().contains("non-empty"));
+
+        // Target contents are untouched.
+        assert!(target_dir.path().join("pre-existing").exists());
+    }
+
+    #[test]
+    fn restore_rejects_missing_snapshot_header() {
+        let empty_export = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let err = restore_snapshot(empty_export.path(), &target.path().join("new"))
+            .expect_err("restore rejected without SNAPSHOT.json");
+        assert!(err.to_string().contains("SNAPSHOT.json"));
+    }
 }

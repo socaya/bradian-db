@@ -52,7 +52,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | SEC-003 | M | Encryption + governed deletion + export audit | PART | `dap-security` | AuditLog in place; encryption DEFER |
 | OPS-001 | M | Metrics, tracing, profiling, query history | DONE | `dap-serving` | /engine/health + query history ring |
 | OPS-002 | M | Capture isolation + bounded background | DEFER | `dap-runtime`, `dap-admin` | Capture latency co-load bench |
-| OPS-003 | M | Snapshot restore + source-log rebuild | PART | `dap-storage` | WAL replay covers runtime restart; snapshot export DEFER |
+| OPS-003 | M | Snapshot restore + source-log rebuild | DONE | `dap-storage`, `dap-admin` | WAL replay covers runtime restart; `export_snapshot` + `restore_snapshot` + `inspect-snapshot` CLI ship with round-trip + refuse-overwrite + refuse-non-empty-target + missing-header tests |
 | OPS-004 | M | Modern full-screen DER Admin app | DEFER | (out-of-tree) | UI E2E + a11y |
 | OPS-005 | M | Reproducible benchmarking + regression CI | DONE | `dap-benchmark` | criterion harness + scripts/bench.sh |
 | OPS-006 | A | Automated index/view/stat tuning | DEFER | `dap-planner`, `dap-storage` | controlled A/B |
