@@ -31,6 +31,7 @@
 
 pub mod aggregate;
 pub mod completion;
+pub mod custom_aggregation;
 pub mod event;
 pub mod expression;
 pub mod indicator;
@@ -40,6 +41,10 @@ pub mod tracker;
 
 pub use aggregate::{collapse_cells, collapse_cells_ts, Combiner, Reduction, ReductionPair};
 pub use completion::{CompletionFact, CompletionKey, CompletionStore};
+pub use custom_aggregation::{
+    compile_custom_aggregation, evaluate_custom_aggregation, AggregatorKind,
+    CustomAggregationPlan,
+};
 pub use event::{
     evaluate_event_program_indicator, AnalyticsType, EventFact, EventStatus, PIResult,
     ProgramIndicatorPlan,

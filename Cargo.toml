@@ -35,6 +35,7 @@ dap-planner   = { path = "crates/dap-planner" }
 dap-ingest    = { path = "crates/dap-ingest" }
 dap-views     = { path = "crates/dap-views" }
 dap-dhis2     = { path = "crates/dap-dhis2" }
+
 dap-security  = { path = "crates/dap-security" }
 dap-serving   = { path = "crates/dap-serving" }
 dap-admin     = { path = "crates/dap-admin" }

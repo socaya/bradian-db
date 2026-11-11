@@ -13,6 +13,7 @@ dap-core    = { workspace = true }
 dap-catalog = { workspace = true }
 dap-storage = { workspace = true }
 dap-runtime = { workspace = true }
+dap-dhis2   = { workspace = true }
 serde       = { workspace = true }
 thiserror   = { workspace = true }
 ahash       = { workspace = true }

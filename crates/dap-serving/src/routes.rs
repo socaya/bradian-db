@@ -126,6 +126,9 @@ async fn explain_query(
 fn build_plan(state: &SharedState, request: &QueryRequest) -> DapResult<LogicalPlan> {
     let (dataset, partition_id) = match request {
         QueryRequest::Aggregate(aq) => (aq.dataset.as_str().to_string(), aq.partition.clone()),
+        QueryRequest::ProgramIndicator(piq) => {
+            (piq.program.as_str().to_string(), piq.partition.clone())
+        }
     };
     let partition = state.engine.get_partition(&dataset, &partition_id)?;
     let ctx = PlanContext {

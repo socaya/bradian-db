@@ -65,6 +65,134 @@ impl LogicalPlan {
     ) -> DapResult<Self> {
         match request {
             QueryRequest::Aggregate(aq) => build_aggregate(ctx, aq, partition),
+            QueryRequest::ProgramIndicator(piq) => build_program_indicator(ctx, piq, partition),
+        }
+    }
+}
+
+fn build_program_indicator(
+    ctx: &PlanContext,
+    piq: &crate::dsl::ProgramIndicatorQuery,
+    partition: Arc<Partition>,
+) -> DapResult<LogicalPlan> {
+    // Resolve the program + indicator through the catalog. Program must exist; indicator
+    // fetch gives the compiled form used by the executor. A missing indicator surfaces as
+    // NotFound and the HTTP layer translates it to 404.
+    let _program = ctx.catalog.program(&piq.program)?;
+    let _pi = ctx.catalog.program_indicator(&piq.indicator)?;
+
+    let schema = partition.schema().clone();
+
+    // Period, OU and arbitrary filters compose into an AND-predicate like the aggregate
+    // path. The per-event / per-enrollment PI evaluation is driven by the executor's
+    // dap_dhis2 adapter.
+    let mut terms: Vec<Predicate> = Vec::new();
+    if let Some(p) = &piq.period {
+        // We default the period column to `event_date` for program-indicator fact tables.
+        terms.push(program_period_predicate(p)?);
+    }
+    if let Some(ou) = &piq.org_unit {
+        terms.push(org_unit_predicate(&ctx.catalog, ou)?);
+    }
+    for f in &piq.filters {
+        terms.push(filter_predicate(f)?);
+    }
+    let predicate = if terms.is_empty() {
+        Predicate::True
+    } else if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else {
+        Predicate::And(terms)
+    };
+
+    // Output schema = group_by columns + {indicator_value: F64}.
+    let mut output_cols = Vec::new();
+    for g in &piq.group_by {
+        output_cols.push(schema.column(g)?.clone());
+    }
+    output_cols.push(dap_core::Column::new(
+        "indicator_value",
+        dap_core::LogicalType::F64,
+    ));
+    let output_schema = Schema::new(output_cols)?;
+
+    Ok(LogicalPlan {
+        partition,
+        predicate,
+        group_by: piq.group_by.clone(),
+        // PI execution uses the special Sum aggregator on the pre-computed indicator_value
+        // column. The executor adapter populates that column per-grain before the hash
+        // aggregate pass runs.
+        aggregates: vec![AggregateKind::Sum {
+            column: "indicator_value".into(),
+        }],
+        order_by: vec![],
+        limit: piq.limit,
+        output_schema,
+    })
+}
+
+fn program_period_predicate(spec: &PeriodSpec) -> DapResult<Predicate> {
+    // Program-indicator fact tables carry `event_date` (Unix ms). Period filters compare
+    // against range bounds in ms.
+    match spec {
+        PeriodSpec::Exact(code) => {
+            let p = dap_core::Period::parse(code)?;
+            let (start, end) = p.range_millis();
+            Ok(Predicate::And(vec![
+                Predicate::Compare {
+                    left: Expr::Col("event_date".into()),
+                    op: CmpOp::GtEq,
+                    right: Expr::Lit(Value::I64(start)),
+                },
+                Predicate::Compare {
+                    left: Expr::Col("event_date".into()),
+                    op: CmpOp::Lt,
+                    right: Expr::Lit(Value::I64(end)),
+                },
+            ]))
+        }
+        PeriodSpec::In(codes) => {
+            let mut or_terms = Vec::with_capacity(codes.len());
+            for c in codes {
+                let p = dap_core::Period::parse(c)?;
+                let (start, end) = p.range_millis();
+                or_terms.push(Predicate::And(vec![
+                    Predicate::Compare {
+                        left: Expr::Col("event_date".into()),
+                        op: CmpOp::GtEq,
+                        right: Expr::Lit(Value::I64(start)),
+                    },
+                    Predicate::Compare {
+                        left: Expr::Col("event_date".into()),
+                        op: CmpOp::Lt,
+                        right: Expr::Lit(Value::I64(end)),
+                    },
+                ]));
+            }
+            Ok(Predicate::Or(or_terms))
+        }
+        PeriodSpec::Range {
+            period_type: _,
+            start,
+            end,
+        } => {
+            let s = dap_core::Period::parse(start)?;
+            let e = dap_core::Period::parse(end)?;
+            let (s_ms, _) = s.range_millis();
+            let (_, e_ms) = e.range_millis();
+            Ok(Predicate::And(vec![
+                Predicate::Compare {
+                    left: Expr::Col("event_date".into()),
+                    op: CmpOp::GtEq,
+                    right: Expr::Lit(Value::I64(s_ms)),
+                },
+                Predicate::Compare {
+                    left: Expr::Col("event_date".into()),
+                    op: CmpOp::Lt,
+                    right: Expr::Lit(Value::I64(e_ms)),
+                },
+            ]))
         }
     }
 }

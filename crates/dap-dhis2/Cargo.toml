@@ -12,7 +12,6 @@ description = "DHIS2 aggregate/event/tracker/indicator semantics"
 dap-core    = { workspace = true }
 ahash       = { workspace = true }
 dap-catalog = { workspace = true }
-dap-planner = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }

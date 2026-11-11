@@ -14,6 +14,30 @@ use serde::{Deserialize, Serialize};
 pub enum QueryRequest {
     /// Aggregate analytical query over a dataset partition.
     Aggregate(AggregateQuery),
+    /// Program Indicator evaluation over an event/tracker program.
+    ProgramIndicator(ProgramIndicatorQuery),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramIndicatorQuery {
+    pub program: Uid,
+    pub partition: String,
+    /// DHIS2 program indicator UID. The catalog must hold its compiled form.
+    pub indicator: Uid,
+    /// Group the per-grain results by one or more OU UIDs (sub-tree expansion is done by
+    /// the planner when `org_unit_subtree` is set).
+    #[serde(default)]
+    pub group_by: Vec<String>,
+    #[serde(default)]
+    pub period: Option<PeriodSpec>,
+    #[serde(default)]
+    pub org_unit: Option<OrgUnitSelector>,
+    #[serde(default)]
+    pub filters: Vec<FilterSpec>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub consistency: QueryConsistency,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
