@@ -15,7 +15,7 @@
 
 use dap_core::{LogicalType, Schema, Value};
 use dap_runtime::expr::{CmpOp, Expr, Predicate};
-use dap_storage::{ColumnMeta, ManifestSegment, SegmentReader};
+use dap_storage::{ColumnMeta, ManifestSegment, SegmentReader, ZoneMap};
 
 /// Decide whether a segment could contribute any row satisfying `predicate`.
 pub fn segment_can_contribute(
@@ -40,9 +40,36 @@ fn predicate_can_be_true(p: &Predicate, schema: &Schema, cols: &[&ColumnMeta]) -
         Predicate::False => false,
         Predicate::And(subs) => subs.iter().all(|s| predicate_can_be_true(s, schema, cols)),
         Predicate::Or(subs) => subs.iter().any(|s| predicate_can_be_true(s, schema, cols)),
-        Predicate::Not(_) | Predicate::IsNull(_) | Predicate::IsNotNull(_) => true,
+        Predicate::Not(_) => true,
+        Predicate::IsNull(e) => is_null_can_match(e, cols),
+        Predicate::IsNotNull(e) => is_not_null_can_match(e, cols),
         Predicate::Compare { left, op, right } => compare_can_match(left, *op, right, schema, cols),
         Predicate::In { expr, values } => in_list_can_match(expr, values, schema, cols),
+    }
+}
+
+fn zone_map_for<'a>(expr: &Expr, cols: &'a [&ColumnMeta]) -> Option<&'a ZoneMap> {
+    let col_name = match expr {
+        Expr::Col(c) => c.as_str(),
+        _ => return None,
+    };
+    cols.iter().find(|c| c.name == col_name).map(|c| &c.zone_map)
+}
+
+fn is_null_can_match(expr: &Expr, cols: &[&ColumnMeta]) -> bool {
+    match zone_map_for(expr, cols) {
+        // No zone map or non-trivial expression → stay conservative.
+        None => true,
+        // At least one null means IsNull can still fire.
+        Some(zm) => zm.null_count > 0,
+    }
+}
+
+fn is_not_null_can_match(expr: &Expr, cols: &[&ColumnMeta]) -> bool {
+    match zone_map_for(expr, cols) {
+        None => true,
+        // IsNotNull cannot match when every row of the slice is null.
+        Some(zm) => zm.null_count < zm.row_count,
     }
 }
 
@@ -304,5 +331,87 @@ mod tests {
             ],
         };
         assert_eq!(prune_segments(&segs, p.schema(), &predicate).len(), 1);
+    }
+
+    #[test]
+    fn is_null_prunes_segment_without_nulls() {
+        let dir = tempdir().unwrap();
+        let p = open_part(dir.path());
+        // Every row has a non-null value → zone_map.null_count == 0.
+        p.upsert_row(
+            vec![
+                Value::Str("ouAAAAAAAAA".into()),
+                Value::Str("202601".into()),
+                Value::F64(1.0),
+            ],
+            1,
+        )
+        .unwrap();
+        p.flush().unwrap();
+        let segs = p.visible_segments();
+
+        let predicate = Predicate::IsNull(Expr::Col("value".into()));
+        assert_eq!(
+            prune_segments(&segs, p.schema(), &predicate).len(),
+            0,
+            "IsNull must prune a segment whose zone map proves no nulls exist"
+        );
+    }
+
+    #[test]
+    fn is_null_keeps_segment_with_nulls() {
+        let dir = tempdir().unwrap();
+        let p = open_part(dir.path());
+        p.upsert_row(
+            vec![
+                Value::Str("ouAAAAAAAAA".into()),
+                Value::Str("202601".into()),
+                Value::Null,
+            ],
+            1,
+        )
+        .unwrap();
+        p.flush().unwrap();
+        let segs = p.visible_segments();
+
+        let predicate = Predicate::IsNull(Expr::Col("value".into()));
+        assert_eq!(
+            prune_segments(&segs, p.schema(), &predicate).len(),
+            1,
+            "IsNull must keep a segment that has at least one null"
+        );
+    }
+
+    #[test]
+    fn is_not_null_keeps_segment_with_any_non_null() {
+        let dir = tempdir().unwrap();
+        let p = open_part(dir.path());
+        p.upsert_row(
+            vec![
+                Value::Str("ouAAAAAAAAA".into()),
+                Value::Str("202601".into()),
+                Value::F64(1.0),
+            ],
+            1,
+        )
+        .unwrap();
+        p.upsert_row(
+            vec![
+                Value::Str("ouBBBBBBBBB".into()),
+                Value::Str("202601".into()),
+                Value::Null,
+            ],
+            1,
+        )
+        .unwrap();
+        p.flush().unwrap();
+        let segs = p.visible_segments();
+
+        let predicate = Predicate::IsNotNull(Expr::Col("value".into()));
+        assert_eq!(
+            prune_segments(&segs, p.schema(), &predicate).len(),
+            1,
+            "IsNotNull must keep a segment with at least one non-null row"
+        );
     }
 }
