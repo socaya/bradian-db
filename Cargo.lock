@@ -546,6 +546,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dap-distributed"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "blake3",
+ "dap-catalog",
+ "dap-core",
+ "dap-planner",
+ "dap-runtime",
+ "dap-security",
+ "dap-storage",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dap-e2e"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,29 @@
+[package]
+name = "dap-distributed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Distributed and federated analytical execution: coordinator, workers, exchange, reconciliation"
+
+[dependencies]
+dap-core     = { workspace = true }
+dap-catalog  = { workspace = true }
+dap-runtime  = { workspace = true }
+dap-planner  = { workspace = true }
+dap-storage  = { workspace = true }
+dap-security = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+parking_lot  = { workspace = true }
+ahash        = { workspace = true }
+blake3       = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }
+tokio        = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

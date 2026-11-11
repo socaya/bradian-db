@@ -13,6 +13,7 @@ members = [
     "crates/dap-serving",
     "crates/dap-admin",
     "crates/dap-benchmark",
+    "crates/dap-distributed",
     "tests/dap-e2e",
 ]
 
@@ -35,6 +36,7 @@ dap-planner   = { path = "crates/dap-planner" }
 dap-ingest    = { path = "crates/dap-ingest" }
 dap-views     = { path = "crates/dap-views" }
 dap-dhis2     = { path = "crates/dap-dhis2" }
+dap-distributed = { path = "crates/dap-distributed" }
 
 dap-security  = { path = "crates/dap-security" }
 dap-serving   = { path = "crates/dap-serving" }
