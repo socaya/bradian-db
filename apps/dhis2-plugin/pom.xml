@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.dap</groupId>
+    <artifactId>dap-dhis2-plugin</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>DAP DHIS2 Analytics Plugin</name>
+    <description>
+        Service-provider implementation of DHIS2's AnalyticsDatabase interface that
+        delegates to a running DAP HTTP engine. Targets DHIS2 2.41 and later (the first
+        DHIS2 release that ships a pluggable analytics-engine SPI). Java 17 minimum —
+        matches DHIS2 2.41's JDK requirement. Configured via dhis.conf — see
+        docs/adr/0005-dhis2-analytics-engine.md and docs/dhis.conf.example at the repo
+        root.
+    </description>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- DHIS2 compatibility window. 2.41 introduced the pluggable analytics-engine
+             service-provider contract this plugin targets. Later minor releases remain
+             backwards-compatible; bump the max when a DHIS2 release changes the SPI. -->
+        <dhis2.min.version>2.41</dhis2.min.version>
+        <dhis2.max.version>2.43</dhis2.max.version>
+
+        <jackson.version>2.17.2</jackson.version>
+        <junit.version>5.11.0</junit.version>
+        <mockserver.version>5.15.0</mockserver.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.mock-server</groupId>
+            <artifactId>mockserver-netty-no-dependencies</artifactId>
+            <version>${mockserver.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.0</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

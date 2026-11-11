@@ -1,4 +1,5 @@
 # Example DHIS2 configuration pointing analytics at a DAP engine.
+# Requires DHIS2 2.41 or later (the pluggable analytics-engine SPI landed in 2.41).
 # Drop this file under $DHIS2_HOME/dhis.conf (or your orchestrator's secret store).
 
 # ---- Connection to DHIS2's transactional PostgreSQL (unchanged) ----

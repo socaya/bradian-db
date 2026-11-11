@@ -24,6 +24,24 @@ want the same `dhis.conf` ergonomics so a DHIS2 operator can swap Doris / ClickH
 DAP without changing the DHIS2 server code they ship. This ADR pins the contract and the
 on-disk / on-wire shape.
 
+## Scope — DHIS2 2.41 and later
+
+DHIS2 2.41 is the first release that ships the pluggable analytics-engine SPI this
+contract rides on (`org.hisp.dhis.analytics.AnalyticsDatabase`). Earlier DHIS2 versions
+hard-wire the in-process PostgreSQL engine and cannot be re-pointed at an external
+backend without a DHIS2 source patch. The adapter is therefore scoped to:
+
+- **DHIS2 2.41** — supported, pinned via `apps/dhis2-plugin/pom.xml`.
+- **DHIS2 2.42 / 2.43** — supported; the SPI is stable across minor releases and the
+  plug-in ships a compatibility test matrix at
+  `apps/dhis2-plugin/src/test/java/org/dap/dhis2/*`.
+- **DHIS2 2.44+** — accepted as long as the SPI contract does not change. Bump
+  `${dhis2.max.version}` in the pom and re-run the compat matrix.
+- **DHIS2 2.40 and earlier** — not supported. Operators on 2.40 or lower either stay on
+  the in-process PostgreSQL engine or upgrade DHIS2.
+
+Java **17** is the minimum JDK, matching DHIS2 2.41's own JDK requirement.
+
 ## Decision — HTTP-first, JDBC-optional
 
 DHIS2's analytics-engine interface is JDBC-shaped today. DAP exposes an HTTP contract

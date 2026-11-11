@@ -59,6 +59,10 @@ pub struct Dhis2AnalyticsRequest {
     /// dataset / program UID used to look up the partition.
     pub dataset: Option<String>,
     pub program: Option<String>,
+    /// Program indicator UID (event / enrollment analytics).
+    pub indicator: Option<String>,
+    /// Program stage UID — optional for event analytics.
+    pub stage: Option<String>,
     /// Logical partition suffix for this DAP deployment. Defaults to "p1".
     #[serde(default = "default_partition")]
     pub partition: String,
@@ -174,34 +178,55 @@ async fn aggregate_analytics(
 }
 
 async fn event_analytics(
-    State(_state): State<SharedState>,
-    Json(_req): Json<Dhis2AnalyticsRequest>,
+    State(state): State<SharedState>,
+    Json(req): Json<Dhis2AnalyticsRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    // Events-grain adapter routes through the ProgramIndicatorQuery path. v1 ships an
-    // explicit NotImplemented so operators see a clear diagnostic instead of a silently
-    // wrong response; the full adapter lands with the same shape as aggregate above.
-    Err::<Json<Dhis2AnalyticsResponse>, _>(
-        DapError::unsupported(
-            "DHIS2 event analytics adapter under /api/analytics/events/query.json is \
-             scheduled for the next iteration; use /api/analytics/v1/query with \
-             program_indicator kind in the meantime",
-        )
-        .into(),
-    )
+    run_program_indicator(state, req).await
 }
 
 async fn enrollment_analytics(
-    State(_state): State<SharedState>,
-    Json(_req): Json<Dhis2AnalyticsRequest>,
+    State(state): State<SharedState>,
+    Json(req): Json<Dhis2AnalyticsRequest>,
 ) -> Result<impl IntoResponse, ApiErrorResponse> {
-    Err::<Json<Dhis2AnalyticsResponse>, _>(
-        DapError::unsupported(
-            "DHIS2 enrollment analytics adapter is scheduled for the next iteration; \
-             use /api/analytics/v1/query with program_indicator kind + \
-             AnalyticsType::Enrollment",
-        )
-        .into(),
-    )
+    run_program_indicator(state, req).await
+}
+
+async fn run_program_indicator(
+    state: SharedState,
+    req: Dhis2AnalyticsRequest,
+) -> Result<Json<Dhis2AnalyticsResponse>, ApiErrorResponse> {
+    let program = req
+        .program
+        .clone()
+        .ok_or_else(|| DapError::invalid_value("program is required for event/enrollment analytics"))?;
+    let indicator = req
+        .indicator
+        .clone()
+        .ok_or_else(|| DapError::invalid_value("indicator UID is required"))?;
+    let partition_id = req.partition.clone();
+    let program_uid = dap_core::Uid::new(program.clone())?;
+    let indicator_uid = dap_core::Uid::new(indicator)?;
+    let piq = dap_planner::dsl::ProgramIndicatorQuery {
+        program: program_uid,
+        partition: partition_id.clone(),
+        indicator: indicator_uid,
+        group_by: vec!["ou".into()],
+        period: period_from_strings(&req.pe),
+        org_unit: org_unit_from_strings(&req.ou),
+        filters: filters_from_dhis2(&req.filter),
+        limit: req.limit,
+        consistency: QueryConsistency::default(),
+    };
+    let request = QueryRequest::ProgramIndicator(piq);
+    let partition_arc = state.engine.get_partition(&program, &partition_id)?;
+    let ctx = dap_planner::plan::PlanContext {
+        catalog: state.engine.catalog.clone(),
+        options: Default::default(),
+    };
+    let plan = dap_planner::plan::LogicalPlan::build(&ctx, &request, partition_arc)?;
+    let exec = ExecContext::default();
+    let result = dap_planner::runner::QueryExecutor::execute(&plan, &exec)?;
+    Ok(Json(response_from_batch(result)?))
 }
 
 async fn raw_data(
