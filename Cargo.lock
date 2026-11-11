@@ -729,6 +729,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "blake3",
  "dap-catalog",
  "dap-core",
  "dap-dhis2",
@@ -748,6 +749,20 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "dap-sources"
+version = "0.1.0"
+dependencies = [
+ "dap-core",
+ "dap-ingest",
+ "dap-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

@@ -7,9 +7,11 @@
 
 pub mod engine;
 pub mod error;
+pub mod jobs;
 pub mod routes;
 pub mod state;
 
 pub use engine::AnalyticsEngine;
+pub use jobs::{JobProgress, JobRecord, JobRegistry, JobStatus};
 pub use routes::router;
 pub use state::{ServerState, SharedState};

@@ -13,6 +13,7 @@ pub mod codec;
 pub mod column;
 pub mod partition;
 pub mod segment;
+pub mod snapshot_export;
 pub mod zonemap;
 
 pub use column::{ColumnBuffer, ColumnValue};
@@ -24,4 +25,5 @@ pub use segment::{
     CodecId, ColumnMeta, FeatureFlags, PageMeta, SegmentFooter, SegmentReader, SegmentWriter,
     SegmentWriterOptions, SEGMENT_MAGIC, SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
 };
+pub use snapshot_export::{export_snapshot, restore_snapshot, SnapshotHeader};
 pub use zonemap::ZoneMap;

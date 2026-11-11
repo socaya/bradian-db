@@ -6,6 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::engine::AnalyticsEngine;
+use crate::jobs::JobRegistry;
 use crate::routes::DataProduct;
 
 #[derive(Debug)]
@@ -13,6 +14,7 @@ pub struct ServerState {
     pub engine: Arc<AnalyticsEngine>,
     pub query_history: RwLock<Vec<QueryHistoryEntry>>,
     pub data_products: RwLock<HashMap<String, DataProduct>>,
+    pub jobs: Arc<JobRegistry>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +34,7 @@ impl ServerState {
             engine,
             query_history: RwLock::new(Vec::new()),
             data_products: RwLock::new(HashMap::new()),
+            jobs: JobRegistry::new(),
         })
     }
 }
