@@ -143,6 +143,21 @@ impl HistorySqlEngine {
         self.domain.prepared_schema_proposals()
     }
 
+    /// G29: permanently retire a prepared schema change with a synchronized
+    /// historical WAL marker. This does not update the live catalog.
+    pub fn abort_prepared_schema(&self, qualified_table: &str) -> SqlResult<u64> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let table = self.resolve(&parts)?;
+        Ok(self.domain.abort_prepared_schema(table.id)?)
+    }
+
+    /// Returns WAL-recovered abort markers at engine open. Reopen to refresh.
+    pub fn aborted_schema_proposals(&self) -> Vec<(crate::TableId, u64)> {
+        self.domain.aborted_schema_proposals()
+    }
+
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks
