@@ -440,3 +440,28 @@ fn malformed_batch_with_recomputed_crc_fails_closed() {
     fs::write(path, bytes).unwrap();
     assert!(matches!(RowStore::open(dir.path()), Err(StoreError::Corruption(_))));
 }
+
+
+#[test]
+fn exclusive_directory_lock_blocks_second_store_until_drop() {
+    let dir = tempdir().unwrap();
+    let first = open(dir.path());
+    first.put(b"lock", b"first").unwrap();
+    assert!(matches!(RowStore::open(dir.path()), Err(StoreError::Busy)));
+    drop(first);
+    let second = open(dir.path());
+    assert_eq!(second.get(b"lock"), Some(b"first".to_vec()));
+    assert_eq!(second.put(b"lock", b"second").unwrap(), 2);
+}
+
+#[test]
+fn lock_is_released_after_ordinary_store_drop() {
+    let dir = tempdir().unwrap();
+    for i in 1..=4 {
+        let store = open(dir.path());
+        let key = format!("value-{i}");
+        assert_eq!(store.put(key.as_bytes(), b"present").unwrap(), i);
+        drop(store);
+    }
+    assert_eq!(open(dir.path()).len(), 4);
+}
