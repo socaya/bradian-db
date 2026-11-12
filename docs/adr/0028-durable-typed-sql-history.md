@@ -68,6 +68,6 @@ No existing G16 or G21 database is modified in place by G23. Existing DAP analyt
 
 This slice is **not** a production SQL history server: it lacks schema-version migrations, G18-managed source conversion, G19 coordinated database-wide backup integration, SQL connection protocol, general joins/filters, serializable predicates, access control, encryption and cluster coordination. G22 history remains logically durable but the current engine loads retained historical key/version metadata in memory; no on-disk version-index query planner, bounds on historical retention or workload benchmarks are claimed.
 
-G23 has committed integration tests for explicit migration and original-source preservation, historical point and full-table SQL reads through restart/checkpoint, atomic cross-table updates, tombstone history, rollback, lock exclusion, ambiguous storage refusal and source/staging cutover protection.
+G23 has twelve committed integration tests for explicit migration and original-source preservation, historical point and full-table SQL reads through restart/checkpoint, atomic cross-table updates, tombstone history, rollback, lock exclusion, ambiguous storage refusal and source/staging cutover protection.
 
 **Build/test execution:** not performed in this environment. Manual Cargo check/test/Clippy, controlled fault-injection, source-data checksums, large migration performance, cross-platform filesystem sync/rename and operator rollback validation remain release prerequisites. Automatic GitHub CI stays manual-only.
