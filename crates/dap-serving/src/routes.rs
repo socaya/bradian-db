@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::{Path, State};
+use axum::middleware;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -40,8 +41,13 @@ pub fn api_router(state: SharedState) -> Router {
         .route("/api/analytics/v1/jobs", get(list_jobs).post(submit_async_query))
         .route("/api/analytics/v1/jobs/:id", get(get_job))
         .route("/api/analytics/v1/jobs/:id/cancel", post(cancel_job))
-        .route("/healthz", get(healthz))
         .merge(crate::dhis2_compat::dhis2_routes())
+        // Protect every analytical and DHIS2 endpoint before applying the public health route.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_bootstrap_admin,
+        ))
+        .route("/healthz", get(healthz))
         .with_state(state)
 }
 
