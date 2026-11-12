@@ -10,7 +10,7 @@
 //! File: checkpoint.current, staged as checkpoint.pending.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 use crc32fast::Hasher;
 use thiserror::Error;
@@ -119,21 +119,55 @@ pub fn publish(root: &Path, next: CheckpointManifest) -> Result<(), ManifestErro
 /// A lightweight format check and length/bounds inspection before accepting
 /// a manifest's published generation. Full BRPG CRC validation is performed
 /// by RowStore's existing snapshot and index readers.
-pub fn check_files(root: &Path, manifest: CheckpointManifest) -> Result<(), ManifestError> {
+/// Verify the expected authoritative snapshot length independently of the
+/// *derived* index, which may be missing after an interrupted publication.
+pub fn check_snapshot(root: &Path, manifest: CheckpointManifest) -> Result<(), ManifestError> {
     let snapshot = root.join(format!("snapshot-{}.brp", manifest.lsn));
-    let index = root.join(format!("index-{}.bri", manifest.lsn));
-    let snapshot_len = fs::metadata(snapshot)?.len();
-    let index_len = fs::metadata(index)?.len();
-    let page_size = crate::page::PAGE_SIZE as u64;
-    if snapshot_len != manifest.data_pages.checked_add(1)
-        .and_then(|p| p.checked_mul(page_size))
-        .ok_or(ManifestError::Corruption("snapshot page count overflow"))?
-        || index_len != manifest.index_pages.checked_add(1)
-        .and_then(|p| p.checked_mul(page_size))
-        .ok_or(ManifestError::Corruption("index page count overflow"))?
-    {
-        return Err(ManifestError::Corruption("published file lengths disagree with manifest"));
+    let actual = fs::metadata(snapshot)?.len();
+    let expected = manifest.data_pages.checked_add(1)
+        .and_then(|p| p.checked_mul(crate::page::PAGE_SIZE as u64))
+        .ok_or(ManifestError::Corruption("snapshot page count overflow"))?;
+    if actual != expected {
+        return Err(ManifestError::Corruption("published snapshot length disagrees with manifest"));
     }
+    Ok(())
+}
+
+/// Validate the derived index length when it exists. A missing index can be
+/// reconstructed after the authoritative snapshot has been CRC-verified.
+pub fn check_index(root: &Path, manifest: CheckpointManifest) -> Result<(), ManifestError> {
+    let index = root.join(format!("index-{}.bri", manifest.lsn));
+    let actual = fs::metadata(index)?.len();
+    let expected = manifest.index_pages.checked_add(1)
+        .and_then(|p| p.checked_mul(crate::page::PAGE_SIZE as u64))
+        .ok_or(ManifestError::Corruption("index page count overflow"))?;
+    if actual != expected {
+        return Err(ManifestError::Corruption("published index length disagrees with manifest"));
+    }
+    Ok(())
+}
+
+/// Before a new checkpoint can use its LSN as a filename, quarantine files
+/// from a previous attempt that never published a matching manifest. The WAL
+/// must already have been replayed successfully, and the caller must hold the
+/// exclusive RowStore lock. Existing committed generations are never touched.
+pub(crate) fn quarantine_uncommitted(
+    root: &Path, committed: CheckpointManifest, target_lsn: u64,
+) -> Result<(), ManifestError> {
+    if target_lsn <= committed.lsn {
+        return Err(ManifestError::Regressed);
+    }
+    for (prefix, suffix) in [("snapshot", "brp"), ("index", "bri")] {
+        let original = root.join(format!("{prefix}-{target_lsn}.{suffix}"));
+        if original.exists() {
+            let orphan = root.join(format!("{prefix}-{target_lsn}.{suffix}.orphan"));
+            if orphan.exists() {
+                return Err(ManifestError::Corruption("previous orphan quarantine already exists"));
+            }
+            fs::rename(original, orphan)?;
+        }
+    }
+    sync_directory(root)?;
     Ok(())
 }
 
