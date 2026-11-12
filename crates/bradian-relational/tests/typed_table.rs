@@ -259,3 +259,45 @@ fn point_reads_verify_value_matches_physical_primary_key() {
     assert!(matches!(reopened.get(&[Value::Int64(11)]), Err(TableError::Corruption(_))));
     assert!(matches!(reopened.scan(), Err(TableError::Corruption(_))));
 }
+
+
+#[test]
+fn typed_primary_key_uses_checkpointed_disk_index_and_recovers_after_restart() {
+    let dir = tempdir().unwrap();
+    let table_def = schema();
+    {
+        let table = TableStore::open(dir.path(), table_def.clone()).unwrap();
+        for id in 1..=320 {
+            table.insert(&invoice(id, &format!("invoice-{id}"))).unwrap();
+        }
+        let lsn = table.checkpoint().unwrap();
+        assert!(dir.path().join(format!("index-{lsn}.bri")).exists());
+        assert_eq!(table.get(&[Value::Int64(1)]).unwrap(), Some(invoice(1, "invoice-1")));
+        assert_eq!(table.get(&[Value::Int64(320)]).unwrap(), Some(invoice(320, "invoice-320")));
+    }
+    let table = TableStore::open(dir.path(), table_def).unwrap();
+    assert_eq!(table.get(&[Value::Int64(200)]).unwrap(), Some(invoice(200, "invoice-200")));
+    let mut replaced = invoice(200, "changed-after-checkpoint");
+    replaced[3] = Value::Boolean(true);
+    table.replace(&replaced).unwrap();
+    assert_eq!(table.get(&[Value::Int64(200)]).unwrap(), Some(replaced));
+}
+
+#[test]
+fn typed_point_read_fails_when_published_index_is_corrupt() {
+    use std::fs;
+    let dir = tempdir().unwrap();
+    let table_def = schema();
+    let lsn;
+    {
+        let table = TableStore::open(dir.path(), table_def.clone()).unwrap();
+        table.insert(&invoice(5, "protected")).unwrap();
+        lsn = table.checkpoint().unwrap();
+    }
+    let path = dir.path().join(format!("index-{lsn}.bri"));
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[4096+40] ^= 1;
+    fs::write(&path, bytes).unwrap();
+    let table = TableStore::open(dir.path(), table_def).unwrap();
+    assert!(matches!(table.get(&[Value::Int64(5)]), Err(TableError::Storage(_))));
+}
