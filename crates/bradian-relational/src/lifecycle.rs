@@ -123,6 +123,18 @@ impl CatalogLifecycle {
     pub fn last_domain_lsn(&self) -> u64 { self.domain.last_lsn() }
     pub fn last_lifecycle_lsn(&self) -> u64 { self.journal.last_lsn() }
 
+    pub(crate) fn catalog_backup_identity(&self) -> (u64, u64) {
+        (self.catalog.last_lsn(), self.catalog.journal_row_count())
+    }
+
+    pub(crate) fn domain_backup_identity(&self) -> (u64, u64) {
+        (self.domain.last_lsn(), self.domain.storage_row_count())
+    }
+
+    pub(crate) fn lifecycle_backup_identity(&self) -> (u64, u64) {
+        (self.journal.last_lsn(), self.journal.len() as u64)
+    }
+
     fn load_records(&self) -> LifecycleResult<BTreeMap<TableId, Record>> {
         let mut records = BTreeMap::new();
         for (key, data) in self.journal.scan() {
