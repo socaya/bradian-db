@@ -1,0 +1,46 @@
+name: Bradian foundation verification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feat/bradian-db-v1-1-foundation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust workspace checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Check workspace
+        run: cargo check --workspace --locked
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  studio:
+    name: Bradian Studio build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dap-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build

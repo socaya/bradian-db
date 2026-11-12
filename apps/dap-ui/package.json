@@ -1,8 +1,8 @@
 {
-  "name": "dap-admin-ui",
+  "name": "bradian-studio",
   "version": "0.1.0",
   "private": true,
-  "description": "DAP admin + analytics workbench (spec DER-ANL-PLAT-001 section 13)",
+  "description": "Bradian Studio — pre-release database administration and analytics workbench",
   "type": "module",
   "scripts": {
     "dev": "vite",

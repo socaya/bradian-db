@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bradian-relational",
     "crates/dap-core",
     "crates/dap-catalog",
     "crates/dap-storage",
@@ -17,6 +18,11 @@ members = [
     "crates/dap-sources",
     "tests/dap-e2e",
 ]
+
+[workspace.metadata.bradian]
+product = "bradian-db"
+display_name = "Bradian Database Systems"
+specification = "docs/Bradian_Master_Architecture_SRS_v1.1.md"
 
 [workspace.package]
 version = "0.1.0"

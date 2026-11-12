@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 #![warn(rust_2018_idioms)]
 
+pub mod auth;
 pub mod dhis2_compat;
 pub mod engine;
 pub mod error;

@@ -28,7 +28,7 @@ function CrumbTrail() {
   const match = NAV.find((n) => n.to === pathname) ?? NAV[0];
   return (
     <div className="crumbs">
-      <span>DAP</span>
+      <span>Bradian</span>
       <span className="sep">/</span>
       <span>{match.section}</span>
       <span className="sep">/</span>
@@ -74,8 +74,7 @@ export function Shell() {
     <div className="shell">
       <aside className="nav">
         <div className="brand">
-          <span className="mark">DAP</span>
-          <span>Analytics Platform</span>
+          <img src="/bradian-logo.svg" alt="Bradian Database Systems" className="brand-logo" />
         </div>
         {sections.map((section) => (
           <div key={section}>
@@ -96,7 +95,7 @@ export function Shell() {
           </div>
         ))}
         <div className="footer">
-          <div>spec DAP</div>
+          <div>Bradian Studio · pre-release</div>
           <div>v0.1.0</div>
         </div>
       </aside>
