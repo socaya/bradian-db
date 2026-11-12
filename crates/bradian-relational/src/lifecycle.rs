@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -86,6 +87,7 @@ pub struct CatalogLifecycle {
     catalog: PersistentCatalog,
     domain: MultiTableStore,
     journal: RowStore,
+    operation: Mutex<()>,
 }
 
 impl CatalogLifecycle {
@@ -111,6 +113,7 @@ impl CatalogLifecycle {
         let owner = Self {
             root: root.to_path_buf(),
             catalog, domain, journal,
+            operation: Mutex::new(()),
         };
         owner.reconcile()?;
         Ok(owner)
@@ -173,6 +176,11 @@ impl CatalogLifecycle {
     /// pins match the durable catalog. An orphan pin or stale schema is a
     /// hard failure, never silently pruned or rewritten.
     pub fn reconcile(&self) -> LifecycleResult<Vec<TableLifecycleStatus>> {
+        let _guard = self.operation.lock();
+        self.reconcile_locked()
+    }
+
+    pub(crate) fn reconcile_locked(&self) -> LifecycleResult<Vec<TableLifecycleStatus>> {
         let catalog = catalog_tables(&self.catalog);
         let mut records = self.load_records()?;
         let pins = self.domain.registered_tables();
@@ -234,6 +242,7 @@ impl CatalogLifecycle {
     /// A crash between steps is resolved deterministically on restart.
     /// No table DATA is modified by provisioning.
     pub fn provision_existing(&self, id: TableId) -> LifecycleResult<u64> {
+        let _guard = self.operation.lock();
         let catalog = catalog_tables(&self.catalog);
         let table = catalog.get(&id)
             .ok_or(LifecycleError::MissingCatalogTable(id.0))?.clone();
@@ -255,6 +264,22 @@ impl CatalogLifecycle {
         let lsn = self.domain.register_table(table.clone())?;
         self.set_state(table, TableLifecycleState::Active)?;
         Ok(lsn)
+    }
+
+    /// Capture one reconciled catalog/domain/lifecycle database image while
+    /// holding the coordinator operation mutex and all three RowStore locks.
+    /// This is consistent for cooperating local clients only: it is not a
+    /// distributed snapshot or an online lock-free backup.
+    pub fn backup_database_to(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<crate::database_backup::DatabaseBackupReport, crate::database_backup::DatabaseBackupError> {
+        let _guard = self.operation.lock();
+        let statuses = self.reconcile_locked()?;
+        crate::database_backup::backup_database(
+            &self.root, destination.as_ref(), &self.catalog,
+            &self.domain, &self.journal, &statuses,
+        )
     }
 
     pub fn state(&self, id: TableId) -> LifecycleResult<Option<TableLifecycleState>> {
