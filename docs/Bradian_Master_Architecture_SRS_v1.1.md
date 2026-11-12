@@ -1,4 +1,4 @@
-![Bradian Database Systems approved primary horizontal logo](assets/Bradian_Database_Systems_Primary_Horizontal_Blue.png)
+![Bradian Database Systems approved primary horizontal logo](media/Bradian_Database_Systems_Primary_Horizontal_Blue.svg)
 
 # BRADIAN DATABASE SYSTEMS
 ## Master Product Architecture, Software Requirements Specification, Security Architecture and Implementation Programme
