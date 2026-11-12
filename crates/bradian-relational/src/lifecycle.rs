@@ -92,6 +92,11 @@ pub struct CatalogLifecycle {
 
 impl CatalogLifecycle {
     pub fn open(root: impl AsRef<Path>) -> LifecycleResult<Self> {
+        if root.as_ref().join("history-domain").exists() {
+            return Err(LifecycleError::Integrity(
+                "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
+            ));
+        }
         let root = root.as_ref();
         let legacy = root.join("tables");
         if legacy.exists() && fs::read_dir(&legacy)?.next().is_some() {
