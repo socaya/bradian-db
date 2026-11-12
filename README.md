@@ -8,14 +8,14 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog and a portable physical page codec. It does **not yet** provide production-grade general SQL, row persistence, ACID/MVCC transactions, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
+> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog and a portable physical page codec, and a **single-process WAL-backed persistent row store** with individually synchronized key/value mutations and page checkpoints. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
 
 ## Product architecture
 
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog definitions and page codec **only** |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, page codec and single-writer WAL-backed row store; no SQL/MVCC |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
