@@ -25,7 +25,7 @@
 - [x] G10 independently verified backups capture history, tombstones and retention floor.
 - [x] Reject invalid version markers, physical key namespaces, unexpected version lengths and out-of-range user keys/values.
 - [x] Preserve G20/G21 and existing G15/G16 SQL storage unchanged; no silent format conversion.
-- [x] Seventeen integration tests committed for durability, conflicts, retention, integrity and backup.
+- [x] Eighteen integration tests committed for durability, conflicts, retention, integrity and backup.
 
 These checkmarks describe committed implementation and regression cases, **not a passing compilation or test report**.
 
