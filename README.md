@@ -8,7 +8,7 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks**, synchronized WAL batches, page checkpoints, a **disk-resident checkpoint B+tree** for indexed lookups and ranges, and a **bounded physical page cache** with generation-aware invalidation, and a **WAL-backed mutable index overlay** for post-checkpoint inserts, updates and deletes, **crash-safe reconstruction of missing derived B+tree indexes**, a **checksummed atomic checkpoint manifest**, and **consistent, verified backup and restore** of committed snapshot generations plus newer WAL records. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
+> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, a **WAL-backed persistent relational metadata catalog**, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks**, synchronized WAL batches, page checkpoints, a **disk-resident checkpoint B+tree** for indexed lookups and ranges, and a **bounded physical page cache** with generation-aware invalidation, and a **WAL-backed mutable index overlay** for post-checkpoint inserts, updates and deletes, **crash-safe reconstruction of missing derived B+tree indexes**, a **checksummed atomic checkpoint manifest**, and **consistent, verified backup and restore** of committed snapshot generations plus newer WAL records. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
 
 ## Product architecture
 
@@ -50,6 +50,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Derived index recovery gate](docs/gates/BRD-G8-index-recovery.md) | Recover missing indexes after interrupted publication; verify physical pointers against authoritative pages |
 | [Atomic checkpoint publication gate](docs/gates/BRD-G9-checkpoint-publication.md) | Manifest-committed generation selection, orphan quarantine and WAL-safe publication |
 | [Consistent backup/restore gate](docs/gates/BRD-G10-consistent-backup-restore.md) | Captures one synchronized checkpoint+WAL state and restores into a verified new database directory |
+| [Persistent relational catalog gate](docs/gates/BRD-G11-persistent-catalog.md) | Stable database/schema/table identities and replay-validated DDL in native WAL |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
@@ -57,7 +58,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 ```text
 bradian-db/
 ├── crates/
-│   ├── bradian-relational/       # Catalog, WAL-backed rows, typed tables, disk B+tree
+│   ├── bradian-relational/       # Persistent catalog, WAL rows, typed tables, disk B+tree
 │   ├── dap-core/                 # Legacy core primitives
 │   ├── dap-storage/              # Existing .derc analytical segments, WAL and snapshots
 │   ├── dap-runtime/              # Analytical execution operators
