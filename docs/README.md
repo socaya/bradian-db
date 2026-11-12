@@ -17,7 +17,8 @@ This directory contains the engineering specifications, architectural decisions,
 3. **[Bradian security bootstrap guide](security/BOOTSTRAP_API_AUTH.md)** — local development authentication boundary and its important security limitations.
 4. **[Relational catalog ADR](adr/0006-generic-relational-catalog.md)** — logical database/schema/table IDs, scope, constraints and migration limitations.
 5. **[Portable page format ADR](adr/0007-portable-physical-page.md)** — versioned 4 KiB page format and corruption checks.
-6. **[Native row WAL and checkpoint ADR](adr/0008-native-row-wal-checkpoint.md)** — synchronized single-key row mutations, page snapshots, fail-closed recovery and current limitations.
+6. **[Native row WAL and checkpoint ADR](adr/0008-native-row-wal-checkpoint.md)** — synced row mutations, atomic batch commits, page snapshots and recovery.
+7. **[Typed table ADR](adr/0009-typed-table-rows.md)** — persisted schema pinning, typed row format, primary-key uniqueness and failure boundaries.
 
 ## Current milestone records
 
@@ -26,7 +27,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G1](gates/BRD-G1-relational-catalog.md) | Relational catalog, typed column definitions, PK/FK metadata | In-memory schema management, no row data |
 | [BRD-G2](gates/BRD-G2-page-format.md) | Versioned physical page representation and corruption detection | Page codec only; not yet durable storage |
 | [BRD-G3](gates/BRD-G3-wal-row-store.md) | Synchronized key/value mutations, page checkpoints and WAL replay | Source and 17 tests committed; manual checks outstanding |
-| Future gates | SQL transactions, MVCC, disk B+tree, process locking, HTAP, clusters and enterprise security | Must be implemented and qualified |
+| [BRD-G4](gates/BRD-G4-typed-table-crud.md) | Typed table CRUD, schema identity, composite PKs, validation | Source/tests committed; manual checks outstanding |
+| Future gates | SQL transactions, MVCC, disk B+tree, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
