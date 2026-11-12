@@ -626,3 +626,91 @@ fn g27_preview_projects_retained_rows_without_changing_the_history_wal() {
         "bank.public.accounts", before, &proposed,
     ).is_err());
 }
+
+#[test]
+fn g28_prepared_schema_intent_survives_restart_without_activating_ddl() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let prepared_lsn;
+    let old_lsn;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        old_lsn = db.last_lsn();
+        let (old, _) = db.schema_as_of("bank.public.accounts", old_lsn).unwrap();
+        let mut proposed = old.clone();
+        proposed.columns.push(Column {
+            name: "memo".into(), data_type: DataType::Text, nullable: true,
+        });
+        prepared_lsn = db.prepare_nullable_addition("bank.public.accounts", &proposed).unwrap();
+        assert!(prepared_lsn > old_lsn);
+        assert!(db.prepare_nullable_addition("bank.public.accounts", &proposed).is_err());
+        db.checkpoint().unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let intents = db.prepared_schema_proposals();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].2, prepared_lsn);
+    assert_eq!(intents[0].1.columns.len(), 3);
+    assert_eq!(db.schema_as_of("bank.public.accounts", prepared_lsn).unwrap().0.columns.len(), 2);
+    db.with_session(|session| {
+        session.execute("BEGIN")?;
+        assert_eq!(session.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows {
+                columns: vec!["balance".into()],
+                rows: vec![vec![Value::Int64(1000)]],
+            });
+        assert_eq!(session.execute(&format!(
+            "SELECT balance FROM bank.public.accounts AS OF {old_lsn} WHERE id=1"
+        ))?, SqlResultSet::Rows {
+            columns: vec!["balance".into()],
+            rows: vec![vec![Value::Int64(1000)]],
+        });
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn g28_schema_proposal_rejects_incompatible_changes_without_wal_write() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let before = db.last_lsn();
+    let (old, _) = db.schema_as_of("bank.public.accounts", before).unwrap();
+    let mut incompatible = old.clone();
+    incompatible.columns.push(Column {
+        name: "required".into(), data_type: DataType::Text, nullable: false,
+    });
+    assert!(db.prepare_nullable_addition("bank.public.accounts", &incompatible).is_err());
+    incompatible = old.clone();
+    incompatible.columns[1].name = "renamed".into();
+    incompatible.columns.push(Column {
+        name: "extra".into(), data_type: DataType::Text, nullable: true,
+    });
+    assert!(db.prepare_nullable_addition("bank.public.accounts", &incompatible).is_err());
+    assert_eq!(db.last_lsn(), before);
+}
+
+#[test]
+fn g28_prepared_intents_survive_g24_history_backup_restore() {
+    use bradian_relational::{Column, DataType};
+    use bradian_relational::history_backup::restore_history_database;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("archive");
+    let recovered = dir.path().join("restored");
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (old, _) = db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap();
+        let mut next = old.clone();
+        next.columns.push(Column {
+            name: "note".into(), data_type: DataType::Text, nullable: true,
+        });
+        db.prepare_nullable_addition("bank.public.movements", &next).unwrap();
+        db.backup_to(&archive).unwrap();
+    }
+    restore_history_database(&archive, &recovered).unwrap();
+    let db = HistorySqlEngine::open(&recovered).unwrap();
+    let intents = db.prepared_schema_proposals();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].1.columns.last().unwrap().name, "note");
+    assert_eq!(db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap().0.columns.len(), 3 - 1);
+}
