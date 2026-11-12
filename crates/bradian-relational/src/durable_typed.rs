@@ -18,6 +18,19 @@ const ROW_PREFIX: &[u8] = b"BRPK";
 const PROPOSAL_PREFIX: &[u8] = b"\0bradian-schema-proposal-v1:";
 const ABORT_PREFIX: &[u8] = b"\0bradian-schema-abort-v1:";
 const COORD_PREFIX: &[u8] = b"\0bradian-ddl-coordinate-v1:";
+const READY_PREFIX: &[u8] = b"\0bradian-ddl-readiness-v1:";
+
+/// Inactive readiness certificate. It fences the exact G30 coordination
+/// decision; it is NOT an active schema epoch or a catalog DDL event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DdlReadinessRecord {
+    pub table_id: TableId,
+    pub coordination_lsn: u64,
+    pub proposal_lsn: u64,
+    pub catalog_lsn: u64,
+    pub proposal_crc32: u32,
+}
 
 /// Inactive cross-store DDL fence. Catalog is not mutated; this binds one
 /// G28 prepared proposal to the exact G11 catalog WAL horizon.
@@ -64,6 +77,7 @@ pub struct DurableTypedStore {
     proposals: BTreeMap<TableId, (Table, u64)>,
     aborted: BTreeMap<TableId, u64>,
     coordination: BTreeMap<TableId, (DdlCoordinationRecord, u64)>,
+    readiness: BTreeMap<TableId, (DdlReadinessRecord, u64)>,
 }
 
 impl DurableTypedStore {
@@ -107,7 +121,7 @@ impl DurableTypedStore {
             ));
         }
         for (key, bytes) in &records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
             let table_id = table_id_from_row_key(key)?;
             let schema = tables.get(&table_id).ok_or_else(|| {
                 DomainError::Corruption(format!(
@@ -230,8 +244,42 @@ impl DurableTypedStore {
                 ));
             }
         }
+        let mut readiness = BTreeMap::new();
         for (key, lsn, value) in &versions {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
+            if !key.starts_with(READY_PREFIX) { continue; }
+            if key.len() != READY_PREFIX.len() + 8 {
+                return Err(DomainError::Corruption("G31 invalid readiness key".into()));
+            }
+            let id = TableId(u64::from_be_bytes(
+                key[READY_PREFIX.len()..].try_into().unwrap()
+            ));
+            let bytes = value.as_ref().ok_or_else(||
+                DomainError::Corruption("G31 readiness cannot be deleted".into())
+            )?;
+            let record: DdlReadinessRecord = serde_json::from_slice(bytes).map_err(|e|
+                DomainError::Corruption(format!("G31 invalid readiness payload: {e}"))
+            )?;
+            let (fence, coordinated_at) = coordination.get(&id).ok_or_else(||
+                DomainError::Corruption("G31 readiness without G30 coordination".into())
+            )?;
+            if record.table_id != id
+                || record.coordination_lsn != *coordinated_at
+                || record.proposal_lsn != fence.proposal_lsn
+                || record.catalog_lsn != fence.catalog_lsn
+                || record.proposal_crc32 != fence.proposal_crc32
+                || *lsn <= *coordinated_at
+                || aborted.get(&id).is_some_and(|aborted_at| *aborted_at <= *lsn)
+            {
+                return Err(DomainError::Corruption(
+                    "G31 readiness has incompatible fence, timeline or cancellation".into()
+                ));
+            }
+            if readiness.insert(id, (record, *lsn)).is_some() {
+                return Err(DomainError::Corruption("G31 readiness was rewritten".into()));
+            }
+        }
+        for (key, lsn, value) in &versions {
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
             let id = table_id_from_row_key(key)?;
             let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
                 format!("historical row refers to unregistered table {}", id.0)
@@ -250,7 +298,7 @@ impl DurableTypedStore {
                 }
             }
         }
-        Ok(Self { store, tables, schema_epochs: registered_at, proposals, aborted, coordination })
+        Ok(Self { store, tables, schema_epochs: registered_at, proposals, aborted, coordination, readiness })
     }
 
     pub fn active_tables(&self) -> Vec<TableId> {
@@ -391,6 +439,50 @@ impl DurableTypedStore {
         Ok(())
     }
 
+    /// G31: record an immutable readiness decision in the history WAL.
+    /// No G11 catalog update or row encoding change occurs here.
+    pub fn certify_schema_readiness(
+        &self, id: TableId, catalog_lsn: u64,
+    ) -> Result<u64, DomainError> {
+        let mut coordinate_key = COORD_PREFIX.to_vec();
+        coordinate_key.extend_from_slice(&id.0.to_be_bytes());
+        let mut abort_key = ABORT_PREFIX.to_vec();
+        abort_key.extend_from_slice(&id.0.to_be_bytes());
+        let mut ready_key = READY_PREFIX.to_vec();
+        ready_key.extend_from_slice(&id.0.to_be_bytes());
+        let coordinated_at = self.store.retained_versions().into_iter()
+            .find(|(key, _, value)| *key == coordinate_key && value.is_some())
+            .map(|(_, lsn, _)| lsn).ok_or_else(||
+                DomainError::Corruption("G31 requires a durable G30 coordination fence".into())
+            )?;
+        let mut tx = self.store.begin();
+        let bytes = tx.get(&coordinate_key).map_err(map_mvcc)?.ok_or_else(||
+            DomainError::Corruption("G31 coordination fence absent".into())
+        )?;
+        let fence: DdlCoordinationRecord = serde_json::from_slice(&bytes)?;
+        if fence.table_id != id || fence.catalog_lsn != catalog_lsn {
+            return Err(DomainError::Corruption("G31 catalog LSN or table mismatch".into()));
+        }
+        if tx.get(&abort_key).map_err(map_mvcc)?.is_some() {
+            return Err(DomainError::Corruption("G31 proposal was cancelled".into()));
+        }
+        let record = DdlReadinessRecord {
+            table_id: id,
+            coordination_lsn: coordinated_at,
+            proposal_lsn: fence.proposal_lsn,
+            catalog_lsn: fence.catalog_lsn,
+            proposal_crc32: fence.proposal_crc32,
+        };
+        tx.insert(&ready_key, &serde_json::to_vec(&record)?).map_err(map_mvcc)?;
+        tx.commit().map_err(map_mvcc)
+    }
+
+    /// Recovered G31 readiness certificates at engine open; a certificate
+    /// is NEVER equivalent to activated schema DDL.
+    pub fn ddl_readiness_records(&self) -> Vec<(DdlReadinessRecord, u64)> {
+        self.readiness.values().cloned().collect()
+    }
+
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
     pub fn retention_floor(&self) -> u64 { self.store.retention_floor() }
 
@@ -448,7 +540,7 @@ impl DurableTypedStore {
         let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let row = decode_row(&def.table, &bytes)?;
@@ -511,7 +603,7 @@ impl DurableTypedTransaction<'_> {
         for (key, bytes) in records {
             // The full physical scan participates in G20's conservative
             // global LSN change validation when the transaction writes.
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let def = self.definition(id)?;
