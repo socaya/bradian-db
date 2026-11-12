@@ -60,6 +60,10 @@ The commit limit is the underlying G3 bound of **256 distinct row operations and
 
 The [G16 SQL frontend](0021-shared-domain-sql-integration.md) uses this shared domain directly for SQL BEGIN/COMMIT across explicitly registered tables. It refuses roots with legacy G14 per-table files and therefore does not imply an automatic migration. The standalone G12 SQL engine remains unchanged until a verified storage cutover is developed.
 
+## MVCC foundation (ADR 0025)
+
+[G20](0025-mvcc-row-version-foundation.md) adds an opt-in standalone RowStore MVCC façade with in-memory pinned versions, per-key optimistic commit validation and version reclamation. Existing G15/G16 shared-domain SQL transactions continue to use their original conservative global LSN conflict rule; a later gate must integrate typed tables, schema pins and SQL sessions without mixing independent storage owners.
+
 ## Tests and residual risks
 
 `crates/bradian-relational/tests/multi_table_transactions.rs` covers two-table one-LSN commit, restart recovery, explicit and implicit rollback, cross-table replacement/delete through checkpoint, stale optimistic conflicts, table-registration changes invalidating older transactions, immutable schema identities across restart, rejection of unknown tables/invalid values, batch-size limits, multi-threaded atomicity, duplicate keys, read-only commits, backup/restore and detection of orphan/corrupted physical rows.
