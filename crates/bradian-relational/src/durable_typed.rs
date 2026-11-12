@@ -168,6 +168,12 @@ impl DurableTypedStore {
 
     pub fn last_lsn(&self) -> u64 { self.store.latest_lsn() }
 
+    /// Capture the complete version-key store, including retained historical
+    /// values, tombstones, schema pins and the synchronized retention floor.
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> Result<crate::backup::BackupReceipt, DomainError> {
+        self.store.backup_to(destination).map_err(map_mvcc)
+    }
+
     pub fn checkpoint(&self) -> Result<u64, DomainError> {
         self.store.checkpoint().map_err(map_mvcc)
     }
