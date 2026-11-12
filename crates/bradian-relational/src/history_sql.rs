@@ -126,6 +126,23 @@ impl HistorySqlEngine {
         }).collect()
     }
 
+    /// G28: persist a validated, inactive schema proposal in the historical
+    /// WAL. This does not alter the live G11 catalog or allow ALTER TABLE.
+    /// Callers must release the owner and reopen to inspect recovered intents.
+    pub fn prepare_nullable_addition(
+        &self, qualified_table: &str, proposed: &Table,
+    ) -> SqlResult<u64> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let original = self.resolve(&parts)?;
+        Ok(self.domain.prepare_nullable_addition(original.id, proposed)?)
+    }
+
+    pub fn prepared_schema_proposals(&self) -> Vec<(crate::TableId, Table, u64)> {
+        self.domain.prepared_schema_proposals()
+    }
+
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks
