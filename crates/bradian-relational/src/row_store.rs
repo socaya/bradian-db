@@ -400,16 +400,43 @@ fn write_snapshot(
     lsn: u64,
     rows: &BTreeMap<Vec<u8>, Vec<u8>>,
 ) -> StoreResult<()> {
-    let mut data_pages = Vec::<Vec<u8>>::new();
-    let mut buffer = Vec::new();
+    // First pass computes exact page count without duplicating the complete
+    // table into temporary memory. The write path is serialized, so the map
+    // cannot change between passes.
+    let mut page_count = 0_u64;
+    let mut used = 0_usize;
     for (key, value) in rows {
         validate_row(key, value)?;
-        let record_len = ROW_HEADER + key.len() + value.len();
-        if record_len > MAX_PAYLOAD_SIZE {
+        let len = ROW_HEADER + key.len() + value.len();
+        if len > MAX_PAYLOAD_SIZE {
             return Err(StoreError::InvalidRow("row cannot fit a single physical page"));
         }
-        if buffer.len() + record_len > MAX_PAYLOAD_SIZE {
-            data_pages.push(std::mem::take(&mut buffer));
+        if used + len > MAX_PAYLOAD_SIZE {
+            page_count = page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
+            used = 0;
+        }
+        used += len;
+    }
+    if used != 0 {
+        page_count = page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
+    }
+
+    let mut meta = Vec::with_capacity(META_LENGTH);
+    meta.extend_from_slice(&lsn.to_le_bytes());
+    meta.extend_from_slice(&(rows.len() as u64).to_le_bytes());
+    meta.extend_from_slice(&page_count.to_le_bytes());
+    file.write_all(&Page::new(0, lsn, PageKind::Metadata, meta)?.encode()?)?;
+
+    // Second pass streams one physical page at a time. Peak transient memory
+    // is bounded by one physical page plus the caller's existing row map.
+    let mut buffer = Vec::with_capacity(MAX_PAYLOAD_SIZE);
+    let mut page_id = 1_u64;
+    for (key, value) in rows {
+        let len = ROW_HEADER + key.len() + value.len();
+        if buffer.len() + len > MAX_PAYLOAD_SIZE {
+            file.write_all(&Page::new(page_id, lsn, PageKind::Data, std::mem::take(&mut buffer))?.encode()?)?;
+            page_id = page_id.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
+            buffer = Vec::with_capacity(MAX_PAYLOAD_SIZE);
         }
         buffer.extend_from_slice(&(key.len() as u16).to_le_bytes());
         buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -417,17 +444,11 @@ fn write_snapshot(
         buffer.extend_from_slice(value);
     }
     if !buffer.is_empty() {
-        data_pages.push(buffer);
+        file.write_all(&Page::new(page_id, lsn, PageKind::Data, buffer)?.encode()?)?;
+        page_id = page_id.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
     }
-    let mut meta = Vec::with_capacity(META_LENGTH);
-    meta.extend_from_slice(&lsn.to_le_bytes());
-    meta.extend_from_slice(&(rows.len() as u64).to_le_bytes());
-    meta.extend_from_slice(&(data_pages.len() as u64).to_le_bytes());
-    let head = Page::new(0, lsn, PageKind::Metadata, meta)?;
-    file.write_all(&head.encode()?)?;
-    for (index, payload) in data_pages.into_iter().enumerate() {
-        let page = Page::new(index as u64 + 1, lsn, PageKind::Data, payload)?;
-        file.write_all(&page.encode()?)?;
+    if page_id != page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)? {
+        return Err(StoreError::Corruption("checkpoint page count changed during write".into()));
     }
     Ok(())
 }
