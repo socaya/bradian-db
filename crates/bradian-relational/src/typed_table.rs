@@ -155,7 +155,13 @@ impl TableStore {
 
     pub fn get(&self, primary_key: &[Value]) -> TableResult<Option<Vec<Value>>> {
         let key = encode_key(&self.table, &self.pk_positions, primary_key)?;
-        self.storage.get(&key).map(|b| decode_row(&self.table, &b)).transpose()
+        self.storage.get(&key).map(|bytes| {
+            let row = decode_row(&self.table, &bytes)?;
+            if self.key_from_row(&row)? != key {
+                return Err(TableError::Corruption("stored primary key does not match row data".into()));
+            }
+            Ok(row)
+        }).transpose()
     }
 
     pub fn scan(&self) -> TableResult<Vec<Vec<Value>>> {
@@ -189,8 +195,11 @@ fn validate_table(table: &Table) -> TableResult<Vec<usize>> {
             "secondary UNIQUE and FOREIGN KEY constraints are not implemented in this table store".into()
         ));
     }
-    if table.columns.is_empty() || table.primary_key.columns.is_empty() {
-        return Err(TableError::Schema("table must have columns and primary key".into()));
+    if table.id.0 == 0 || table.columns.is_empty()
+        || table.columns.len() > u16::MAX as usize
+        || table.primary_key.columns.is_empty()
+    {
+        return Err(TableError::Schema("table requires stable nonzero identity, supported column count and primary key".into()));
     }
     let mut names = BTreeSet::new();
     for column in &table.columns {
