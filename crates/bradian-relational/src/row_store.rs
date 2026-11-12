@@ -192,6 +192,17 @@ impl RowStore {
     /// its recovered contents and every index pointer have been validated.
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> StoreResult<BackupReceipt> {
         self.checkpoint()?;
+        self.backup_current_generation(destination)
+    }
+
+    /// Preserve the latest committed checkpoint *and* the synchronized WAL
+    /// appended after it, without forcing another checkpoint. The mutation
+    /// mutex freezes both physical sources at a single acknowledged LSN.
+    /// This is suitable for repeated backups of a busy local RowStore.
+    pub fn backup_current_generation(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> StoreResult<BackupReceipt> {
         let inner = self.inner.lock();
         if inner.poisoned {
             return Err(StoreError::Poisoned);
