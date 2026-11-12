@@ -459,7 +459,32 @@ impl RowStore {
             return Err(StoreError::Poisoned);
         }
         if inner.checkpoint_lsn == inner.lsn && snapshot_path(&self.root, inner.lsn).exists() {
-            return Ok(inner.lsn);
+            match checkpoint_manifest::load(&self.root)? {
+                Some(current) if current.lsn == inner.lsn => return Ok(inner.lsn),
+                Some(_) => {
+                    return Err(StoreError::Corruption(
+                        "checkpoint generation and committed manifest disagree".into(),
+                    ));
+                }
+                None => {
+                    // Upgrade a verified pre-manifest checkpoint *in place*:
+                    // no payload bytes or WAL commits are changed.
+                    let report = index_recovery::verify(&self.root, inner.lsn)?;
+                    let snapshot_length = fs::metadata(snapshot_path(&self.root, inner.lsn))?.len();
+                    let index_length = fs::metadata(index_recovery::index_path(&self.root, inner.lsn))?.len();
+                    if snapshot_length % PAGE_SIZE as u64 != 0 || index_length % PAGE_SIZE as u64 != 0 {
+                        return Err(StoreError::Corruption("legacy checkpoint is not page aligned".into()));
+                    }
+                    let manifest = CheckpointManifest {
+                        lsn: inner.lsn,
+                        rows: report.rows,
+                        data_pages: report.data_pages,
+                        index_pages: index_length / PAGE_SIZE as u64 - 1,
+                    };
+                    checkpoint_manifest::publish(&self.root, manifest)?;
+                    return Ok(inner.lsn);
+                }
+            }
         }
         let lsn = inner.lsn;
         // The manifest is the publication boundary. A prior crashed attempt
