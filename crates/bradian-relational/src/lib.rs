@@ -29,6 +29,7 @@ pub mod database_backup;
 pub mod mvcc;
 pub mod typed_mvcc;
 pub mod mvcc_sql;
+pub mod durable_mvcc;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
