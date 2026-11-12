@@ -34,7 +34,7 @@ No mandatory dependency on an external OLTP/OLAP database server is permitted fo
 
 ## 4. Compatibility constraints
 
-For the native row durability protocol, read [ADR 0008](docs/adr/0008-native-row-wal-checkpoint.md) and [BRD-G3](docs/gates/BRD-G3-wal-row-store.md). A single-process WAL-backed row store exists, but file locking, typed transactional rows, database isolation and cross-platform crash qualification remain unimplemented.
+For the native row durability protocol, read [ADR 0008](docs/adr/0008-native-row-wal-checkpoint.md) and [BRD-G3](docs/gates/BRD-G3-wal-row-store.md). A single-process WAL-backed row store exists, but cross-platform lock qualification, typed transactional rows, database isolation and cross-platform crash qualification remain unimplemented.
 
 The original analytical components use `dap-*` Rust crate names, `apps/dap-ui/` as an application directory, and `.derc` for the proprietary analytical file format. These **internal legacy identifiers** must not be bulk-renamed until a documented migration and compatibility suite exists. Likewise, keep published DHIS2-specific endpoints wire-compatible unless introducing a versioned replacement.
 
