@@ -77,6 +77,6 @@ An existing G16 database must be closed before opening G21. To resume G16 after 
 
 Implementation: `crates/bradian-relational/src/typed_mvcc.rs`, `src/mvcc_sql.rs`. Tests: `crates/bradian-relational/tests/mvcc_sql.rs`. Existing G20 `src/mvcc.rs` and G15 typed codecs are reused without changing their durable format.
 
-Regression source includes multi-table SQL transaction/restart, G16 format interoperability, stable old snapshots while another SQL session writes, truly concurrent disjoint-key SQL updates, same-key conflict, conservative scan conflict, rollback and failed-statement abort, legacy storage refusal, missing registration refusal and historical version cleanup.
+Regression source includes multi-table SQL transaction/restart, G16 format interoperability, stable old snapshots while another SQL session writes, truly concurrent disjoint-key SQL updates, same-key conflict, conservative scan conflict, rollback and failed-statement abort, legacy storage refusal, missing registration refusal, historical version cleanup, G18 Pending reconciliation, exclusive owner protection and multiple pinned read-only SQL sessions.
 
 **Source has been committed to GitHub `main`, but compilation, test execution, Clippy and crash/power-loss qualification have not yet been performed.** Automatic GitHub Actions remain manual-only under the owner's instructions.
