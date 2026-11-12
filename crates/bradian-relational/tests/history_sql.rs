@@ -714,3 +714,87 @@ fn g28_prepared_intents_survive_g24_history_backup_restore() {
     assert_eq!(intents[0].1.columns.last().unwrap().name, "note");
     assert_eq!(db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap().0.columns.len(), 3 - 1);
 }
+
+#[test]
+fn g29_abort_prepared_schema_survives_restart_and_keeps_catalog_unchanged() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let original_lsn;
+    let abort_lsn;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        original_lsn = db.last_lsn();
+        let (base, _) = db.schema_as_of("bank.public.accounts", original_lsn).unwrap();
+        let mut proposed = base.clone();
+        proposed.columns.push(Column {
+            name: "remarks".into(), data_type: DataType::Text, nullable: true,
+        });
+        let prepare_lsn = db.prepare_nullable_addition(
+            "bank.public.accounts", &proposed
+        ).unwrap();
+        abort_lsn = db.abort_prepared_schema("bank.public.accounts").unwrap();
+        assert!(abort_lsn > prepare_lsn);
+        assert!(db.abort_prepared_schema("bank.public.accounts").is_err());
+        db.checkpoint().unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    assert_eq!(db.aborted_schema_proposals().len(), 1);
+    assert_eq!(db.aborted_schema_proposals()[0].1, abort_lsn);
+    assert_eq!(db.prepared_schema_proposals().len(), 1);
+    assert_eq!(db.schema_as_of("bank.public.accounts", abort_lsn).unwrap().0.columns.len(), 2);
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        assert_eq!(s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows {
+                columns: vec!["balance".into()],
+                rows: vec![vec![Value::Int64(1000)]],
+            });
+        assert_eq!(s.execute(&format!(
+            "SELECT balance FROM bank.public.accounts AS OF {original_lsn} WHERE id=1"
+        ))?, SqlResultSet::Rows {
+            columns: vec!["balance".into()],
+            rows: vec![vec![Value::Int64(1000)]],
+        });
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn g29_abort_requires_existing_prepared_intent_without_wal_write() {
+    let (_dir, _source, history) = migrated();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let before = db.last_lsn();
+    assert!(db.abort_prepared_schema("bank.public.accounts").is_err());
+    assert_eq!(db.last_lsn(), before);
+}
+
+#[test]
+fn g29_abort_markers_survive_g24_backup_restore() {
+    use bradian_relational::{Column, DataType};
+    use bradian_relational::history_backup::restore_history_database;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("g29-archive");
+    let destination = dir.path().join("g29-restored");
+    let decision_lsn;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (original, _) = db.schema_as_of(
+            "bank.public.movements", db.last_lsn()
+        ).unwrap();
+        let mut proposed = original.clone();
+        proposed.columns.push(Column {
+            name: "memo".into(), data_type: DataType::Text, nullable: true,
+        });
+        db.prepare_nullable_addition("bank.public.movements", &proposed).unwrap();
+        decision_lsn = db.abort_prepared_schema("bank.public.movements").unwrap();
+        db.backup_to(&archive).unwrap();
+    }
+    restore_history_database(&archive, &destination).unwrap();
+    let db = HistorySqlEngine::open(&destination).unwrap();
+    assert_eq!(db.aborted_schema_proposals().len(), 1);
+    assert_eq!(db.aborted_schema_proposals()[0].1, decision_lsn);
+    assert!(db.abort_prepared_schema("bank.public.movements").is_err());
+    assert_eq!(db.schema_as_of(
+        "bank.public.movements", db.last_lsn()
+    ).unwrap().0.columns.len(), 3);
+}
