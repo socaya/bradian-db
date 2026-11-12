@@ -11,6 +11,7 @@
 
 mod model;
 mod catalog;
+pub mod page;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
