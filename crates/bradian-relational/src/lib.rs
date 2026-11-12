@@ -33,6 +33,7 @@ pub mod durable_mvcc;
 pub mod durable_typed;
 pub mod history_sql;
 pub mod history_migration;
+pub mod history_backup;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
