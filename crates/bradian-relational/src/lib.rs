@@ -12,6 +12,7 @@
 mod model;
 mod catalog;
 pub mod page;
+pub mod row_store;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
