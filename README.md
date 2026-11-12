@@ -63,6 +63,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Typed MVCC SQL integration](docs/gates/BRD-G21-typed-sql-mvcc.md) | Opt-in concurrent SQL snapshots over validated G15 table pins and G20 per-key conflict detection |
 | [Durable MVCC historical versions](docs/gates/BRD-G22-durable-mvcc-history.md) | Opt-in WAL-atomic version-key history, restart-safe as-of reads, explicit durable retention and GC |
 | [Durable typed SQL history](docs/gates/BRD-G23-durable-typed-sql-history.md) | SQL SELECT AS OF retained WAL positions, typed G22 rows and verified offline G16 shared-domain cutover |
+| [Historical backup and restore](docs/gates/BRD-G24-history-backup-restore.md) | Separate, checksum-verified G23 catalog and history-domain archives with staged restore |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
