@@ -14,6 +14,7 @@ This implements complete single-key persistence and an **atomic local multi-key 
 
 For a caller-supplied store directory, the implementation creates:
 
+- `rows.lock` — persistent coordination file; the OS applies an advisory exclusive lock while a RowStore is open, released automatically when the process exits.
 - `rows.wal` — append-only row mutation log, synchronized on each accepted write.
 - `snapshot-<lsn>.tmp` — unpublished checkpoint construction file; ignored during restart.
 - `snapshot-<lsn>.brp` — published, immutable physical-page snapshot. Only the highest numbered published snapshot is selected during restart; corrupted published snapshots fail closed rather than silently falling back.
@@ -59,7 +60,7 @@ A **truncated final WAL header or body** is discarded back to the last completel
 ## Security and environmental constraints
 
 - A CRC protects against accidental corruption; it is not authenticated encryption or protection against an adversary able to rewrite data and checksums.
-- Bradian currently relies on the caller to ensure **exclusive access to the store directory across processes**. The mutex only serializes threads inside one RowStore instance. Simultaneous RowStore instances on the same directory are unsafe until OS-level file locking is implemented and tested.
+- Bradian now obtains an **OS-level exclusive advisory file lock** on `rows.lock` before any snapshot or WAL recovery. A second cooperating RowStore on the same path fails with `StoreError::Busy`. The OS automatically releases the lock on process termination without relying on deletion of a stale lockfile. The `parking_lot` mutex serializes access within that one open instance. External programs that bypass Bradian's lock must never edit database files. Rust **1.89 or newer** is required for the stable standard-library file-locking API.
 - Unix directory synchronization is included; equivalent atomic publication and power-loss guarantees on Windows and other filesystems remain subject to separate platform qualification.
 - Long-running stores require periodic checkpoints; a WAL retained indefinitely grows without bound.
 - The representation is an inline key/value page store, not a complete SQL row representation or disk-resident B+tree. The in-memory BTreeMap is rebuilt from disk on restart.
