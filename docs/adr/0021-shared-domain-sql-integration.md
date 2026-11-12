@@ -76,6 +76,10 @@ This is a scoped native Rust callback API, not a remote SQL server connection or
 - **Operations:** No multi-process SQL sessions, authentication, network protocol, query optimizer, multi-row WHERE, JOIN, aggregation, dynamic DDL, savepoints or online migration.
 - **Backups:** G15 backs up the shared domain, but does not atomically capture its independently stored G11 catalog. A production database-wide backup still requires coordinated catalog/domain state publication.
 
+## Opt-in MVCC SQL mode (ADR 0026)
+
+[G21](0026-typed-sql-mvcc-integration.md) adds a separate typed SQL frontend over the same existing G15 physical row format and G11 catalog schema pins, with G20 in-memory versioned snapshots and per-key optimistic conflicts. The original G16 frontend remains unchanged. Do not treat G21 as automatic migration, durable time travel or serializable SQL.
+
 ## Source and verification
 
 - `crates/bradian-relational/src/domain_sql.rs` — shared-domain SQL engine and scoped SQL sessions.
