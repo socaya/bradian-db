@@ -214,7 +214,7 @@ impl TableStore {
     }
 }
 
-fn validate_table(table: &Table) -> TableResult<Vec<usize>> {
+pub(crate) fn validate_table(table: &Table) -> TableResult<Vec<usize>> {
     if !table.unique_keys.is_empty() || !table.foreign_keys.is_empty() {
         return Err(TableError::Schema(
             "secondary UNIQUE and FOREIGN KEY constraints are not implemented in this table store".into()
@@ -377,7 +377,7 @@ pub fn decode_row(table: &Table, bytes: &[u8]) -> TableResult<Vec<Value>> {
     Ok(row)
 }
 
-fn encode_key(table: &Table, pk_positions: &[usize], pk: &[Value]) -> TableResult<Vec<u8>> {
+pub(crate) fn encode_key(table: &Table, pk_positions: &[usize], pk: &[Value]) -> TableResult<Vec<u8>> {
     if pk.len() != pk_positions.len() {
         return Err(TableError::Value("primary-key width mismatch".into()));
     }
