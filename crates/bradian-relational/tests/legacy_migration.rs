@@ -273,3 +273,20 @@ fn migrated_destination_has_only_catalog_and_shared_domain_storage() {
     assert!(!dest.join("tables").exists());
     assert!(source.join("tables").exists());
 }
+
+
+#[test]
+fn cannot_reimport_already_shared_source_as_empty_legacy_database() {
+    let base = tempdir().unwrap();
+    let source = base.path().join("legacy");
+    let shared = base.path().join("shared");
+    let second = base.path().join("incorrect-second");
+    create_legacy(&source);
+    migrate_legacy_sql(&source, &shared).unwrap();
+    assert!(matches!(
+        migrate_legacy_sql(&shared, &second),
+        Err(MigrationError::Invalid(_))
+    ));
+    assert!(!second.exists());
+    assert_eq!(select_domain(&shared).len(), 2);
+}
