@@ -65,6 +65,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Durable typed SQL history](docs/gates/BRD-G23-durable-typed-sql-history.md) | SQL SELECT AS OF retained WAL positions, typed G22 rows and verified offline G16 shared-domain cutover |
 | [Historical backup and restore](docs/gates/BRD-G24-history-backup-restore.md) | Separate, checksum-verified G23 catalog and history-domain archives with staged restore |
 | [Lifecycle-to-history cutover](docs/gates/BRD-G25-lifecycle-history-migration.md) | Verified G18 snapshot and separately published G23 history root, preserving the original database |
+| [Historical schema inspection](docs/gates/BRD-G26-historical-schema-inspection.md) | Validated immutable G22 schema registration epochs and SQL DESCRIBE TABLE AS OF |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
