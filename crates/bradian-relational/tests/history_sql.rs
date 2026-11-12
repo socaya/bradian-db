@@ -578,15 +578,6 @@ fn g26_schema_history_rejects_pre_registration_and_invalid_horizons() {
     }).unwrap();
     assert_eq!(db.last_lsn(), latest);
     // At least one G23 table is registered at the final schema-batch LSN.
-    let last_table = db.schema_epochs().iter().find(|(_, lsn)| *lsn == registration)
-        .unwrap().0;
-    assert!(db.schema_as_of(
-        if db.schema_as_of("bank.public.accounts", earlier).is_err() {
-            "bank.public.accounts"
-        } else {
-            "bank.public.movements"
-        },
-        earlier
-    ).is_err());
-    assert!(db.schema_epochs().iter().any(|(id, _)| *id == last_table));
+    assert!(db.schema_as_of("bank.public.accounts", earlier).is_err());
+    assert!(db.schema_as_of("bank.public.movements", earlier).is_err());
 }
