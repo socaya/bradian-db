@@ -286,6 +286,7 @@ dependencies = [
 name = "bradian-relational"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "serde",
  "thiserror 1.0.69",
 ]
