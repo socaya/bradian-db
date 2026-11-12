@@ -192,8 +192,7 @@ impl MvccTransaction<'_> {
     pub fn scan(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.did_scan = true;
         let state = self.store.history.lock();
-        let mut result = state.versions.iter()
-            .filter_map(|(key, _)| state.visible(key, self.start_lsn)
+        let mut result = state.versions.keys().filter_map(|key| state.visible(key, self.start_lsn)
                 .map(|value| (key.clone(), value)))
             .collect::<BTreeMap<_,_>>();
         for (key, value) in &self.pending {

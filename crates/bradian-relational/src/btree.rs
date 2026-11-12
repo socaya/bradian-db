@@ -10,7 +10,7 @@
 //! manager. It does implement a real multi-level page tree with on-disk binary
 //! search and corruption validation. All IDs and lengths are little-endian.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -26,6 +26,8 @@ const NODE_HEADER: usize = 11;
 const LEAF: u8 = 1;
 const INTERNAL: u8 = 2;
 const MAX_KEY: usize = 512;
+
+pub(crate) type LeafEntries = Vec<(Vec<u8>, RowPointer)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowPointer {
@@ -269,7 +271,7 @@ impl DiskBTree {
     }
 }
 
-fn read_leaf(payload: &[u8]) -> IndexResult<(Vec<(Vec<u8>, RowPointer)>, u64)> {
+fn read_leaf(payload: &[u8]) -> IndexResult<(LeafEntries, u64)> {
     if payload.len() < NODE_HEADER || payload[0] != LEAF {
         return Err(IndexError::Corruption("not a leaf node"));
     }

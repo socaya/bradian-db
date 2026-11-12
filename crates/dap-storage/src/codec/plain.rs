@@ -72,7 +72,7 @@ pub fn decode_f64(bytes: &[u8]) -> DapResult<Vec<f64>> {
     Ok(decode_primitive!(bytes, f64))
 }
 pub fn decode_decimal128(bytes: &[u8]) -> DapResult<Vec<i128>> {
-    if bytes.len() % 16 != 0 {
+    if !bytes.len().is_multiple_of(16) {
         return Err(DapError::corruption(format!(
             "plain decimal128 buffer has {} bytes, not multiple of 16",
             bytes.len()
@@ -80,7 +80,7 @@ pub fn decode_decimal128(bytes: &[u8]) -> DapResult<Vec<i128>> {
     }
     let n = bytes.len() / 16;
     let mut out = Vec::with_capacity(n);
-    for chunk in bytes.chunks_exact(16) {
+    for chunk in bytes.as_chunks::<16>().0.iter() {
         let mut buf = [0u8; 16];
         buf.copy_from_slice(chunk);
         out.push(i128::from_le_bytes(buf));

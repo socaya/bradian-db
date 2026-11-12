@@ -6,6 +6,16 @@
 
 The Bradian relational crate now includes a WAL-backed generic relational metadata catalog and bounded native SQL executor and local single-table atomic transactions and scoped SQL BEGIN/COMMIT/ROLLBACK sessions and a separately provisioned shared-WAL multi-table atomic row transaction domain with an explicitly registered multi-table SQL execution frontend and verified offline legacy SQL-to-shared-domain migration and WAL-backed catalog/domain provisioning reconciliation and coordinated three-component database-wide backup/restore and opt-in WAL-backed in-memory MVCC row-version snapshots and typed concurrent SQL sessions over verified shared-domain tables plus a separate durable WAL-atomic historical MVCC version format with typed historical SQL AS OF and verified offline G16 migration, a versioned physical page codec and a real **single-process WAL-backed row store** with inserts, replacements, deletes, atomic multi-key WAL batches, ordered scans, page checkpoints, immutable disk B+tree point/range lookup, bounded read-only page cache, WAL-backed mutable logical index overlay, missing-index reconstruction from verified checkpoint pages, CRC-protected authoritative checkpoint generation publication, verified local snapshot-plus-WAL backup/restore and restart recovery. A mutable ordered delta merges WAL-committed changes with the immutable disk index without introducing in-place dirty pages. The physical page cache is generation-scoped, retains checksum-verified pages and is invalidated on checkpoint replacement. The B+tree is derived from completed checkpoints and does not implement mutable page updates or buffer management. See [ADR 0008](../adr/0008-native-row-wal-checkpoint.md) and [G3](../gates/BRD-G3-wal-row-store.md). The row store remains a bounded independent subsystem; it does **not** provide complete relational SQL, distributed transactions, MVCC, on-disk B+trees, multi-process file locking or enterprise recovery qualification. Automatic CI remains disabled by owner request.
 
+## Executed verification and catalog revisions (12 November 2026)
+
+The [executed verification report](BRADIAN_VERIFICATION_2026_11_12.md) records 550 passing
+Rust tests (295 relational), a passing all-feature workspace check, strict Clippy across
+all targets/features, and passing Studio typecheck/build. Earlier statements that builds
+could not run are historical. G34 adds WAL-backed catalog-only schema activation and
+cancellation with exact proposal identity, replay validation and partial-write recovery.
+Live ALTER across catalog and historical row WALs remains unimplemented; schema-pin
+mismatches fail closed. These Linux checks do not certify production or platform power loss.
+
 ## Original audit baseline
 
 The repository contains a proprietary analytical column format (`.derc`), WAL-backed analytical partitions, vectorized operators, DHIS2 semantic modules, an Axum analytical API, a React analytics administration interface, and test suites. It does **not** contain a verified independent general-purpose authoritative relational database with complete SQL DDL/DML, B+tree row pages, ACID/MVCC transactions, cross-shard atomic commits, distributed consensus, or strongly consistent HTAP projections.

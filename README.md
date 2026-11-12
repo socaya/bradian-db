@@ -8,14 +8,14 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, a **WAL-backed persistent relational metadata catalog**, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks**, synchronized WAL batches, page checkpoints, a **disk-resident checkpoint B+tree** for indexed lookups and ranges, and a **bounded physical page cache** with generation-aware invalidation, and a **WAL-backed mutable index overlay** for post-checkpoint inserts, updates and deletes, **crash-safe reconstruction of missing derived B+tree indexes**, a **checksummed atomic checkpoint manifest**, and **consistent, verified backup and restore** of committed snapshot generations plus newer WAL records. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
+> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog-only additive schema revision decisions. General SQL, coordinated historical ALTER TABLE, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_12.md): **550 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
 
 ## Product architecture
 
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree, native SQL subset and single-table SQL sessions and explicitly registered cross-table shared-WAL SQL; no migration/MVCC |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Typed WAL rows, checkpoint B+tree, bounded SQL transactions, durable historical MVCC, verified offline migration and catalog revision decisions; coordinated historical DDL remains incomplete |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
@@ -141,6 +141,14 @@ Requests to protected endpoints must include `Authorization: Bearer <token>`. Th
 ## Branding
 
 The approved Bradian horizontal logo is available in [navy blue](docs/media/Bradian_Database_Systems_Primary_Horizontal_Blue.svg) and [white](docs/media/Bradian_Database_Systems_Primary_Horizontal_White.svg). Bradian Studio uses the approved white mark on its dark navigation and a cropped version of the approved blue artwork for the browser icon. Logo geometry must not be redrawn or restyled.
+
+## Executed verification
+
+The [12 November 2026 verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_12.md)
+records the complete workspace run and its limits. [G34](docs/gates/BRD-G34-catalog-revision-decisions.md)
+adds durable catalog activation/cancellation with stale-proposal protection, concurrency,
+restart, process-exit, torn-WAL and backup/restore tests. This catalog-only API does not
+activate schemas in existing historical row domains.
 
 ## Delivery principles
 

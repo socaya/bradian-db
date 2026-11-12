@@ -339,3 +339,238 @@ fn g33_rejects_unsafe_revisions_without_persisting_events() {
     assert_eq!(catalog.last_lsn(), before);
     assert!(catalog.proposed_table_revisions().is_empty());
 }
+
+fn revision_fixture(catalog: &PersistentCatalog) -> (bradian_relational::TableId, bradian_relational::Table) {
+    let database = catalog.create_database("revisions").unwrap();
+    let schema = catalog.create_schema(database, "public").unwrap();
+    let id = catalog.create_table(schema, table("items")).unwrap();
+    let mut proposed = catalog.snapshot().table(id).unwrap().clone();
+    proposed.columns.push(Column { name: "notes".into(), data_type: DataType::Text, nullable: true });
+    (id, proposed)
+}
+
+#[test]
+fn revision_activation_replays_checkpoint_and_wal_without_changing_old_snapshots() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let (id, proposed) = revision_fixture(&catalog);
+    let snapshot = catalog.snapshot();
+    let lsn = catalog.propose_table_revision(id, proposed.clone()).unwrap();
+    let revision = catalog.pending_table_revision(id).unwrap();
+    assert_eq!(revision.proposal_lsn, lsn);
+    catalog.checkpoint().unwrap();
+    assert_eq!(catalog.activate_table_revision(revision.clone()).unwrap(), lsn + 1);
+    assert_eq!(catalog.snapshot().table(id), Some(&proposed));
+    assert_eq!(snapshot.table(id).unwrap().columns.len(), 2);
+    assert!(catalog.pending_table_revision(id).is_none());
+    assert!(catalog.activate_table_revision(revision).is_err());
+    assert_eq!(catalog.last_lsn(), lsn + 1);
+    drop(catalog);
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    assert_eq!(catalog.snapshot().table(id), Some(&proposed));
+    assert!(catalog.pending_table_revision(id).is_none());
+    catalog.checkpoint().unwrap();
+    drop(catalog);
+    assert_eq!(PersistentCatalog::open(dir.path()).unwrap().snapshot().table(id), Some(&proposed));
+}
+
+#[test]
+fn revision_cancellation_survives_restore_and_allows_table_drop() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("source")).unwrap();
+    let (id, proposed) = revision_fixture(&catalog);
+    catalog.propose_table_revision(id, proposed).unwrap();
+    let revision = catalog.pending_table_revision(id).unwrap();
+    let lsn = catalog.cancel_table_revision(revision.clone()).unwrap();
+    assert!(catalog.cancel_table_revision(revision).is_err());
+    assert_eq!(catalog.last_lsn(), lsn);
+    catalog.backup_catalog_to(dir.path().join("backup")).unwrap();
+    RowStore::restore_backup(dir.path().join("backup"), dir.path().join("restored")).unwrap();
+    let restored = PersistentCatalog::open(dir.path().join("restored")).unwrap();
+    assert!(restored.pending_table_revision(id).is_none());
+    assert_eq!(restored.snapshot().table(id).unwrap().columns.len(), 2);
+    restored.drop_table(id).unwrap();
+}
+
+#[test]
+fn stale_and_mismatched_revision_decisions_leave_journal_unchanged() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let (id, proposed) = revision_fixture(&catalog);
+    catalog.propose_table_revision(id, proposed.clone()).unwrap();
+    let old = catalog.pending_table_revision(id).unwrap();
+    catalog.cancel_table_revision(old.clone()).unwrap();
+    catalog.propose_table_revision(id, proposed).unwrap();
+    let current = catalog.pending_table_revision(id).unwrap();
+    let before = catalog.last_lsn();
+    // Same definition, different proposal: the old receipt must not decide it.
+    assert!(catalog.activate_table_revision(old.clone()).is_err());
+    assert!(catalog.cancel_table_revision(old).is_err());
+    let mut forged = current.clone();
+    forged.proposed.columns.last_mut().unwrap().name = "different".into();
+    assert!(catalog.activate_table_revision(forged).is_err());
+    assert_eq!(catalog.last_lsn(), before);
+    catalog.activate_table_revision(current).unwrap();
+}
+
+#[test]
+fn successive_revisions_preserve_identity_and_backup_active_definition() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("source")).unwrap();
+    let (id, first) = revision_fixture(&catalog);
+    catalog.propose_table_revision(id, first.clone()).unwrap();
+    catalog.activate_table_revision(catalog.pending_table_revision(id).unwrap()).unwrap();
+    let mut second = first;
+    second.columns.push(Column { name: "tag".into(), data_type: DataType::Int64, nullable: true });
+    catalog.propose_table_revision(id, second.clone()).unwrap();
+    catalog.activate_table_revision(catalog.pending_table_revision(id).unwrap()).unwrap();
+    catalog.backup_catalog_to(dir.path().join("backup")).unwrap();
+    RowStore::restore_backup(dir.path().join("backup"), dir.path().join("restored")).unwrap();
+    let restored = PersistentCatalog::open(dir.path().join("restored")).unwrap();
+    assert_eq!(restored.snapshot().table(id), Some(&second));
+    let next = restored.create_database("later").unwrap();
+    assert_eq!(next.0, id.0 + 1);
+}
+
+#[test]
+fn revision_proposals_reject_invalid_catalog_names_and_types() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let (id, proposed) = revision_fixture(&catalog);
+    let before = catalog.last_lsn();
+    for name in ["", "MixedCase", "id", "invalid name"] {
+        let mut invalid = proposed.clone();
+        invalid.columns.last_mut().unwrap().name = name.into();
+        assert!(catalog.propose_table_revision(id, invalid).is_err());
+    }
+    for data_type in [DataType::Varchar { max_length: 0 }, DataType::Decimal { precision: 0, scale: 0 }] {
+        let mut invalid = proposed.clone();
+        invalid.columns.last_mut().unwrap().data_type = data_type;
+        assert!(catalog.propose_table_revision(id, invalid).is_err());
+    }
+    assert_eq!(catalog.last_lsn(), before);
+    assert!(catalog.proposed_table_revisions().is_empty());
+}
+
+#[test]
+fn concurrent_activation_and_cancellation_publish_one_decision() {
+    use std::sync::{Arc, Barrier};
+    let dir = tempdir().unwrap();
+    let catalog = Arc::new(PersistentCatalog::open(dir.path()).unwrap());
+    let (id, proposed) = revision_fixture(&catalog);
+    let before = catalog.propose_table_revision(id, proposed.clone()).unwrap();
+    let revision = catalog.pending_table_revision(id).unwrap();
+    let barrier = Arc::new(Barrier::new(8));
+    let handles: Vec<_> = (0..8).map(|i| {
+        let catalog = Arc::clone(&catalog);
+        let barrier = Arc::clone(&barrier);
+        let revision = revision.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            if i % 2 == 0 { catalog.activate_table_revision(revision) }
+            else { catalog.cancel_table_revision(revision) }
+        })
+    }).collect();
+    let successes: Vec<_> = handles.into_iter().filter_map(|h| h.join().unwrap().ok()).collect();
+    assert_eq!(successes, vec![before + 1]);
+    let live = catalog.snapshot().table(id).unwrap().clone();
+    assert!(live == proposed || live.columns.len() == 2);
+    drop(catalog);
+    let reopened = PersistentCatalog::open(dir.path()).unwrap();
+    assert_eq!(reopened.snapshot().table(id), Some(&live));
+    assert!(reopened.pending_table_revision(id).is_none());
+}
+
+#[test]
+fn forged_revision_decision_is_rejected_on_replay() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let (id, proposed) = revision_fixture(&catalog);
+    catalog.propose_table_revision(id, proposed).unwrap();
+    let mut revision = catalog.pending_table_revision(id).unwrap();
+    revision.proposal_lsn -= 1;
+    drop(catalog);
+    let raw = RowStore::open(dir.path()).unwrap();
+    let next = raw.last_lsn() + 1;
+    let event = serde_json::json!({"version": 1, "result_id": null,
+        "command": {"ActivateTableRevision": {"revision": revision}}});
+    raw.put(format!("ddl/{next:016x}").as_bytes(), &serde_json::to_vec(&event).unwrap()).unwrap();
+    drop(raw);
+    assert!(matches!(PersistentCatalog::open(dir.path()), Err(PersistentCatalogError::Corruption(_))));
+}
+
+#[test]
+fn pending_revision_fences_constraint_changes_without_wal_append() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let (id, proposed) = revision_fixture(&catalog);
+    let before = catalog.propose_table_revision(id, proposed).unwrap();
+    assert!(catalog.add_foreign_key(id, ForeignKeySpec {
+        name: "self_ref".into(), columns: vec!["id".into()],
+        referenced_table: id, referenced_columns: vec!["id".into()],
+    }).is_err());
+    assert_eq!(catalog.last_lsn(), before);
+    assert!(catalog.snapshot().table(id).unwrap().foreign_keys.is_empty());
+}
+
+#[test]
+fn revision_decision_recovers_after_process_exit_without_destructors() {
+    const CHILD_PATH: &str = "BRADIAN_REVISION_CRASH_TEST_PATH";
+    if let Some(root) = std::env::var_os(CHILD_PATH) {
+        let catalog = PersistentCatalog::open(root).unwrap();
+        let (id, proposed) = revision_fixture(&catalog);
+        catalog.propose_table_revision(id, proposed).unwrap();
+        catalog.checkpoint().unwrap();
+        catalog.activate_table_revision(catalog.pending_table_revision(id).unwrap()).unwrap();
+        // Bypass Rust destructors and any orderly close/checkpoint path.
+        std::process::exit(77);
+    }
+    let dir = tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "revision_decision_recovers_after_process_exit_without_destructors"])
+        .env(CHILD_PATH, dir.path())
+        .status().unwrap();
+    assert_eq!(status.code(), Some(77));
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let live = catalog.snapshot();
+    let table = live.tables().next().unwrap();
+    assert_eq!(table.columns.last().unwrap().name, "notes");
+    assert!(catalog.pending_table_revision(table.id).is_none());
+    assert_eq!(catalog.last_lsn(), 6);
+}
+
+#[test]
+fn torn_revision_decision_retains_pending_state_and_can_be_retried() {
+    // Exercise both decisions at header, payload and checksum truncations.
+    for activate in [true, false] {
+        for cut in [0_u64, 1, 4, 17, 100, u64::MAX] {
+            let dir = tempdir().unwrap();
+            let catalog = PersistentCatalog::open(dir.path()).unwrap();
+            let (id, proposed) = revision_fixture(&catalog);
+            let before = catalog.propose_table_revision(id, proposed).unwrap();
+            let revision = catalog.pending_table_revision(id).unwrap();
+            catalog.checkpoint().unwrap();
+            if activate { catalog.activate_table_revision(revision.clone()).unwrap(); }
+            else { catalog.cancel_table_revision(revision.clone()).unwrap(); }
+            drop(catalog);
+            let wal = std::fs::OpenOptions::new().write(true).open(dir.path().join("rows.wal")).unwrap();
+            let length = wal.metadata().unwrap().len();
+            assert!(length > 100);
+            wal.set_len(cut.min(length - 1)).unwrap();
+            wal.sync_all().unwrap();
+            drop(wal);
+            let catalog = PersistentCatalog::open(dir.path()).unwrap();
+            assert_eq!(catalog.last_lsn(), before);
+            assert_eq!(catalog.pending_table_revision(id), Some(revision.clone()));
+            assert_eq!(catalog.snapshot().table(id).unwrap().columns.len(), 2);
+            // Recovery repairs the partial tail before accepting another write.
+            if activate { catalog.activate_table_revision(revision).unwrap(); }
+            else { catalog.cancel_table_revision(revision).unwrap(); }
+            drop(catalog);
+            let catalog = PersistentCatalog::open(dir.path()).unwrap();
+            assert_eq!(catalog.last_lsn(), before + 1);
+            assert!(catalog.pending_table_revision(id).is_none());
+            assert_eq!(catalog.snapshot().table(id).unwrap().columns.len(), if activate { 3 } else { 2 });
+        }
+    }
+}

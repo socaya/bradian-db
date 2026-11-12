@@ -227,9 +227,9 @@ impl CatalogLifecycle {
         // Adopt only matching schemas; this records an ACTIVE state but
         // never changes authoritative user row data.
         for pin in pins {
-            if !records.contains_key(&pin.id) {
+            if let std::collections::btree_map::Entry::Vacant(e) = records.entry(pin.id) {
                 self.set_state(pin.clone(), TableLifecycleState::Active)?;
-                records.insert(pin.id, Record {
+                e.insert(Record {
                     version: 1, table: pin,
                     state: TableLifecycleState::Active,
                 });

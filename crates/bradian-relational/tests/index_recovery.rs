@@ -2,7 +2,6 @@
 
 use std::fs;
 
-use bradian_relational::index_recovery::verify;
 use bradian_relational::row_store::{RowStore, StoreError};
 use tempfile::tempdir;
 

@@ -56,12 +56,12 @@ pub fn decode(bytes: &[u8]) -> DapResult<(Vec<u32>, Vec<u32>, Vec<u8>)> {
     }
 
     let mut indices = Vec::with_capacity(n_rows);
-    for chunk in bytes[8..idx_end].chunks_exact(4) {
-        indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in bytes[8..idx_end].as_chunks::<4>().0.iter() {
+        indices.push(u32::from_le_bytes(*chunk));
     }
     let mut dict_offsets = Vec::with_capacity(n_dict + 1);
-    for chunk in bytes[idx_end..off_end].chunks_exact(4) {
-        dict_offsets.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in bytes[idx_end..off_end].as_chunks::<4>().0.iter() {
+        dict_offsets.push(u32::from_le_bytes(*chunk));
     }
     let dict_data = bytes[off_end..].to_vec();
     let expected = *dict_offsets.last().unwrap_or(&0) as usize;

@@ -41,6 +41,13 @@ pub enum PersistentCatalogError {
 
 pub type PersistentCatalogResult<T> = Result<T, PersistentCatalogError>;
 
+/// Exact proposal identity, including its journal position to prevent stale decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogTableRevision {
+    pub proposal_lsn: u64,
+    pub proposed: Table,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum Command {
     CreateDatabase { name: String },
@@ -51,6 +58,8 @@ enum Command {
     DropSchema { schema: SchemaId },
     DropDatabase { database: DatabaseId },
     ProposeTableRevision { table: TableId, proposed: Table },
+    ActivateTableRevision { revision: CatalogTableRevision },
+    CancelTableRevision { revision: CatalogTableRevision },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +72,7 @@ struct Event {
 }
 
 impl Event {
-    fn apply(&self, catalog: &mut Catalog, revisions: &mut BTreeMap<TableId, Table>) -> PersistentCatalogResult<Option<u64>> {
+    fn apply(&self, catalog: &mut Catalog, revisions: &mut BTreeMap<TableId, CatalogTableRevision>, event_lsn: u64) -> PersistentCatalogResult<Option<u64>> {
         let result = match &self.command {
             Command::CreateDatabase { name } => {
                 Some(catalog.create_database(name)?.0)
@@ -75,6 +84,9 @@ impl Event {
                 Some(catalog.create_table(*schema, specification.clone())?.0)
             }
             Command::AddForeignKey { table, specification } => {
+                if revisions.contains_key(table) {
+                    return Err(PersistentCatalogError::Corruption("table has pending schema revision".into()));
+                }
                 catalog.add_foreign_key(*table, specification.clone())?;
                 None
             }
@@ -93,16 +105,29 @@ impl Event {
                 catalog.drop_database(*database)?;
                 None
             }
+            Command::ActivateTableRevision { revision } | Command::CancelTableRevision { revision } => {
+                let proposed = &revision.proposed;
+                if revisions.get(&proposed.id) != Some(revision) {
+                    return Err(PersistentCatalogError::Corruption("revision decision does not match pending proposal".into()));
+                }
+                if matches!(&self.command, Command::ActivateTableRevision { .. }) {
+                    catalog.activate_nullable_revision(proposed)?;
+                }
+                revisions.remove(&proposed.id);
+                None
+            }
             Command::ProposeTableRevision { table, proposed } => {
                 let original = catalog.table(*table).ok_or_else(||
                     PersistentCatalogError::Corruption("revision refers to missing table".into())
                 )?;
                 crate::schema_evolution::plan_nullable_additions(original, proposed)
                     .map_err(|e| PersistentCatalogError::Corruption(e.to_string()))?;
+                // Reuse the authoritative catalog validators without publishing.
+                catalog.clone().activate_nullable_revision(proposed)?;
                 if revisions.contains_key(table) {
                     return Err(PersistentCatalogError::Corruption("duplicate table revision".into()));
                 }
-                revisions.insert(*table, proposed.clone());
+                revisions.insert(*table, CatalogTableRevision { proposal_lsn: event_lsn, proposed: proposed.clone() });
                 None
             }
         };
@@ -118,7 +143,7 @@ impl Event {
 #[derive(Debug)]
 struct Inner {
     catalog: Catalog,
-    revisions: BTreeMap<TableId, Table>,
+    revisions: BTreeMap<TableId, CatalogTableRevision>,
     journal: RowStore,
 }
 
@@ -165,7 +190,7 @@ impl PersistentCatalog {
                         format!("unsupported DDL event version at LSN {next_lsn}"),
                     ));
                 }
-                event.apply(&mut catalog, &mut revisions)
+                event.apply(&mut catalog, &mut revisions, next_lsn)
                     .map_err(|err| PersistentCatalogError::Corruption(
                         format!("DDL replay failed at LSN {next_lsn}: {err}"),
                     ))?;
@@ -191,10 +216,14 @@ impl PersistentCatalog {
 
     /// G33 proposals are durable, inactive and separate from the live catalog.
     pub fn proposed_table_revisions(&self) -> Vec<Table> {
-        self.inner.lock().revisions.values().cloned().collect()
+        self.inner.lock().revisions.values().map(|revision| revision.proposed.clone()).collect()
     }
 
     pub fn proposed_table_revision(&self, id: TableId) -> Option<Table> {
+        self.inner.lock().revisions.get(&id).map(|revision| revision.proposed.clone())
+    }
+
+    pub fn pending_table_revision(&self, id: TableId) -> Option<CatalogTableRevision> {
         self.inner.lock().revisions.get(&id).cloned()
     }
 
@@ -224,7 +253,7 @@ impl PersistentCatalog {
         Ok(inner.journal.backup_to(destination)?)
     }
 
-    fn commit(&self, command: Command) -> PersistentCatalogResult<Option<u64>> {
+    fn commit(&self, command: Command) -> PersistentCatalogResult<(Option<u64>, u64)> {
         let mut inner = self.inner.lock();
         let mut tentative = inner.catalog.clone();
         let mut pending = inner.revisions.clone();
@@ -235,50 +264,16 @@ impl PersistentCatalog {
             command,
         };
         event.result_id = match &event.command {
-            Command::CreateDatabase { name } =>
-                Some(tentative.create_database(name)?.0),
-            Command::CreateSchema { database, name } =>
-                Some(tentative.create_schema(*database, name)?.0),
-            Command::CreateTable { schema, specification } =>
-                Some(tentative.create_table(*schema, specification.clone())?.0),
-            Command::AddForeignKey { table, specification } => {
-                tentative.add_foreign_key(*table, specification.clone())?;
-                None
-            }
-            Command::DropTable { table } => {
-                if pending.contains_key(table) {
-                    return Err(PersistentCatalogError::Corruption(
-                        "table has pending immutable revision".into()
-                    ));
-                }
-                tentative.drop_table(*table)?;
-                None
-            }
-            Command::DropSchema { schema } => {
-                tentative.drop_schema(*schema)?;
-                None
-            }
-            Command::DropDatabase { database } => {
-                tentative.drop_database(*database)?;
-                None
-            }
-            Command::ProposeTableRevision { table, proposed } => {
-                let current = tentative.table(*table).ok_or_else(||
-                    PersistentCatalogError::Corruption("revision target missing".into())
-                )?;
-                crate::schema_evolution::plan_nullable_additions(current, proposed)
-                    .map_err(|e| PersistentCatalogError::Corruption(e.to_string()))?;
-                if pending.contains_key(table) {
-                    return Err(PersistentCatalogError::Corruption(
-                        "schema revision already proposed".into()
-                    ));
-                }
-                pending.insert(*table, proposed.clone());
-                None
-            }
+            Command::CreateDatabase { name } => Some(tentative.create_database(name)?.0),
+            Command::CreateSchema { database, name } => Some(tentative.create_schema(*database, name)?.0),
+            Command::CreateTable { schema, specification } => Some(tentative.create_table(*schema, specification.clone())?.0),
+            _ => None,
         };
         let next_lsn = inner.journal.last_lsn().checked_add(1)
             .ok_or(PersistentCatalogError::Storage(StoreError::SequenceExhausted))?;
+        // Use exactly the replay validator for every operation before WAL publication.
+        tentative = inner.catalog.clone();
+        event.apply(&mut tentative, &mut pending, next_lsn)?;
         let bytes = serde_json::to_vec(&event)?;
         // Oversized DDL definitions must fail before being committed. RowStore
         // enforces the inline record limit and leaves the WAL unmodified.
@@ -290,33 +285,43 @@ impl PersistentCatalog {
         }
         inner.catalog = tentative;
         inner.revisions = pending;
-        Ok(event.result_id)
+        Ok((event.result_id, actual))
     }
 
     /// Append a replay-validated inactive schema proposal; NOT an ALTER.
     pub fn propose_table_revision(
         &self, table: TableId, proposed: Table,
     ) -> PersistentCatalogResult<u64> {
-        self.commit(Command::ProposeTableRevision { table, proposed })?;
-        Ok(self.last_lsn())
+        Ok(self.commit(Command::ProposeTableRevision { table, proposed })?.1)
+    }
+
+    /// Activate catalog metadata only. Existing typed row domains require coordination.
+    /// The exact expected definition prevents a stale caller deciding another proposal.
+    pub fn activate_table_revision(&self, revision: CatalogTableRevision) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::ActivateTableRevision { revision })?.1)
+    }
+
+    /// Durably discard the exact pending proposal without changing the live schema.
+    pub fn cancel_table_revision(&self, revision: CatalogTableRevision) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::CancelTableRevision { revision })?.1)
     }
 
     pub fn create_database(&self, name: &str) -> PersistentCatalogResult<DatabaseId> {
-        Ok(DatabaseId(self.commit(Command::CreateDatabase { name: name.into() })?
+        Ok(DatabaseId(self.commit(Command::CreateDatabase { name: name.into() })?.0
             .expect("create allocates identity")))
     }
 
     pub fn create_schema(
         &self, database: DatabaseId, name: &str,
     ) -> PersistentCatalogResult<SchemaId> {
-        Ok(SchemaId(self.commit(Command::CreateSchema { database, name: name.into() })?
+        Ok(SchemaId(self.commit(Command::CreateSchema { database, name: name.into() })?.0
             .expect("create allocates identity")))
     }
 
     pub fn create_table(
         &self, schema: SchemaId, specification: TableSpec,
     ) -> PersistentCatalogResult<TableId> {
-        Ok(TableId(self.commit(Command::CreateTable { schema, specification })?
+        Ok(TableId(self.commit(Command::CreateTable { schema, specification })?.0
             .expect("create allocates identity")))
     }
 

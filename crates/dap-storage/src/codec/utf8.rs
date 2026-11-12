@@ -38,8 +38,8 @@ pub fn decode(bytes: &[u8]) -> DapResult<(Vec<u32>, Vec<u8>)> {
         return Err(DapError::corruption("utf8 page truncated offsets"));
     }
     let mut offsets = Vec::with_capacity(n + 1);
-    for chunk in bytes[4..off_end].chunks_exact(4) {
-        offsets.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in bytes[4..off_end].as_chunks::<4>().0.iter() {
+        offsets.push(u32::from_le_bytes(*chunk));
     }
     let data = bytes[off_end..].to_vec();
     let expected = *offsets.last().unwrap_or(&0) as usize;

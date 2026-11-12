@@ -10,9 +10,11 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-use crate::btree::{DiskBTree, RowPointer};
+use crate::btree::{DiskBTree, LeafEntries, RowPointer};
 use crate::page::{Page, PageKind, PAGE_SIZE};
 use crate::row_store::{StoreError, StoreResult};
+
+type VerifiedSnapshot = (LeafEntries, BTreeMap<Vec<u8>, Vec<u8>>, u64);
 
 const ROW_HEADER: usize = 6;
 const META_LENGTH: usize = 24;
@@ -42,7 +44,7 @@ fn snapshot_path(root: &Path, lsn: u64) -> std::path::PathBuf {
 fn scan_snapshot(
     root: &Path,
     lsn: u64,
-) -> StoreResult<(Vec<(Vec<u8>, RowPointer)>, BTreeMap<Vec<u8>, Vec<u8>>, u64)> {
+) -> StoreResult<VerifiedSnapshot> {
     let mut file = File::open(snapshot_path(root, lsn))?;
     let length = file.metadata()?.len();
     if length < PAGE_SIZE as u64 || length % PAGE_SIZE as u64 != 0 {

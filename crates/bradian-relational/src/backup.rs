@@ -40,7 +40,8 @@ impl BackupReceipt {
         bytes[8..16].copy_from_slice(&self.checkpoint_lsn.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.last_lsn.to_le_bytes());
         bytes[24..32].copy_from_slice(&self.rows.to_le_bytes());
-        bytes[36..40].copy_from_slice(&hash(&bytes[..36]).to_le_bytes());
+        let checksum = hash(&bytes[..36]);
+        bytes[36..40].copy_from_slice(&checksum.to_le_bytes());
         bytes
     }
 

@@ -279,7 +279,7 @@ pub(crate) fn backup_database(
     let verify = staged.join("verified-root");
     fs::create_dir(&verify)?;
     for component in COMPONENTS {
-        RowStore::restore_backup(&staged.join(component), verify.join(component))?;
+        RowStore::restore_backup(staged.join(component), verify.join(component))?;
     }
     verify_reopened(&verify, &report)?;
     fs::remove_dir_all(&verify)?;
@@ -320,8 +320,8 @@ pub fn restore_database(
         (COMPONENTS[2], report.lifecycle),
     ] {
         let actual = RowStore::restore_backup(
-            &backup.join(component),
-            &staged.join(component),
+            backup.join(component),
+            staged.join(component),
         )?;
         if !receipt_matches(actual, expected) {
             return Err(DatabaseBackupError::Corruption(

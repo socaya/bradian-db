@@ -309,17 +309,18 @@ fn historical_sql_rejects_malformed_lsn_values_and_abort_is_atomic() {
 fn opening_history_rejects_invalid_retained_older_row_version() {
     use bradian_relational::durable_mvcc::DurableMvccStore;
     use bradian_relational::persistent_catalog::PersistentCatalog;
-    use bradian_relational::typed_table::encode_key;
     let (_dir, _source, history) = migrated();
     let table = {
         let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
         catalog.snapshot().tables().find(|t| t.name == "accounts").unwrap().clone()
     };
-    let positions = vec![0];
-    let key = encode_key(&table, &positions, &[Value::Int64(1)]).unwrap();
     {
         let store = DurableMvccStore::open(history.join("history-domain")).unwrap();
         let mut tx = store.begin();
+        let key = tx.scan().into_iter().find_map(|(key, bytes)| {
+            let row = bradian_relational::typed_table::decode_row(&table, &bytes).ok()?;
+            (row.first() == Some(&Value::Int64(1))).then_some(key)
+        }).expect("seeded accounts row");
         // The newer value is intentionally invalid for the pinned typed schema.
         // It is subsequently tombstoned, so latest-row validation alone misses it.
         tx.replace(&key, b"not-a-typed-row").unwrap();
@@ -697,9 +698,11 @@ fn g28_prepared_intents_survive_g24_history_backup_restore() {
     let (dir, _source, history) = migrated();
     let archive = dir.path().join("archive");
     let recovered = dir.path().join("restored");
+    let original;
     {
         let db = HistorySqlEngine::open(&history).unwrap();
         let (old, _) = db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap();
+        original = old.clone();
         let mut next = old.clone();
         next.columns.push(Column {
             name: "note".into(), data_type: DataType::Text, nullable: true,
@@ -712,7 +715,7 @@ fn g28_prepared_intents_survive_g24_history_backup_restore() {
     let intents = db.prepared_schema_proposals();
     assert_eq!(intents.len(), 1);
     assert_eq!(intents[0].1.columns.last().unwrap().name, "note");
-    assert_eq!(db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap().0.columns.len(), 3 - 1);
+    assert_eq!(db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap().0, original);
 }
 
 #[test]
@@ -821,7 +824,7 @@ fn g30_coordination_fence_survives_restart_and_keeps_original_schema() {
     let records = db.ddl_coordination_records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].1, fence_lsn);
-    assert_eq!(records[0].0.proposal_crc32 != 0, true);
+    assert!(records[0].0.proposal_crc32 != 0);
     assert_eq!(db.schema_as_of(
         "bank.public.accounts", db.last_lsn()
     ).unwrap().0.columns.len(), 2);
@@ -1000,4 +1003,27 @@ fn g31_readiness_survives_verified_g24_backup_restore() {
     assert_eq!(db.schema_as_of(
         "bank.public.movements", db.last_lsn()
     ).unwrap().0.columns.len(), 3);
+}
+
+#[test]
+fn independent_catalog_activation_cannot_silently_reinterpret_historical_rows() {
+    let (_dir, _source, history) = migrated();
+    let catalog = bradian_relational::persistent_catalog::PersistentCatalog::open(history.join("catalog")).unwrap();
+    let old = catalog.snapshot().tables().find(|t| t.name == "accounts").unwrap().clone();
+    let mut proposed = old.clone();
+    proposed.columns.push(bradian_relational::Column {
+        name: "notes".into(), data_type: bradian_relational::DataType::Text, nullable: true,
+    });
+    catalog.propose_table_revision(old.id, proposed).unwrap();
+    catalog.activate_table_revision(catalog.pending_table_revision(old.id).unwrap()).unwrap();
+    drop(catalog);
+    assert!(HistorySqlEngine::open(&history).is_err());
+    // Inspect the domain with its original definition: no row bytes were rewritten.
+    let catalog = bradian_relational::persistent_catalog::PersistentCatalog::open(history.join("catalog")).unwrap();
+    let mut definitions: std::collections::BTreeMap<_, _> = catalog.snapshot().tables()
+        .map(|t| (t.id, t.clone())).collect();
+    definitions.insert(old.id, old.clone());
+    let domain = bradian_relational::durable_typed::DurableTypedStore::open(history.join("history-domain"), &definitions).unwrap();
+    assert_eq!(domain.get_as_of(old.id, &[Value::Int64(1)], domain.last_lsn()).unwrap(),
+        Some(vec![Value::Int64(1), Value::Int64(1000)]));
 }

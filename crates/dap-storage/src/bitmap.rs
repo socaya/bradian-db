@@ -21,7 +21,7 @@ impl Bitmap {
     pub fn all_set(len: usize) -> Self {
         let mut bytes = vec![0xFFu8; len.div_ceil(8)];
         // Clear trailing bits beyond `len` so popcount is accurate.
-        if len % 8 != 0 {
+        if !len.is_multiple_of(8) {
             let last = bytes.len() - 1;
             let keep_bits = (len % 8) as u32;
             let mask = (1u8 << keep_bits) - 1;

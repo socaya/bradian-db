@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 
 use bradian_relational::{
-    Catalog, Column, DataType, PrimaryKey, Table, TableId, TableSpec,
+    Catalog, Column, DataType, PrimaryKey, Table, TableSpec,
 };
 use bradian_relational::transaction_domain::{DomainError, MultiTableStore};
 use bradian_relational::typed_table::{TableError, Value};

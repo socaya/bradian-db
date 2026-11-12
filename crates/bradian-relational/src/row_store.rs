@@ -35,6 +35,10 @@ use crate::index_recovery::{self, IndexRecovery};
 use crate::checkpoint_manifest::{self, CheckpointManifest, ManifestError};
 use crate::backup::{self, BackupReceipt};
 
+/// Consistent owned binary rows returned by a storage snapshot.
+pub type RowSnapshot = Vec<(Vec<u8>, Vec<u8>)>;
+type RowMap = BTreeMap<Vec<u8>, Vec<u8>>;
+
 const WAL_MAGIC: &[u8; 4] = b"BRWL";
 const WAL_HEADER: usize = 12;
 const ROW_HEADER: usize = 6;
@@ -112,6 +116,7 @@ impl RowStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(root.join("rows.lock"))?;
         match lock.try_lock() {
             Ok(()) => {},
@@ -133,6 +138,7 @@ impl RowStore {
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(wal_path)?;
@@ -175,7 +181,7 @@ impl RowStore {
     /// Obtain one consistent row image and its committed WAL position under
     /// a single lock. Transaction validation must never read the LSN and
     /// snapshot in separate lock acquisitions.
-    pub fn snapshot_with_lsn(&self) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
+    pub fn snapshot_with_lsn(&self) -> (u64, RowSnapshot) {
         let inner = self.inner.lock();
         (inner.lsn, inner.rows.iter().map(|(key, value)| (key.clone(), value.clone())).collect())
     }
@@ -773,7 +779,7 @@ fn list_snapshots(root: &Path) -> StoreResult<Vec<(u64, PathBuf)>> {
     Ok(snapshots)
 }
 
-fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, BTreeMap<Vec<u8>, Vec<u8>>)> {
+fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, RowMap)> {
     let manifest = checkpoint_manifest::load(root)?;
     let snapshot = match manifest {
         Some(m) => {

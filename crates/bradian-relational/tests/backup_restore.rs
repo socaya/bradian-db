@@ -116,7 +116,7 @@ fn corrupted_backup_manifest_or_wal_cannot_be_restored() {
     let mut descriptor = fs::read(backup.join("backup.info")).unwrap();
     descriptor[12] ^= 0x23;
     fs::write(backup.join("backup.info"), descriptor).unwrap();
-    assert!(RowStore::restore_backup(&backup, &base.path().join("invalid")).is_err());
+    assert!(RowStore::restore_backup(&backup, base.path().join("invalid")).is_err());
 }
 
 #[test]

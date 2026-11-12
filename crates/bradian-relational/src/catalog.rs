@@ -209,6 +209,22 @@ impl Catalog {
         Ok(())
     }
 
+    /// Replace metadata only; row-domain coordination belongs to the owning engine.
+    pub(crate) fn activate_nullable_revision(&mut self, proposed: &Table) -> Result<(), CatalogError> {
+        let current = self.table(proposed.id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", proposed.id.0)))?;
+        crate::schema_evolution::plan_nullable_additions(current, proposed)
+            .map_err(|err| CatalogError::InvalidDefinition(err.to_string()))?;
+        for column in &proposed.columns {
+            if identifier(&column.name)? != column.name {
+                return Err(CatalogError::InvalidIdentifier(column.name.clone()));
+            }
+            validate_type(&column.data_type)?;
+        }
+        self.tables.insert(proposed.id, proposed.clone());
+        Ok(())
+    }
+
     /// RESTRICT semantics: never silently remove a referenced relation.
     pub fn drop_table(&mut self, id: TableId) -> Result<(), CatalogError> {
         if !self.tables.contains_key(&id) {
