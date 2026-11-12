@@ -144,6 +144,10 @@ impl Parser {
         }
     }
 
+    pub(crate) fn next_is_word(&self, value: &str) -> bool {
+        matches!(self.peek(), Some(Token::Word(word)) if word.eq_ignore_ascii_case(value))
+    }
+
     pub(crate) fn consume_word(&mut self, value: &str) -> bool {
         if matches!(self.peek(), Some(Token::Word(word)) if word.eq_ignore_ascii_case(value)) {
             self.pos += 1;
