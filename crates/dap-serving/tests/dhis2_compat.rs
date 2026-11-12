@@ -13,6 +13,8 @@ use serde_json::{json, Value as JsonValue};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
 fn uid(s: &str) -> Uid {
     Uid::new(s).unwrap()
 }
@@ -69,7 +71,9 @@ fn seed_engine(root: &std::path::Path) -> Arc<AnalyticsEngine> {
 async fn aggregate_analytics_returns_dhis2_envelope() {
     let dir = tempdir().unwrap();
     let engine = seed_engine(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     let body = json!({
         "dataset": "dsAAAAAAAAA",
@@ -81,6 +85,7 @@ async fn aggregate_analytics_returns_dhis2_envelope() {
         .oneshot(
             Request::post("/api/analytics.json")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -118,11 +123,14 @@ async fn aggregate_analytics_returns_dhis2_envelope() {
 async fn raw_data_endpoint_rejects_deliberately() {
     let dir = tempdir().unwrap();
     let engine = seed_engine(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
     let resp = app
         .oneshot(
             Request::post("/api/analytics/rawData.json")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from("{}"))
                 .unwrap(),
         )
@@ -135,11 +143,14 @@ async fn raw_data_endpoint_rejects_deliberately() {
 async fn aggregate_missing_dataset_rejects_with_400() {
     let dir = tempdir().unwrap();
     let engine = seed_engine(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
     let resp = app
         .oneshot(
             Request::post("/api/analytics.json")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from("{}"))
                 .unwrap(),
         )
