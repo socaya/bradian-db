@@ -87,6 +87,11 @@ impl TypedMvccStore {
                 return Err(DomainError::Corruption("duplicate schema pin".into()));
             }
         }
+        if tables.is_empty() {
+            return Err(DomainError::Corruption(
+                "shared MVCC domain has no registered catalog table schemas".into(),
+            ));
+        }
         for (key, bytes) in &records {
             if key.starts_with(SCHEMA_PREFIX) { continue; }
             let table_id = table_id_from_row_key(key)?;
