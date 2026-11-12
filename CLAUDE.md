@@ -16,7 +16,7 @@ Use the approved Bradian logos without altering path geometry, proportions, typo
 
 ## 2. Honest implementation status
 
-The repository currently includes analytical columnar storage (`.derc`), analytical operators, DHIS2 adapters, an analytical API, a React Studio foundation, a generic **in-memory** relational schema catalog, and a versioned physical page **codec**, and single-process WAL-backed key/value row persistence, immutable disk B+tree checkpoints, generation-scoped read-only page caching, and typed table CRUD with primary-key checks with synchronized writes, atomic multi-key batch commits, multi-page snapshots and restart recovery. A production database engine with mutable WAL-protected B+tree pages and buffer management, full SQL execution, persistent catalog, multi-operation ACID/MVCC transactions, strongly consistent HTAP, self-managing distributed SQL cluster, enterprise identity/TLS, and certified recovery are **not yet implemented**.
+The repository currently includes analytical columnar storage (`.derc`), analytical operators, DHIS2 adapters, an analytical API, a React Studio foundation, a generic **in-memory** relational schema catalog, and a versioned physical page **codec**, and single-process WAL-backed key/value row persistence, immutable disk B+tree checkpoints, WAL-backed mutable logical index deltas, generation-scoped read-only page caching, and typed table CRUD with primary-key checks with synchronized writes, atomic multi-key batch commits, multi-page snapshots and restart recovery. A production database engine with mutable WAL-protected B+tree pages and buffer management, full SQL execution, persistent catalog, multi-operation ACID/MVCC transactions, strongly consistent HTAP, self-managing distributed SQL cluster, enterprise identity/TLS, and certified recovery are **not yet implemented**.
 
 Do not label a requirement DONE until both implementation and its correctness, security and recovery tests are demonstrated. Record deliverables in `docs/gates/` and explain incomplete functionality accurately in README and UI.
 
@@ -33,6 +33,8 @@ Do not label a requirement DONE until both implementation and its correctness, s
 No mandatory dependency on an external OLTP/OLAP database server is permitted for the Bradian core. Audited third-party libraries for crypto, networking and compression are acceptable. Never implement custom cryptographic algorithms.
 
 ## 4. Compatibility constraints
+
+The incremental WAL-backed mutable index is specified by [ADR 0012](docs/adr/0012-wal-backed-mutable-index.md) and [BRD-G7](docs/gates/BRD-G7-mutable-index-delta.md). It is a synchronized overlay merged with an immutable checkpoint B+tree, **not** in-place physical B+tree writes or a dirty-page manager.
 
 The read-only buffer pool is documented in [ADR 0011](docs/adr/0011-generation-scoped-buffer-pool.md) and [BRD-G6](docs/gates/BRD-G6-buffer-pool.md). Its checked, bounded LRU cache is for immutable snapshot generations only: do not present it as a dirty-page buffer manager, in-place B+tree update manager or MVCC engine.
 
