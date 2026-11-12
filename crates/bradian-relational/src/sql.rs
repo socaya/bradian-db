@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::{Column, DataType, PrimaryKey, Table, TableSpec};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
-use crate::typed_table::{TableError, TableStore, Value};
+use crate::typed_table::{TableError, TableStore, TableTransaction, Value};
 
 #[derive(Debug, Error)]
 pub enum SqlError {
@@ -373,6 +373,27 @@ impl SqlEngine {
         // Only supported schemas reach TableStore; secondary runtime constraints
         // are rejected by its own validator, never silently ignored.
         Ok(TableStore::open(self.root.join("tables").join(table.id.0.to_string()), table.clone())?)
+    }
+
+    /// Execute application-defined typed operations as one durable transaction
+    /// on a single SQL-resolved table. A closure error aborts without any WAL
+    /// write; successful completion uses one optimistic, synchronized WAL
+    /// batch. This is not SQL BEGIN/COMMIT or cross-table transaction support.
+    pub fn transact_table<R>(
+        &self,
+        qualified_table: &str,
+        body: impl FnOnce(&mut TableTransaction<'_>) -> SqlResult<R>,
+    ) -> SqlResult<(R, u64)> {
+        let _guard = self.operation.lock();
+        let mut parser = Parser::new(qualified_table)?;
+        let name = parser.name()?;
+        parser.end()?;
+        let table = self.resolve(&name)?;
+        let storage = self.table_store(&table)?;
+        let mut transaction = storage.begin_transaction()?;
+        let result = body(&mut transaction)?;
+        let lsn = transaction.commit()?;
+        Ok((result, lsn))
     }
 
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
