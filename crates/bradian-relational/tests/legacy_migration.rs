@@ -133,7 +133,6 @@ fn refuses_source_with_active_legacy_catalog_lock() {
 
 #[test]
 fn refuses_active_legacy_table_lock_even_when_catalog_is_free() {
-    use bradian_relational::{Catalog, TableSpec};
     use bradian_relational::persistent_catalog::PersistentCatalog;
     use bradian_relational::typed_table::TableStore;
 
