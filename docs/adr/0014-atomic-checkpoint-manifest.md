@@ -50,6 +50,10 @@ A newer snapshot whose filename exceeds the manifest LSN is **not** automaticall
 
 Incomplete `checkpoint.pending` files are ignored during recovery; the next publisher replaces them under exclusive ownership.
 
+## Consistent backup/restore integration (ADR 0015)
+
+The [G10 backup/restore protocol](0015-consistent-backup-restore.md) copies one committed manifest, its immutable checkpoint snapshot and derived index, and all newer synchronized WAL frames under the RowStore mutation mutex. A copied database is independently reopened and audited before the backup directory is published; restore refuses overwriting existing databases. Backup does not claim encryption, remote PITR or cluster-wide snapshot consistency.
+
 ## Correctness boundaries and remaining risks
 
 - This is a source-of-truth **generation publication** mechanism, not a claim of arbitrary SQL transaction durability or page-level WAL redo/undo.
