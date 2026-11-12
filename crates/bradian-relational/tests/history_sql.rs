@@ -351,3 +351,84 @@ fn opening_history_rejects_tombstoned_unregistered_table_key() {
     }
     assert!(HistorySqlEngine::open(&history).is_err());
 }
+
+#[test]
+fn g24_backup_restores_retained_history_and_preserves_source() {
+    use bradian_relational::history_backup::restore_history_database;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("g24-archive");
+    let restored = dir.path().join("g24-restored");
+    let old;
+    let current;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        old = db.last_lsn();
+        db.with_session(|s| {
+            s.execute("BEGIN")?;
+            s.execute("UPDATE bank.public.accounts SET balance=400 WHERE id=1")?;
+            s.execute("COMMIT")?;
+            Ok(())
+        }).unwrap();
+        current = db.last_lsn();
+        let receipt = db.backup_to(&archive).unwrap();
+        assert_eq!(receipt.table_ids.len(), 2);
+        assert!(receipt.retained_versions >= 2);
+    }
+    let receipt = restore_history_database(&archive, &restored).unwrap();
+    assert_eq!(receipt.history.last_lsn, current);
+    assert!(archive.join("history-backup.json").exists());
+    let db = HistorySqlEngine::open(&restored).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        assert_eq!(s.execute(&format!(
+            "SELECT balance FROM bank.public.accounts AS OF {old} WHERE id=1"
+        ))?, SqlResultSet::Rows {
+            columns: vec!["balance".into()],
+            rows: vec![vec![Value::Int64(1000)]],
+        });
+        assert_eq!(s.execute(&format!(
+            "SELECT balance FROM bank.public.accounts AS OF {current} WHERE id=1"
+        ))?, SqlResultSet::Rows {
+            columns: vec!["balance".into()],
+            rows: vec![vec![Value::Int64(400)]],
+        });
+        Ok(())
+    }).unwrap();
+    assert!(HistorySqlEngine::open(&history).is_ok());
+}
+
+#[test]
+fn g24_restore_refuses_tampered_history_archive_without_publishing() {
+    use bradian_relational::history_backup::restore_history_database;
+    use std::io::Write;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        db.backup_to(&archive).unwrap();
+    }
+    let mut f = std::fs::OpenOptions::new().append(true)
+        .open(archive.join("history-domain").join("rows.wal")).unwrap();
+    f.write_all(b"corrupt archive").unwrap();
+    assert!(restore_history_database(&archive, &restored).is_err());
+    assert!(!restored.exists());
+}
+
+#[test]
+fn g24_backup_and_restore_refuse_occupied_or_overlapping_destinations() {
+    use bradian_relational::history_backup::restore_history_database;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("archive");
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        assert!(db.backup_to(&history).is_err());
+        db.backup_to(&archive).unwrap();
+        assert!(db.backup_to(&archive).is_err());
+    }
+    assert!(restore_history_database(&archive, &history).is_err());
+    let stage = dir.path().join(".restore.bradian-g24-incomplete");
+    std::fs::create_dir(&stage).unwrap();
+    assert!(restore_history_database(&archive, dir.path().join("restore")).is_err());
+    assert!(!dir.path().join("restore").exists());
+}
