@@ -29,6 +29,7 @@ This directory contains the engineering specifications, architectural decisions,
 15. **[Native SQL execution ADR](adr/0017-native-sql-execution.md)** — parser, strict binder, native catalog/typed-row execution and supported SQL grammar.
 16. **[Single-table transaction ADR](adr/0018-single-table-transactions.md)** — row snapshot, staged writes, rollback and atomic WAL batch commits.
 17. **[Scoped SQL transaction ADR](adr/0019-scoped-sql-transaction-sessions.md)** — SQL BEGIN/COMMIT/ROLLBACK and staged DML for one table in a Rust callback.
+18. **[Shared-WAL multi-table atomicity ADR](adr/0020-shared-wal-multi-table-atomicity.md)** — one WAL commit across registered typed tables in a dedicated transaction domain.
 
 ## Current milestone records
 
@@ -48,7 +49,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G12](gates/BRD-G12-native-sql.md) | Executable bounded SQL CREATE, INSERT, SELECT, UPDATE, DELETE | Source/tests committed; manual checks outstanding |
 | [BRD-G13](gates/BRD-G13-single-table-transactions.md) | Atomic local single-table transactions, conservative conflict rejection and rollback | Source/tests committed; manual checks outstanding |
 | [BRD-G14](gates/BRD-G14-scoped-sql-transactions.md) | Scoped single-table SQL BEGIN/COMMIT/ROLLBACK | Source/tests committed; manual checks outstanding |
-| Future gates | Independent SQL sessions, cross-table ACID, MVCC, mutable physical B+tree, HTAP, clusters and enterprise security | Must be implemented and qualified |
+| [BRD-G15](gates/BRD-G15-shared-wal-multi-table.md) | Shared-WAL atomic changes across multiple typed tables | Source/tests committed; manual checks outstanding |
+| Future gates | SQL integration/migration to shared domains, MVCC, mutable physical B+tree, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
