@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Bradian relational catalog, typed WAL-backed row storage, disk B+tree and bounded page cache"
+description = "Bradian persistent relational catalog, typed WAL-backed rows, disk B+tree and page cache"
 
 [dependencies]
 serde = { workspace = true }
