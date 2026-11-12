@@ -512,3 +512,81 @@ fn g25_refuses_incomplete_migration_staging_and_wrong_source_format() {
     // The physical source tree may not contain the new target.
     assert!(migrate_lifecycle_to_history(&source, source.join("nested-history")).is_err());
 }
+
+#[test]
+fn g26_describe_table_as_of_returns_persisted_schema_epoch() {
+    let (_dir, _source, history) = migrated();
+    let first;
+    let expected;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        first = db.last_lsn();
+        let epochs = db.schema_epochs();
+        assert_eq!(epochs.len(), 2);
+        let (schema, registered) = db.schema_as_of("bank.public.accounts", first).unwrap();
+        assert_eq!(schema.name, "accounts");
+        assert_eq!(registered, epochs.iter().find(|(id, _)| *id == schema.id).unwrap().1);
+        expected = db.with_session(|session| {
+            session.execute(&format!(
+                "DESCRIBE TABLE bank.public.accounts AS OF {first}"
+            ))
+        }).unwrap();
+        match &expected {
+            SqlResultSet::Rows { columns, rows } => {
+                assert_eq!(columns, &vec![
+                    "column_name".to_string(), "data_type".to_string(),
+                    "nullable".to_string(), "schema_registered_lsn".to_string(),
+                ]);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][0], Value::String("id".into()));
+                assert_eq!(rows[1][0], Value::String("balance".into()));
+                assert_eq!(rows[0][3], Value::String(registered.to_string()));
+            }
+            _ => panic!("DESCRIBE must return schema rows"),
+        }
+        db.checkpoint().unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    assert_eq!(db.with_session(|session| {
+        session.execute(&format!(
+            "DESCRIBE TABLE bank.public.accounts AS OF {first}"
+        ))
+    }).unwrap(), expected);
+}
+
+#[test]
+fn g26_schema_history_rejects_pre_registration_and_invalid_horizons() {
+    let (_dir, _source, history) = migrated();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let latest = db.last_lsn();
+    let registration = db.schema_epochs().iter().map(|(_, lsn)| *lsn).max().unwrap();
+    assert!(registration > 1);
+    let earlier = registration - 1;
+    assert!(db.schema_as_of("bank.public.movements", 0).is_err());
+    assert!(db.schema_as_of("bank.public.accounts", latest + 1).is_err());
+    db.with_session(|session| {
+        assert!(session.execute(
+            "DESCRIBE TABLE bank.public.accounts AS OF -1"
+        ).is_err());
+        assert!(session.execute(&format!(
+            "DESCRIBE TABLE bank.public.movements AS OF {}",
+            latest + 1
+        )).is_err());
+        // A failed read-only inspection must not publish a WAL write.
+        assert!(!session.in_transaction());
+        Ok(())
+    }).unwrap();
+    assert_eq!(db.last_lsn(), latest);
+    // At least one G23 table is registered at the final schema-batch LSN.
+    let last_table = db.schema_epochs().iter().find(|(_, lsn)| *lsn == registration)
+        .unwrap().0;
+    assert!(db.schema_as_of(
+        if db.schema_as_of("bank.public.accounts", earlier).is_err() {
+            "bank.public.accounts"
+        } else {
+            "bank.public.movements"
+        },
+        earlier
+    ).is_err());
+    assert!(db.schema_epochs().iter().any(|(id, _)| *id == last_table));
+}
