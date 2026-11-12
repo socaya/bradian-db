@@ -79,7 +79,7 @@ fn index_page_corruption_and_wrong_lsn_fail_closed() {
     bytes[4096 + 34] ^= 0x41;
     fs::write(&path, bytes).unwrap();
     let mut index = DiskBTree::open(&path, 5).unwrap();
-    assert!(matches!(index.get(b"a"), Err(IndexError::Page(_))));
+    assert!(matches!(index.get(b"a"), Err(IndexError::Cache(_))));
 }
 
 #[test]
