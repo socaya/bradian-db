@@ -605,7 +605,7 @@ pub struct SqlSession<'a> {
     last_commit_lsn: Option<u64>,
 }
 
-impl SqlSession<'_> {
+impl<'a> SqlSession<'a> {
     pub fn in_transaction(&self) -> bool { self.transaction.is_some() }
     pub fn last_commit_lsn(&self) -> Option<u64> { self.last_commit_lsn }
 
@@ -629,7 +629,8 @@ impl SqlSession<'_> {
                 if self.transaction.is_some() {
                     return Err(SqlError::Unsupported("nested BEGIN is not supported".into()));
                 }
-                self.transaction = Some(self.storage.begin_transaction()?);
+                let transaction: TableTransaction<'a> = self.storage.begin_transaction()?;
+                self.transaction = Some(transaction);
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "commit" => {
