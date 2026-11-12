@@ -111,7 +111,7 @@ fn pending_intent_before_schema_pin_is_replayed_on_open() {
         let raw = RowStore::open(dir.path().join("lifecycle")).unwrap();
         let entry = serde_json::json!({
             "version": 1,
-            "table": table,
+            "table": table.clone(),
             "state": "Pending",
         });
         raw.put(
