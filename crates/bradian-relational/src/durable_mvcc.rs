@@ -133,7 +133,7 @@ impl DurableMvccStore {
     /// Nonempty directories without the matching marker fail closed.
     pub fn open(path: impl AsRef<Path>) -> DurableMvccResult<Self> {
         let rows = RowStore::open(path)?;
-        if rows.is_empty() {
+        if rows.is_empty() && rows.last_lsn() == 0 {
             rows.commit_batch(None, &[
                 RowMutation::Put { key: FORMAT_KEY.to_vec(), value: FORMAT.to_vec() },
                 RowMutation::Put { key: FLOOR_KEY.to_vec(), value: 0_u64.to_be_bytes().to_vec() },
