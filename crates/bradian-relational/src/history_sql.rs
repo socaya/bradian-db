@@ -55,6 +55,7 @@ impl HistorySqlEngine {
             .map(|table| (table.id, table.clone()))
             .collect::<BTreeMap<_,_>>();
         let domain = DurableTypedStore::open(root.join("history-domain"), &definitions)?;
+        domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
         Ok(Self { catalog, domain, _root: root.to_owned() })
     }
 
@@ -156,6 +157,23 @@ impl HistorySqlEngine {
     /// Returns WAL-recovered abort markers at engine open. Reopen to refresh.
     pub fn aborted_schema_proposals(&self) -> Vec<(crate::TableId, u64)> {
         self.domain.aborted_schema_proposals()
+    }
+
+    /// G30: bind an inactive G28 proposal to the authoritative G11 catalog
+    /// WAL position. Both stores remain exclusively held by this engine.
+    pub fn coordinate_prepared_schema(&self, qualified_table: &str) -> SqlResult<u64> {
+        let mut parser = Parser::new(qualified_table)?;
+        let name = parser.name()?;
+        parser.end()?;
+        let table = self.resolve(&name)?;
+        Ok(self.domain.coordinate_prepared_schema(table.id, self.catalog.last_lsn())?)
+    }
+
+    /// Recovered coordination records from this engine's opening snapshot.
+    pub fn ddl_coordination_records(
+        &self,
+    ) -> Vec<(crate::durable_typed::DdlCoordinationRecord, u64)> {
+        self.domain.ddl_coordination_records()
     }
 
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
