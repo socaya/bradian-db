@@ -176,6 +176,22 @@ impl HistorySqlEngine {
         self.domain.ddl_coordination_records()
     }
 
+    /// G31: certify a prepared and coordinated proposal as READY FOR REVIEW.
+    /// This writes only an inactive historical WAL record, not ALTER TABLE.
+    pub fn certify_schema_readiness(&self, qualified_table: &str) -> SqlResult<u64> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let table = self.resolve(&parts)?;
+        Ok(self.domain.certify_schema_readiness(table.id, self.catalog.last_lsn())?)
+    }
+
+    pub fn ddl_readiness_records(
+        &self,
+    ) -> Vec<(crate::durable_typed::DdlReadinessRecord, u64)> {
+        self.domain.ddl_readiness_records()
+    }
+
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks
