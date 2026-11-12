@@ -21,7 +21,7 @@ let report = migrate_legacy_sql(
 )?;
 ```
 
-The destination must not exist, its parent must exist, and it cannot overlap the source. The source must have a valid durable `catalog/` directory. A previously unfinished staging directory is an error requiring explicit inspection, not an invitation to overwrite it.
+The destination must not exist, its parent must exist, and it cannot overlap the source. A root already containing `shared-domain/` is not a legacy source and is rejected to prevent loss of migrated records. A second destination-existence check occurs immediately before publication, although portable no-replace rename under concurrent destination creation remains an operational qualification gap. The source must have a valid durable `catalog/` directory. A previously unfinished staging directory is an error requiring explicit inspection, not an invitation to overwrite it.
 
 **Precondition:** Stop or disconnect legacy applications and prevent any new writers before starting. Advisory locks only protect against cooperating writers.
 
@@ -46,6 +46,7 @@ The destination contains a durable `catalog/` and `shared-domain/` and **no lega
 - **Existing destination:** Fail before touching it.
 - **Source with active cooperating writer:** Fail when the existing catalog or any typed table exclusive file lock cannot be acquired.
 - **Unknown legacy table directory:** Fail closed rather than ignore data.
+- **Already-shared source:** Fail closed rather than importing zero legacy rows while omitting an existing shared domain.
 - **Unprovisioned empty table:** Register an empty schema pin without inventing data.
 - **Schema mismatch or invalid row:** Fail before publication.
 - **Power loss:** Rename/sync behavior is a filesystem qualification requirement. Operators must retain the source until the destination has been reopened, verified and backed up.
