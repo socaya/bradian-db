@@ -22,6 +22,7 @@ This directory contains the engineering specifications, architectural decisions,
 8. **[Disk B+tree index ADR](adr/0010-checkpoint-btree.md)** — immutable on-disk multi-level index, checkpoint integration and recovery boundaries.
 9. **[Read-only buffer pool ADR](adr/0011-generation-scoped-buffer-pool.md)** — bounded LRU page caching and immutable generation safety.
 10. **[Mutable index overlay ADR](adr/0012-wal-backed-mutable-index.md)** — WAL-committed logical delta and on-disk checkpoint B+tree merging.
+11. **[Derived index recovery ADR](adr/0013-derived-index-reconstruction.md)** — rebuild absent checkpoint indexes from verified pages and audit physical index integrity.
 
 ## Current milestone records
 
@@ -34,6 +35,7 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G5](gates/BRD-G5-checkpoint-btree.md) | Immutable physical B+tree index with point and range lookups | Source/tests committed; manual checks outstanding |
 | [BRD-G6](gates/BRD-G6-buffer-pool.md) | Bounded physical page cache, CRC validation, immutable-generation invalidation | Source/tests committed; manual checks outstanding |
 | [BRD-G7](gates/BRD-G7-mutable-index-delta.md) | Incrementally updated WAL index overlay with tombstones and range merging | Source/tests committed; manual checks outstanding |
+| [BRD-G8](gates/BRD-G8-index-recovery.md) | Crash-safe missing-index reconstruction and authoritative checkpoint integrity audit | Source/tests committed; manual qualification outstanding |
 | Future gates | In-place disk B+tree, writable buffer pool, SQL transactions, MVCC, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
