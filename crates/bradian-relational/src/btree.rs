@@ -61,7 +61,6 @@ pub struct DiskBTree {
     root: u64,
     pages: u64,
     entries: u64,
-    lsn: u64,
 }
 
 impl DiskBTree {
@@ -187,7 +186,7 @@ impl DiskBTree {
         {
             return Err(IndexError::Corruption("index metadata and file layout disagree"));
         }
-        Ok(Self { cache, root, pages, entries, lsn: expected_lsn })
+        Ok(Self { cache, root, pages, entries })
     }
 
     pub fn len(&self) -> u64 { self.entries }
