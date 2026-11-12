@@ -11,3 +11,4 @@ description = "Generic Bradian relational catalog and schema validation (pre-tra
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+crc32fast = { workspace = true }
