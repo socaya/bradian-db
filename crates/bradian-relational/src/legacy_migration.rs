@@ -1,6 +1,6 @@
 //! G17: verified, offline legacy SQL -> shared-WAL database migration.
 //!
-//! The legacy database is never modified or renamed. Its catalog and EVERY
+//! The legacy row values and catalog definitions are not changed or renamed. Its catalog and EVERY
 //! existing typed-table RowStore are exclusively locked for the entire export.
 //! A new destination is populated in a sibling staging directory, then
 //! reopened and verified before an atomic directory rename publishes it.
@@ -9,7 +9,7 @@
 //! in-place mutation, or rollback of writes made after an application switches
 //! to the new destination. The owner must stop all legacy SQL clients first.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -137,7 +137,8 @@ fn verify_rows(
 }
 
 /// Copy a stopped legacy SQL database to a separate, verified shared-domain
-/// directory. The source is never changed. Source catalog and all existing
+/// directory. Source logical rows and definitions are preserved, but catalog backup may
+/// publish a source checkpoint. Source catalog and all existing
 /// table file locks remain held until the destination is published.
 ///
 /// On failure the destination does not appear; an incomplete staging directory
@@ -153,6 +154,8 @@ pub fn migrate_legacy_sql(
         return Err(MigrationError::Invalid("legacy catalog directory is missing".into()));
     }
     let catalog = PersistentCatalog::open(&catalog_dir)?;
+    // The catalog backup below uses G10 and may checkpoint the original
+    // catalog. This does not change DDL events or acknowledged logical rows.
     let catalog_snapshot = catalog.snapshot();
     let catalog_lsn = catalog.last_lsn();
     let definitions = catalog_snapshot.tables().cloned().collect::<Vec<_>>();
