@@ -9,7 +9,7 @@
 
 The relational catalog now has a durable, exclusively locked DDL journal backed by Bradian's native `RowStore`. Its `PersistentCatalog` API accepts validated database, schema, table and foreign-key metadata operations and records each operation in one synchronized `BRWL` event **before** publishing the new state. Restart rebuilds the same object graph and stable monotonic identities by replaying commands through the original in-memory Catalog validators.
 
-The implementation records a version marker, validates exact journal ordering, verifies identity allocation and rejects malformed events or unauthorized key namespaces. It supports underlying BRPG/BRCP checkpointing and maintains RESTRICT dependency semantics through deletion and restart.
+The implementation records a version marker, validates exact journal ordering, verifies identity allocation and rejects malformed events or unauthorized key namespaces. It supports underlying BRPG/BRCP checkpointing and maintains RESTRICT dependency semantics through deletion and restart. The `backup_catalog_to` API creates a verified G10 snapshot/WAL backup of the metadata journal only, without claiming coverage of stored table data.
 
 ## Committed regression tests
 
@@ -25,6 +25,8 @@ The implementation records a version marker, validates exact journal ordering, v
 - [x] Invalid catalog version marker rejected.
 - [x] Oversized schema DDL rejected without committing.
 - [x] Read snapshots remain independent from later mutations.
+- [x] Catalog-only backup restores a replayable DDL journal.
+- [x] Catalog backup does not consume object identities.
 
 These checkboxes describe **tests present in source**, not observed passing tests.
 
