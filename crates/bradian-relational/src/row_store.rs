@@ -79,10 +79,10 @@ struct Inner {
 #[derive(Debug)]
 pub struct RowStore {
     root: PathBuf,
-    // An advisory OS-level exclusive lock. The file is intentionally retained
-    // when the process exits; the kernel releases the lock automatically.
-    _lock: File,
     inner: Mutex<Inner>,
+    // Drop after the WAL handle so the exclusive ownership remains in force
+    // throughout teardown. The kernel releases the lock automatically.
+    _lock: File,
 }
 
 impl RowStore {
