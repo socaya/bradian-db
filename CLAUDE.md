@@ -38,6 +38,8 @@ Native source-consistent backup and staged restore are specified in [ADR 0015](d
 
 Checkpoint-generation publication and fail-closed manifest recovery are specified in [ADR 0014](docs/adr/0014-atomic-checkpoint-manifest.md) and [BRD-G9](docs/gates/BRD-G9-checkpoint-publication.md). Always sync authoritative BRPG pages and the derived index before publishing the generation marker; truncate the WAL only after the marker is durable. Do not trust a higher snapshot filename when a committed manifest exists.
 
+The first native SQL executor is implemented in `crates/bradian-relational/src/sql.rs`; see [ADR 0017](docs/adr/0017-native-sql-execution.md) and [BRD-G12](docs/gates/BRD-G12-native-sql.md). Preserve strict all-PK predicates and reject unsupported SQL; do not represent these single-row statements as multi-statement ACID transactions.
+
 Catalog metadata persistence is specified in [ADR 0016](docs/adr/0016-persistent-ddl-catalog.md) and [BRD-G11](docs/gates/BRD-G11-persistent-catalog.md). Validated DDL must be durably journaled before publishing the new in-memory catalog. Replay must verify exact event ordering and stable identities. Catalog DDL and independently stored table rows are not yet one transaction. `PersistentCatalog::backup_catalog_to` only backs up its DDL journal; never present this as an entire relational database backup.
 
 The derived index reconstruction and corruption audit are specified in [ADR 0013](docs/adr/0013-derived-index-reconstruction.md) and [BRD-G8](docs/gates/BRD-G8-index-recovery.md). Rebuild only missing indexes from authoritative verified checkpoint pages; never silently replace an existing corrupt published index. A standalone repair bypassing RowStore locking is forbidden.
