@@ -8,7 +8,7 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog and a portable physical page codec, and a **single-process WAL-backed persistent row store** with individually synchronized key/value mutations and page checkpoints. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
+> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog and a portable physical page codec, and a **single-process WAL-backed persistent row store** with individually synchronized key/value mutations and atomic multi-key WAL batches and page checkpoints. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
 
 ## Product architecture
 
