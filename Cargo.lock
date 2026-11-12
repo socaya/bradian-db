@@ -287,6 +287,7 @@ name = "bradian-relational"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "parking_lot",
  "serde",
  "tempfile",
  "thiserror 1.0.69",
