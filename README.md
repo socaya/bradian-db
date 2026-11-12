@@ -50,7 +50,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Derived index recovery gate](docs/gates/BRD-G8-index-recovery.md) | Recover missing indexes after interrupted publication; verify physical pointers against authoritative pages |
 | [Atomic checkpoint publication gate](docs/gates/BRD-G9-checkpoint-publication.md) | Manifest-committed generation selection, orphan quarantine and WAL-safe publication |
 | [Consistent backup/restore gate](docs/gates/BRD-G10-consistent-backup-restore.md) | Captures one synchronized checkpoint+WAL state and restores into a verified new database directory |
-| [Persistent relational catalog gate](docs/gates/BRD-G11-persistent-catalog.md) | Stable database/schema/table identities and replay-validated DDL in native WAL |
+| [Persistent relational catalog gate](docs/gates/BRD-G11-persistent-catalog.md) | Stable database/schema/table identities, replay-validated DDL, and metadata-only backup |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
