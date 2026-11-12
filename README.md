@@ -53,6 +53,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Persistent relational catalog gate](docs/gates/BRD-G11-persistent-catalog.md) | Stable database/schema/table identities, replay-validated DDL, and metadata-only backup |
 | [Native SQL execution gate](docs/gates/BRD-G12-native-sql.md) | Bounded CREATE, INSERT, SELECT, UPDATE and DELETE using persistent catalog and typed tables |
 | [Single-table transactions gate](docs/gates/BRD-G13-single-table-transactions.md) | Snapshot-based staging, rollback, optimistic conflicts, one durable WAL batch per commit |
+| [Scoped SQL transaction sessions](docs/gates/BRD-G14-scoped-sql-transactions.md) | SQL BEGIN/COMMIT/ROLLBACK and DML within one Rust-callback table session |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
