@@ -167,7 +167,7 @@ impl TableStore {
     pub fn scan(&self) -> TableResult<Vec<Vec<Value>>> {
         let mut result = Vec::new();
         for (key, bytes) in self.storage.scan() {
-            if key == META_KEY { continue; }
+            if key.as_slice() == META_KEY { continue; }
             if !key.starts_with(KEY_MAGIC) {
                 return Err(TableError::Corruption("unexpected key namespace in table storage".into()));
             }
