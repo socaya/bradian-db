@@ -8,14 +8,14 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks**, synchronized WAL batches, page checkpoints, a **disk-resident checkpoint B+tree** for indexed lookups and ranges, and a **bounded physical page cache** with generation-aware invalidation. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
+> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks**, synchronized WAL batches, page checkpoints, a **disk-resident checkpoint B+tree** for indexed lookups and ranges, and a **bounded physical page cache** with generation-aware invalidation, and a **WAL-backed mutable index overlay** for post-checkpoint inserts, updates and deletes. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
 
 ## Product architecture
 
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree with bounded page cache; no SQL/MVCC |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree with WAL-backed mutable delta and bounded page cache; no SQL/MVCC |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
@@ -46,6 +46,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Typed table gate](docs/gates/BRD-G4-typed-table-crud.md) | Persisted typed table CRUD, schema pinning and primary-key checks |
 | [Disk B+tree index gate](docs/gates/BRD-G5-checkpoint-btree.md) | Immutable on-disk B+tree, point lookup, range scans and WAL-aware routing |
 | [Buffer pool gate](docs/gates/BRD-G6-buffer-pool.md) | Bounded verified physical page cache, LRU eviction and checkpoint generation isolation |
+| [Mutable index overlay gate](docs/gates/BRD-G7-mutable-index-delta.md) | WAL-backed live inserts, updates and deletes merged with on-disk checkpoint B+tree |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
