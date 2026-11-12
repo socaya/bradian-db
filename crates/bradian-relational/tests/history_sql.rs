@@ -885,3 +885,29 @@ fn g30_coordination_survives_g24_backup_and_restore() {
         "bank.public.movements", db.last_lsn()
     ).unwrap().0.columns.len(), 3);
 }
+
+#[test]
+fn g30_reopen_refuses_catalog_changes_after_coordination() {
+    use bradian_relational::{Column, DataType};
+    use bradian_relational::persistent_catalog::PersistentCatalog;
+    let (_dir, _source, history) = migrated();
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (original, _) = db.schema_as_of(
+            "bank.public.accounts", db.last_lsn()
+        ).unwrap();
+        let mut proposed = original.clone();
+        proposed.columns.push(Column {
+            name: "reviewed".into(), data_type: DataType::Boolean, nullable: true,
+        });
+        db.prepare_nullable_addition("bank.public.accounts", &proposed).unwrap();
+        db.coordinate_prepared_schema("bank.public.accounts").unwrap();
+    }
+    {
+        let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+        catalog.create_database("unexpected").unwrap();
+    }
+    // Both G11 and G22 remain independently recoverable, but G30 refuses
+    // to present the mismatched pair as a coordinated database.
+    assert!(HistorySqlEngine::open(&history).is_err());
+}
