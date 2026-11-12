@@ -213,6 +213,17 @@ impl Parser {
         }
     }
 
+    /// Parse a nonnegative integer WAL position without lossy casts.
+    pub(crate) fn number_u64(&mut self) -> SqlResult<u64> {
+        match self.tokens.get(self.pos).cloned() {
+            Some(Token::Number(value)) if !value.contains('.') && !value.starts_with('-') => {
+                self.pos += 1;
+                value.parse().map_err(|_| SqlError::Syntax("invalid WAL LSN".into()))
+            }
+            _ => Err(SqlError::Syntax("expected unsigned WAL LSN".into())),
+        }
+    }
+
     fn number_u32(&mut self) -> SqlResult<u32> {
         match self.tokens.get(self.pos).cloned() {
             Some(Token::Number(value)) if !value.contains('.') && !value.starts_with('-') => {
