@@ -205,6 +205,17 @@ impl DurableMvccStore {
         Ok(RowStore::restore_backup(backup, destination)?)
     }
 
+    /// Inspect all physically retained versions, including tombstones. Intended
+    /// for offline typed-history verification before accepting SQL traffic;
+    /// the caller must validate payloads and namespaces against catalog pins.
+    /// This makes an owned snapshot, so it is not a streaming production audit.
+    pub(crate) fn retained_versions(&self) -> Vec<(Vec<u8>, u64, Option<Vec<u8>>)> {
+        let state = self.state.lock();
+        state.versions.iter().flat_map(|(key, chain)| {
+            chain.iter().map(|v| (key.clone(), v.lsn, v.value.clone()))
+        }).collect()
+    }
+
     pub fn latest_lsn(&self) -> u64 { self.state.lock().latest }
     pub fn retention_floor(&self) -> u64 { self.state.lock().floor }
     pub fn checkpoint(&self) -> DurableMvccResult<u64> {
