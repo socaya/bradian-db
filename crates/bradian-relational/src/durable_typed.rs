@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use serde::{Deserialize, Serialize};
 
 use crate::{Table, TableId};
 use crate::durable_mvcc::{DurableMvccError, DurableMvccStats, DurableMvccStore, DurableMvccTransaction};
@@ -16,6 +17,18 @@ const SCHEMA_PREFIX: &[u8] = b"\0bradian-domain-table-v1:";
 const ROW_PREFIX: &[u8] = b"BRPK";
 const PROPOSAL_PREFIX: &[u8] = b"\0bradian-schema-proposal-v1:";
 const ABORT_PREFIX: &[u8] = b"\0bradian-schema-abort-v1:";
+const COORD_PREFIX: &[u8] = b"\0bradian-ddl-coordinate-v1:";
+
+/// Inactive cross-store DDL fence. Catalog is not mutated; this binds one
+/// G28 prepared proposal to the exact G11 catalog WAL horizon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DdlCoordinationRecord {
+    pub table_id: TableId,
+    pub proposal_lsn: u64,
+    pub catalog_lsn: u64,
+    pub proposal_crc32: u32,
+}
 const INLINE_CAPACITY: usize = 3545;
 
 #[derive(Clone)]
@@ -50,6 +63,7 @@ pub struct DurableTypedStore {
     schema_epochs: BTreeMap<TableId, u64>,
     proposals: BTreeMap<TableId, (Table, u64)>,
     aborted: BTreeMap<TableId, u64>,
+    coordination: BTreeMap<TableId, (DdlCoordinationRecord, u64)>,
 }
 
 impl DurableTypedStore {
@@ -93,7 +107,7 @@ impl DurableTypedStore {
             ));
         }
         for (key, bytes) in &records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
             let table_id = table_id_from_row_key(key)?;
             let schema = tables.get(&table_id).ok_or_else(|| {
                 DomainError::Corruption(format!(
@@ -165,7 +179,7 @@ impl DurableTypedStore {
         }
         let mut aborted = BTreeMap::new();
         for (key, lsn, value) in &versions {
-            if !key.starts_with(ABORT_PREFIX) { continue; }
+            if !key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
             if key.len() != ABORT_PREFIX.len() + 8 {
                 return Err(DomainError::Corruption("invalid G29 abort marker key".into()));
             }
@@ -182,8 +196,42 @@ impl DurableTypedStore {
                 return Err(DomainError::Corruption("G29 abort marker was rewritten".into()));
             }
         }
+        let mut coordination = BTreeMap::new();
         for (key, lsn, value) in &versions {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
+            if !key.starts_with(COORD_PREFIX) { continue; }
+            if key.len() != COORD_PREFIX.len() + 8 {
+                return Err(DomainError::Corruption("malformed G30 DDL coordination key".into()));
+            }
+            let id = TableId(u64::from_be_bytes(
+                key[COORD_PREFIX.len()..].try_into().unwrap()
+            ));
+            let data = value.as_ref().ok_or_else(|| DomainError::Corruption(
+                "G30 coordination record cannot be deleted".into()
+            ))?;
+            let record: DdlCoordinationRecord = serde_json::from_slice(data)
+                .map_err(|e| DomainError::Corruption(format!(
+                    "malformed G30 coordination payload: {e}"
+                )))?;
+            let (proposed, proposal_lsn) = proposals.get(&id).ok_or_else(||
+                DomainError::Corruption("G30 coordination has no prepared proposal".into())
+            )?;
+            if record.table_id != id || record.proposal_lsn != *proposal_lsn
+                || record.proposal_crc32 != crc32fast::hash(&serde_json::to_vec(proposed)?)
+                || *lsn <= *proposal_lsn
+                || aborted.get(&id).is_some_and(|aborted_at| *aborted_at <= *lsn)
+            {
+                return Err(DomainError::Corruption(
+                    "G30 coordination does not match its proposal or chronology".into()
+                ));
+            }
+            if coordination.insert(id, (record, *lsn)).is_some() {
+                return Err(DomainError::Corruption(
+                    "G30 coordination record was rewritten".into()
+                ));
+            }
+        }
+        for (key, lsn, value) in &versions {
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
             let id = table_id_from_row_key(key)?;
             let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
                 format!("historical row refers to unregistered table {}", id.0)
@@ -202,7 +250,7 @@ impl DurableTypedStore {
                 }
             }
         }
-        Ok(Self { store, tables, schema_epochs: registered_at, proposals, aborted })
+        Ok(Self { store, tables, schema_epochs: registered_at, proposals, aborted, coordination })
     }
 
     pub fn active_tables(&self) -> Vec<TableId> {
@@ -286,6 +334,63 @@ impl DurableTypedStore {
         self.aborted.iter().map(|(id, lsn)| (*id, *lsn)).collect()
     }
 
+    /// G30: record the exact G11 catalog WAL horizon alongside the durable
+    /// proposal. No ALTER is issued; a later catalog modification becomes a
+    /// hard reopen failure until a separately qualified recovery protocol exists.
+    pub fn coordinate_prepared_schema(
+        &self, id: TableId, catalog_lsn: u64,
+    ) -> Result<u64, DomainError> {
+        let mut proposal_key = PROPOSAL_PREFIX.to_vec();
+        proposal_key.extend_from_slice(&id.0.to_be_bytes());
+        let mut abort_key = ABORT_PREFIX.to_vec();
+        abort_key.extend_from_slice(&id.0.to_be_bytes());
+        let mut coordinate_key = COORD_PREFIX.to_vec();
+        coordinate_key.extend_from_slice(&id.0.to_be_bytes());
+        let versions = self.store.retained_versions();
+        let proposal_lsn = versions.iter().find(|(key, _, value)|
+            key == &proposal_key && value.is_some()
+        ).map(|(_, lsn, _)| *lsn).ok_or_else(||
+            DomainError::Corruption("G30 requires a durable prepared proposal".into())
+        )?;
+        let mut tx = self.store.begin();
+        let bytes = tx.get(&proposal_key).map_err(map_mvcc)?.ok_or_else(||
+            DomainError::Corruption("G30 prepared proposal is absent".into())
+        )?;
+        if tx.get(&abort_key).map_err(map_mvcc)?.is_some() {
+            return Err(DomainError::Corruption("G30 proposal already aborted".into()));
+        }
+        let proposed: Table = serde_json::from_slice(&bytes)?;
+        let original = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
+        crate::schema_evolution::plan_nullable_additions(&original.table, &proposed)?;
+        let record = DdlCoordinationRecord {
+            table_id: id,
+            proposal_lsn,
+            catalog_lsn,
+            proposal_crc32: crc32fast::hash(&serde_json::to_vec(&proposed)?),
+        };
+        tx.insert(&coordinate_key, &serde_json::to_vec(&record)?).map_err(map_mvcc)?;
+        tx.commit().map_err(map_mvcc)
+    }
+
+    /// Recovered G30 fences at engine open; no schema activation implied.
+    pub fn ddl_coordination_records(&self) -> Vec<(DdlCoordinationRecord, u64)> {
+        self.coordination.values().cloned().collect()
+    }
+
+    /// Detect independent catalog mutations after an inactive coordination
+    /// fence was committed. Fail closed; never silently complete ALTER.
+    pub fn verify_ddl_catalog_horizon(&self, catalog_lsn: u64) -> Result<(), DomainError> {
+        for (record, _) in self.coordination.values() {
+            if record.catalog_lsn != catalog_lsn {
+                return Err(DomainError::Corruption(format!(
+                    "G30 DDL coordination catalog LSN mismatch for table {}",
+                    record.table_id.0
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
     pub fn retention_floor(&self) -> u64 { self.store.retention_floor() }
 
@@ -343,7 +448,7 @@ impl DurableTypedStore {
         let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let row = decode_row(&def.table, &bytes)?;
@@ -406,7 +511,7 @@ impl DurableTypedTransaction<'_> {
         for (key, bytes) in records {
             // The full physical scan participates in G20's conservative
             // global LSN change validation when the transaction writes.
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let def = self.definition(id)?;
