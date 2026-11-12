@@ -165,7 +165,16 @@ fn verify_directory(
     if manifest.lsn != receipt.checkpoint_lsn {
         return Err(StoreError::Corruption("backup checkpoint generation mismatch".into()));
     }
+    // RowStore's ordinary crash recovery may trim an incomplete WAL tail.
+    // A published backup must be exact: never silently repair its copied WAL.
+    let wal_path = path.join("rows.wal");
+    let original_wal_len = fs::metadata(&wal_path)?.len();
     let recovered = RowStore::open(path)?;
+    if fs::metadata(&wal_path)?.len() != original_wal_len {
+        return Err(StoreError::Corruption(
+            "backup WAL required tail repair during validation".into(),
+        ));
+    }
     if recovered.last_lsn() != receipt.last_lsn || recovered.len() as u64 != receipt.rows {
         return Err(StoreError::Corruption("backup replay does not match committed LSN or row count".into()));
     }
