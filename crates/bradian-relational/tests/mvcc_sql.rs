@@ -278,3 +278,73 @@ fn historical_versions_not_claimed_after_reopen_and_pins_released() {
         Ok(())
     }).unwrap();
 }
+
+
+#[test]
+fn mvcc_sql_reconciles_g18_lifecycle_before_taking_storage_locks() {
+    use bradian_relational::lifecycle::CatalogLifecycle;
+    use bradian_relational::persistent_catalog::PersistentCatalog;
+    use bradian_relational::row_store::RowStore;
+
+    let base = tempdir().unwrap();
+    setup(base.path());
+    // Introduce a lifecycle owner once, then simulate a crash after the
+    // PENDING intent is logged but before the domain pin is activated.
+    {
+        let owner = CatalogLifecycle::open(base.path()).unwrap();
+        assert_eq!(owner.reconcile().unwrap().len(), 2);
+    }
+    let id = {
+        let catalog = PersistentCatalog::open(base.path().join("catalog")).unwrap();
+        catalog.snapshot().tables().find(|t| t.name == "accounts").unwrap().id
+    };
+    {
+        let journal = RowStore::open(base.path().join("lifecycle")).unwrap();
+        let key = format!("table/{:016x}", id.0);
+        let mut entry: serde_json::Value =
+            serde_json::from_slice(&journal.get(key.as_bytes()).unwrap()).unwrap();
+        entry["state"] = serde_json::Value::String("Pending".into());
+        journal.put(key.as_bytes(), &serde_json::to_vec(&entry).unwrap()).unwrap();
+    }
+    // G21 invokes G18 recovery before it opens its own catalogue/domain.
+    let engine = MvccSqlEngine::open(base.path()).unwrap();
+    assert_eq!(engine.registered_table_ids().len(), 2);
+    drop(engine);
+    let owner = CatalogLifecycle::open(base.path()).unwrap();
+    assert_eq!(owner.reconcile().unwrap().len(), 2);
+}
+
+#[test]
+fn existing_mvcc_sql_owner_excludes_competing_g16_and_g18_owners() {
+    use bradian_relational::lifecycle::CatalogLifecycle;
+
+    let base = tempdir().unwrap();
+    setup(base.path());
+    let owner = MvccSqlEngine::open(base.path()).unwrap();
+    assert!(DomainSqlEngine::open(base.path()).is_err());
+    assert!(CatalogLifecycle::open(base.path()).is_err());
+    drop(owner);
+    assert!(DomainSqlEngine::open(base.path()).is_ok());
+}
+
+#[test]
+fn multiple_read_only_sessions_pin_their_own_snapshots() {
+    let base = tempdir().unwrap();
+    setup(base.path());
+    let engine = MvccSqlEngine::open(base.path()).unwrap();
+    insert_seed(&engine);
+    engine.with_session(|first| {
+        first.execute("BEGIN")?;
+        engine.with_session(|second| {
+            second.execute("BEGIN")?;
+            assert_eq!(first.snapshot_lsn(), second.snapshot_lsn());
+            assert_eq!(engine.mvcc_stats().active_snapshots, 2);
+            second.execute("ROLLBACK")?;
+            Ok(())
+        })?;
+        assert_eq!(engine.mvcc_stats().active_snapshots, 1);
+        first.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(engine.mvcc_stats().active_snapshots, 0);
+}
