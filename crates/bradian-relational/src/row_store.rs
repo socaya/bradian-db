@@ -77,6 +77,9 @@ pub enum RowMutation {
 #[derive(Debug)]
 struct Inner {
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
+    // Committed changes since the published checkpoint. None is a tombstone.
+    // Recovery reconstructs this overlay from synchronized WAL frames.
+    delta: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     wal: File,
     lsn: u64,
     checkpoint_lsn: u64,
@@ -111,6 +114,7 @@ impl RowStore {
             Err(TryLockError::Error(error)) => return Err(StoreError::Io(error)),
         }
         let (checkpoint_lsn, mut rows) = read_latest_snapshot(root)?;
+        let mut delta = BTreeMap::new();
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
             .create(true)
@@ -119,7 +123,7 @@ impl RowStore {
             .open(wal_path)?;
         // Persist the directory entry for newly created WAL files on Unix.
         sync_directory(root)?;
-        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows)?;
+        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows, &mut delta)?;
         // An interrupted append is not a complete transaction. Repair the
         // trailing, incomplete frame so future writes remain replayable.
         if valid_length < wal.metadata()?.len() {
@@ -132,6 +136,7 @@ impl RowStore {
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
+                delta,
                 wal,
                 lsn,
                 checkpoint_lsn,
@@ -190,8 +195,14 @@ impl RowStore {
             return Err(StoreError::Io(error));
         }
         match value {
-            Some(bytes) => { inner.rows.insert(key.to_vec(), bytes.to_vec()); }
-            None => { inner.rows.remove(key); }
+            Some(bytes) => {
+                inner.rows.insert(key.to_vec(), bytes.to_vec());
+                inner.delta.insert(key.to_vec(), Some(bytes.to_vec()));
+            }
+            None => {
+                inner.rows.remove(key);
+                inner.delta.insert(key.to_vec(), None);
+            }
         }
         inner.lsn = next;
         Ok(next)
@@ -252,9 +263,11 @@ impl RowStore {
             match mutation {
                 RowMutation::Put { key, value } => {
                     inner.rows.insert(key.clone(), value.clone());
+                    inner.delta.insert(key.clone(), Some(value.clone()));
                 }
                 RowMutation::Delete { key } => {
                     inner.rows.remove(key);
+                    inner.delta.insert(key.clone(), None);
                 }
             }
         }
@@ -403,6 +416,7 @@ impl RowStore {
             return Err(StoreError::Io(error));
         }
         inner.checkpoint_lsn = lsn;
+        inner.delta.clear();
         inner.index = None;
         inner.snapshot_pages = None;
         // Older checkpoints are no longer needed once the newest snapshot is
@@ -527,6 +541,7 @@ fn replay(
     wal: &mut File,
     checkpoint_lsn: u64,
     rows: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    delta: &mut BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 ) -> StoreResult<(u64, u64)> {
     wal.seek(SeekFrom::Start(0))?;
     let mut lsn = checkpoint_lsn;
@@ -573,10 +588,12 @@ fn replay(
             for operation in operations {
                 match operation {
                     RowMutation::Put { key, value } => {
-                        rows.insert(key, value);
+                        rows.insert(key.clone(), value.clone());
+                        delta.insert(key, Some(value));
                     }
                     RowMutation::Delete { key } => {
                         rows.remove(&key);
+                        delta.insert(key, None);
                     }
                 }
             }
