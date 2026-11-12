@@ -26,6 +26,7 @@ pub mod domain_sql;
 pub mod legacy_migration;
 pub mod lifecycle;
 pub mod database_backup;
+pub mod mvcc;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
