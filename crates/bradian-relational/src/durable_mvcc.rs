@@ -228,6 +228,21 @@ impl DurableMvccStore {
         Ok(state.versions.get(key).and_then(|vs| visible(vs, lsn)))
     }
 
+    /// A committed historical snapshot across all user keys at one WAL
+    /// horizon. This is a read-only owned result, not a resumed transaction.
+    /// Version history is reconstructed from native WAL/checkpoints on open.
+    pub fn scan_as_of(&self, lsn: u64) -> DurableMvccResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let state = self.state.lock();
+        if lsn < state.floor || lsn > state.latest {
+            return Err(DurableMvccError::SnapshotUnavailable {
+                requested: lsn, floor: state.floor, latest: state.latest,
+            });
+        }
+        Ok(state.versions.iter().filter_map(|(key, versions)| {
+            visible(versions, lsn).map(|value| (key.clone(), value))
+        }).collect())
+    }
+
     pub fn begin(&self) -> DurableMvccTransaction<'_> {
         let mut state = self.state.lock();
         let start = state.latest;
