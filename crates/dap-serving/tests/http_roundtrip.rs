@@ -13,6 +13,8 @@ use serde_json::{json, Value as JsonValue};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
 fn uid(s: &str) -> Uid {
     Uid::new(s).unwrap()
 }
@@ -72,10 +74,13 @@ fn seed(root: &std::path::Path) -> Arc<dap_serving::AnalyticsEngine> {
 async fn healthz_returns_ok() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     let resp = app
-        .oneshot(Request::get("/healthz").body(axum::body::Body::empty()).unwrap())
+        .oneshot(Request::get("/healthz").header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -85,7 +90,9 @@ async fn healthz_returns_ok() {
 async fn query_endpoint_returns_rows_with_provenance() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     let body = json!({
         "request": {
@@ -104,6 +111,7 @@ async fn query_endpoint_returns_rows_with_provenance() {
         .oneshot(
             Request::post("/api/analytics/v1/query")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -128,7 +136,9 @@ async fn query_endpoint_returns_rows_with_provenance() {
 async fn drilldown_applies_extra_filters_and_caps_limit() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     let body = json!({
         "request": {
@@ -149,6 +159,7 @@ async fn drilldown_applies_extra_filters_and_caps_limit() {
         .oneshot(
             Request::post("/api/analytics/v1/drilldown")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -168,13 +179,16 @@ async fn drilldown_applies_extra_filters_and_caps_limit() {
 async fn data_products_register_and_list() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     // Empty catalogue.
     let empty = app
         .clone()
         .oneshot(
             Request::get("/api/analytics/v1/data-products")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -203,6 +217,7 @@ async fn data_products_register_and_list() {
         .oneshot(
             Request::post("/api/analytics/v1/data-products")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(product.to_string()))
                 .unwrap(),
         )
@@ -214,6 +229,7 @@ async fn data_products_register_and_list() {
     let list = app
         .oneshot(
             Request::get("/api/analytics/v1/data-products")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -229,7 +245,9 @@ async fn data_products_register_and_list() {
 async fn data_product_get_by_id_and_delete() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     // Register.
     let product = json!({
@@ -249,6 +267,7 @@ async fn data_product_get_by_id_and_delete() {
         .oneshot(
             Request::post("/api/analytics/v1/data-products")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(product.to_string()))
                 .unwrap(),
         )
@@ -261,6 +280,7 @@ async fn data_product_get_by_id_and_delete() {
         .clone()
         .oneshot(
             Request::get("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -277,6 +297,7 @@ async fn data_product_get_by_id_and_delete() {
         .clone()
         .oneshot(
             Request::get("/api/analytics/v1/data-products/does_not_exist")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -289,6 +310,7 @@ async fn data_product_get_by_id_and_delete() {
         .clone()
         .oneshot(
             Request::delete("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -301,6 +323,7 @@ async fn data_product_get_by_id_and_delete() {
         .clone()
         .oneshot(
             Request::delete("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -312,6 +335,7 @@ async fn data_product_get_by_id_and_delete() {
     let list = app
         .oneshot(
             Request::get("/api/analytics/v1/data-products")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -326,7 +350,9 @@ async fn data_product_get_by_id_and_delete() {
 async fn explain_endpoint_returns_operator_tree() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     let body = json!({
         "request": {
@@ -344,6 +370,7 @@ async fn explain_endpoint_returns_operator_tree() {
         .oneshot(
             Request::post("/api/analytics/v1/query/explain")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -368,7 +395,8 @@ async fn poll_until_terminal(
             .clone()
             .oneshot(
                 Request::get(format!("/api/analytics/v1/jobs/{job_id}"))
-                    .body(axum::body::Body::empty())
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
@@ -392,7 +420,9 @@ async fn poll_until_terminal(
 async fn async_query_within_max_output_rows_succeeds() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     let body = json!({
         "request": {
@@ -411,6 +441,7 @@ async fn async_query_within_max_output_rows_succeeds() {
         .oneshot(
             Request::post("/api/analytics/v1/jobs")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -432,7 +463,9 @@ async fn async_query_within_max_output_rows_succeeds() {
 async fn async_query_exceeding_max_output_rows_fails_with_diagnostic() {
     let dir = tempdir().unwrap();
     let engine = seed(dir.path());
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
 
     // Seed produces rows grouped by ou (2 groups). Cap at 1 so the result exceeds it.
     let body = json!({
@@ -452,6 +485,7 @@ async fn async_query_exceeding_max_output_rows_fails_with_diagnostic() {
         .oneshot(
             Request::post("/api/analytics/v1/jobs")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -471,4 +505,38 @@ async fn async_query_exceeding_max_output_rows_fails_with_diagnostic() {
     );
     // The oversized result payload must not have landed in the registry.
     assert!(terminal["result"].is_null() || terminal["result"] == JsonValue::Null);
+}
+
+#[tokio::test]
+async fn protected_api_denies_anonymous_and_invalid_token() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let anon = app.clone().oneshot(
+        Request::get("/api/analytics/v1/catalog")
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let invalid = app.clone().oneshot(
+        Request::get("/api/analytics/v1/catalog")
+            .header("authorization", "Bearer invalid")
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app.clone().oneshot(
+        Request::get("/api/analytics/v1/catalog")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+
+    let health = app.oneshot(
+        Request::get("/healthz").body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
 }
