@@ -156,3 +156,111 @@ fn old_index_is_pruned_only_after_new_checkpoint_published() {
     assert!(!dir.path().join("index-1.bri").exists());
     assert!(dir.path().join("index-2.bri").exists());
 }
+
+
+#[test]
+fn wal_delta_point_reads_preserve_checkpoint_cache_and_new_mutations() {
+    let dir = tempdir().unwrap();
+    let store = RowStore::open(dir.path()).unwrap();
+    for i in 0..240 {
+        store.put(format!("key-{i:04}").as_bytes(), b"checkpoint").unwrap();
+    }
+    store.checkpoint().unwrap();
+    assert_eq!(store.uncheckpointed_index_changes(), 0);
+    assert_eq!(store.indexed_get(b"key-0100").unwrap(), Some(b"checkpoint".to_vec()));
+    let (_, snapshot) = store.index_cache_stats().unwrap();
+    assert!(snapshot.is_some());
+
+    store.put(b"key-0001", b"modified").unwrap();
+    store.put(b"key-0240", b"inserted").unwrap();
+    store.delete(b"key-0100").unwrap();
+    assert_eq!(store.uncheckpointed_index_changes(), 3);
+    assert_eq!(store.indexed_get(b"key-0001").unwrap(), Some(b"modified".to_vec()));
+    assert_eq!(store.indexed_get(b"key-0100").unwrap(), None);
+    assert_eq!(store.indexed_get(b"key-0240").unwrap(), Some(b"inserted".to_vec()));
+    assert_eq!(store.indexed_get(b"key-0239").unwrap(), Some(b"checkpoint".to_vec()));
+
+    // Since unchanged rows are still accessed via the checkpoint tree, the
+    // cache survives WAL changes rather than resetting to memory-only reads.
+    let (index, snapshot) = store.index_cache_stats().unwrap();
+    assert!(index.hits > 0);
+    assert!(snapshot.unwrap().hits > 0);
+}
+
+#[test]
+fn wal_delta_merges_insert_replace_and_delete_in_range() {
+    let dir = tempdir().unwrap();
+    let store = RowStore::open(dir.path()).unwrap();
+    for i in 0..250 {
+        store.put(format!("entry-{i:04}").as_bytes(), format!("v{i}").as_bytes()).unwrap();
+    }
+    store.checkpoint().unwrap();
+    store.put(b"entry-0000", b"changed").unwrap();
+    store.delete(b"entry-0030").unwrap();
+    store.put(b"entry-0250", b"appended").unwrap();
+    store.put(b"entry-0100", b"replaced").unwrap();
+    store.delete(b"entry-0030").unwrap(); // repeating a tombstone remains idempotent
+    assert_eq!(store.uncheckpointed_index_changes(), 4);
+
+    let merged = store.indexed_range(b"entry-0000", b"entry-0251").unwrap();
+    assert_eq!(merged.len(), 250);
+    assert_eq!(merged.first().unwrap().1, b"changed".to_vec());
+    assert!(!merged.iter().any(|(k, _)| k == b"entry-0030"));
+    assert!(merged.iter().any(|(k,v)| k == b"entry-0100" && v == b"replaced"));
+    assert_eq!(merged.last().unwrap(), &(b"entry-0250".to_vec(), b"appended".to_vec()));
+}
+
+#[test]
+fn wal_delta_reconstructed_from_log_after_restart() {
+    let dir = tempdir().unwrap();
+    {
+        let store = RowStore::open(dir.path()).unwrap();
+        store.put(b"alpha", b"old").unwrap();
+        store.put(b"beta", b"keep").unwrap();
+        store.checkpoint().unwrap();
+        store.put(b"alpha", b"new").unwrap();
+        store.delete(b"beta").unwrap();
+        store.put(b"gamma", b"inserted").unwrap();
+        assert_eq!(store.uncheckpointed_index_changes(), 3);
+    }
+    let store = RowStore::open(dir.path()).unwrap();
+    assert_eq!(store.uncheckpointed_index_changes(), 3);
+    assert_eq!(store.indexed_get(b"alpha").unwrap(), Some(b"new".to_vec()));
+    assert_eq!(store.indexed_get(b"beta").unwrap(), None);
+    assert_eq!(store.indexed_get(b"gamma").unwrap(), Some(b"inserted".to_vec()));
+    assert_eq!(store.indexed_range(b"a", b"z").unwrap(), vec![
+        (b"alpha".to_vec(), b"new".to_vec()),
+        (b"gamma".to_vec(), b"inserted".to_vec()),
+    ]);
+    store.checkpoint().unwrap();
+    assert_eq!(store.uncheckpointed_index_changes(), 0);
+    drop(store);
+    let again = RowStore::open(dir.path()).unwrap();
+    assert_eq!(again.uncheckpointed_index_changes(), 0);
+    assert_eq!(again.indexed_get(b"alpha").unwrap(), Some(b"new".to_vec()));
+    assert_eq!(again.indexed_get(b"beta").unwrap(), None);
+}
+
+#[test]
+fn atomic_batch_updates_join_wal_delta_as_one_commit() {
+    use bradian_relational::row_store::RowMutation;
+    let dir = tempdir().unwrap();
+    let store = RowStore::open(dir.path()).unwrap();
+    store.put(b"one", b"1").unwrap();
+    store.put(b"two", b"2").unwrap();
+    store.checkpoint().unwrap();
+    let sequence = store.commit_batch(Some(store.last_lsn()), &[
+        RowMutation::Put { key: b"one".to_vec(), value: b"updated".to_vec() },
+        RowMutation::Delete { key: b"two".to_vec() },
+        RowMutation::Put { key: b"three".to_vec(), value: b"3".to_vec() },
+    ]).unwrap();
+    assert_eq!(sequence, 3);
+    assert_eq!(store.uncheckpointed_index_changes(), 3);
+    assert_eq!(store.indexed_get(b"one").unwrap(), Some(b"updated".to_vec()));
+    assert_eq!(store.indexed_get(b"two").unwrap(), None);
+    assert_eq!(store.indexed_get(b"three").unwrap(), Some(b"3".to_vec()));
+    assert_eq!(store.indexed_range(b"a", b"z").unwrap(), vec![
+        (b"one".to_vec(), b"updated".to_vec()),
+        (b"three".to_vec(), b"3".to_vec()),
+    ]);
+}
