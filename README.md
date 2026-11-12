@@ -56,6 +56,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Scoped SQL transaction sessions](docs/gates/BRD-G14-scoped-sql-transactions.md) | SQL BEGIN/COMMIT/ROLLBACK and DML within one Rust-callback table session |
 | [Shared-WAL multi-table transactions](docs/gates/BRD-G15-shared-wal-multi-table.md) | Atomic cross-table row changes in a separately registered transaction domain with one durable WAL batch |
 | [Shared-domain SQL transactions](docs/gates/BRD-G16-shared-domain-sql.md) | SQL BEGIN/COMMIT across explicitly registered shared-WAL tables, with legacy table storage refused |
+| [Verified legacy SQL migration](docs/gates/BRD-G17-verified-legacy-migration.md) | Offline locked copy of legacy tables into a separately verified shared-WAL destination; original rows retained |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
