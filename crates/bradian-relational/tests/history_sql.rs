@@ -304,3 +304,50 @@ fn historical_sql_rejects_malformed_lsn_values_and_abort_is_atomic() {
     }).unwrap();
     assert_eq!(db.last_lsn(), before);
 }
+
+#[test]
+fn opening_history_rejects_invalid_retained_older_row_version() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    use bradian_relational::persistent_catalog::PersistentCatalog;
+    use bradian_relational::typed_table::encode_key;
+    let (_dir, _source, history) = migrated();
+    let table = {
+        let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+        catalog.snapshot().tables().find(|t| t.name == "accounts").unwrap().clone()
+    };
+    let positions = vec![0];
+    let key = encode_key(&table, &positions, &[Value::Int64(1)]).unwrap();
+    {
+        let store = DurableMvccStore::open(history.join("history-domain")).unwrap();
+        let mut tx = store.begin();
+        // The newer value is intentionally invalid for the pinned typed schema.
+        // It is subsequently tombstoned, so latest-row validation alone misses it.
+        tx.replace(&key, b"not-a-typed-row").unwrap();
+        tx.commit().unwrap();
+        let mut tx = store.begin();
+        tx.delete(&key).unwrap();
+        tx.commit().unwrap();
+        store.checkpoint().unwrap();
+    }
+    assert!(HistorySqlEngine::open(&history).is_err());
+}
+
+#[test]
+fn opening_history_rejects_tombstoned_unregistered_table_key() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    let (_dir, _source, history) = migrated();
+    let mut key = b"BRPK".to_vec();
+    key.push(1);
+    key.extend_from_slice(&u64::MAX.to_le_bytes());
+    key.push(1);
+    {
+        let store = DurableMvccStore::open(history.join("history-domain")).unwrap();
+        let mut tx = store.begin();
+        tx.insert(&key, b"unknown-table").unwrap();
+        tx.commit().unwrap();
+        let mut tx = store.begin();
+        tx.delete(&key).unwrap();
+        tx.commit().unwrap();
+    }
+    assert!(HistorySqlEngine::open(&history).is_err());
+}
