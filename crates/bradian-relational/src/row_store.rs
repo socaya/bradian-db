@@ -172,6 +172,14 @@ impl RowStore {
             .rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
+    /// Obtain one consistent row image and its committed WAL position under
+    /// a single lock. Transaction validation must never read the LSN and
+    /// snapshot in separate lock acquisitions.
+    pub fn snapshot_with_lsn(&self) -> (u64, Vec<(Vec<u8>, Vec<u8>)>) {
+        let inner = self.inner.lock();
+        (inner.lsn, inner.rows.iter().map(|(key, value)| (key.clone(), value.clone())).collect())
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().rows.len()
     }
