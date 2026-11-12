@@ -278,3 +278,64 @@ fn catalog_only_backup_does_not_advance_metadata_identity_counter() {
     let second = catalog.create_database("second").unwrap();
     assert_eq!(second.0, first.0 + 1);
 }
+
+#[test]
+fn g33_proposed_revision_replays_without_changing_live_table() {
+    let dir = tempdir().unwrap();
+    let id;
+    let proposal_lsn;
+    {
+        let catalog = PersistentCatalog::open(dir.path()).unwrap();
+        let db = catalog.create_database("clinic").unwrap();
+        let schema = catalog.create_schema(db, "public").unwrap();
+        id = catalog.create_table(schema, table("encounters")).unwrap();
+        let live = catalog.snapshot().table(id).unwrap().clone();
+        let mut proposed = live.clone();
+        proposed.columns.push(Column {
+            name: "notes".into(), data_type: DataType::Text, nullable: true,
+        });
+        proposal_lsn = catalog.propose_table_revision(id, proposed.clone()).unwrap();
+        assert_eq!(catalog.proposed_table_revision(id), Some(proposed));
+        assert_eq!(catalog.snapshot().table(id), Some(&live));
+        assert!(catalog.propose_table_revision(id, live.clone()).is_err());
+        assert_eq!(catalog.last_lsn(), proposal_lsn);
+        assert!(catalog.drop_table(id).is_err());
+        catalog.checkpoint().unwrap();
+    }
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    assert_eq!(catalog.last_lsn(), proposal_lsn);
+    assert_eq!(catalog.proposed_table_revisions().len(), 1);
+    assert_eq!(catalog.proposed_table_revision(id).unwrap().columns.len(), 3);
+    assert_eq!(catalog.snapshot().table(id).unwrap().columns.len(), 2);
+    assert!(catalog.drop_table(id).is_err());
+}
+
+#[test]
+fn g33_rejects_unsafe_revisions_without_persisting_events() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let database = catalog.create_database("clinic").unwrap();
+    let schema = catalog.create_schema(database, "public").unwrap();
+    let id = catalog.create_table(schema, table("encounters")).unwrap();
+    let original = catalog.snapshot().table(id).unwrap().clone();
+    let before = catalog.last_lsn();
+    let mut required = original.clone();
+    required.columns.push(Column {
+        name: "required".into(), data_type: DataType::Text, nullable: false,
+    });
+    assert!(catalog.propose_table_revision(id, required).is_err());
+    let mut changed = original.clone();
+    changed.columns[1].data_type = DataType::Int32;
+    changed.columns.push(Column {
+        name: "extra".into(), data_type: DataType::Text, nullable: true,
+    });
+    assert!(catalog.propose_table_revision(id, changed).is_err());
+    let mut renamed = original.clone();
+    renamed.name = "renamed".into();
+    renamed.columns.push(Column {
+        name: "extra".into(), data_type: DataType::Text, nullable: true,
+    });
+    assert!(catalog.propose_table_revision(id, renamed).is_err());
+    assert_eq!(catalog.last_lsn(), before);
+    assert!(catalog.proposed_table_revisions().is_empty());
+}
