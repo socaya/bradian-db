@@ -33,6 +33,7 @@ pub enum PageKind {
     Data = 1,
     Index = 2,
     FreeMap = 3,
+    Metadata = 4,
 }
 
 impl TryFrom<u8> for PageKind {
@@ -43,6 +44,7 @@ impl TryFrom<u8> for PageKind {
             1 => Ok(Self::Data),
             2 => Ok(Self::Index),
             3 => Ok(Self::FreeMap),
+            4 => Ok(Self::Metadata),
             _ => Err(PageError::UnknownKind(value)),
         }
     }
