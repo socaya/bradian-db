@@ -24,6 +24,7 @@ pub mod sql;
 pub mod transaction_domain;
 pub mod domain_sql;
 pub mod legacy_migration;
+pub mod lifecycle;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
