@@ -396,6 +396,33 @@ impl SqlEngine {
         Ok((result, lsn))
     }
 
+    /// Run a SQL transaction session restricted to one resolved table.
+    /// BEGIN starts a G13 snapshot; COMMIT publishes a single WAL batch.
+    /// If the callback exits without COMMIT, all staged changes are dropped.
+    ///
+    /// This scoped interface deliberately does not claim cross-table ACID or
+    /// independent network-session isolation.
+    pub fn with_sql_session<R>(
+        &self,
+        qualified_table: &str,
+        callback: impl FnOnce(&mut SqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        let _guard = self.operation.lock();
+        let mut parser = Parser::new(qualified_table)?;
+        let name = parser.name()?;
+        parser.end()?;
+        let table = self.resolve(&name)?;
+        let storage = self.table_store(&table)?;
+        let mut session = SqlSession {
+            table: &table,
+            name,
+            storage: &storage,
+            transaction: None,
+            last_commit_lsn: None,
+        };
+        callback(&mut session)
+    }
+
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
         let mut p = Parser::new(sql)?;
@@ -562,6 +589,168 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected })
             }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),
+        }
+    }
+}
+
+
+/// A scoped SQL transaction session for one fully qualified native table.
+/// BEGIN creates a consistent G13 snapshot; DML is staged until COMMIT.
+/// Dropping a session with an open transaction discards its staged changes.
+pub struct SqlSession<'a> {
+    table: &'a Table,
+    name: Vec<String>,
+    storage: &'a TableStore,
+    transaction: Option<TableTransaction<'a>>,
+    last_commit_lsn: Option<u64>,
+}
+
+impl SqlSession<'_> {
+    pub fn in_transaction(&self) -> bool { self.transaction.is_some() }
+    pub fn last_commit_lsn(&self) -> Option<u64> { self.last_commit_lsn }
+
+    pub fn execute(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // A statement error aborts the current unit of work. This avoids
+        // accidentally committing earlier writes after a failed SQL command.
+        let result = self.execute_inner(sql);
+        if result.is_err() {
+            self.transaction = None;
+        }
+        result
+    }
+
+    fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        let mut p = Parser::new(sql)?;
+        let command = p.word()?;
+        match command.as_str() {
+            "begin" => {
+                p.consume_word("transaction");
+                p.end()?;
+                if self.transaction.is_some() {
+                    return Err(SqlError::Unsupported("nested BEGIN is not supported".into()));
+                }
+                self.transaction = Some(self.storage.begin_transaction()?);
+                Ok(SqlResultSet::Command { affected: 0 })
+            }
+            "commit" => {
+                p.end()?;
+                let tx = self.transaction.take()
+                    .ok_or_else(|| SqlError::Unsupported("COMMIT requires an active transaction".into()))?;
+                self.last_commit_lsn = Some(tx.commit()?);
+                Ok(SqlResultSet::Command { affected: 0 })
+            }
+            "rollback" => {
+                p.end()?;
+                let tx = self.transaction.take()
+                    .ok_or_else(|| SqlError::Unsupported("ROLLBACK requires an active transaction".into()))?;
+                tx.rollback();
+                Ok(SqlResultSet::Command { affected: 0 })
+            }
+            "insert" | "select" | "update" | "delete" => {
+                let tx = self.transaction.as_mut()
+                    .ok_or_else(|| SqlError::Unsupported("BEGIN is required before transactional SQL".into()))?;
+                match command.as_str() {
+                    "insert" => {
+                        p.expect("into")?;
+                        let name = p.name()?;
+                        if name != self.name {
+                            return Err(SqlError::Unsupported("cross-table transaction is unsupported".into()));
+                        }
+                        let columns = p.list(|parser| parser.word())?;
+                        p.expect("values")?;
+                        let values = p.list(|parser| parser.literal())?;
+                        p.end()?;
+                        if columns.len() != values.len() || columns.len() != self.table.columns.len() {
+                            return Err(SqlError::Unsupported("INSERT must list every table column once".into()));
+                        }
+                        let mut mapped = BTreeMap::new();
+                        for (name, literal) in columns.into_iter().zip(values) {
+                            locate(self.table, &name)?;
+                            if mapped.insert(name.clone(), literal).is_some() {
+                                return Err(SqlError::Syntax(format!("repeated INSERT column {name}")));
+                            }
+                        }
+                        let row = self.table.columns.iter().map(|col| {
+                            let literal = mapped.remove(&col.name)
+                                .ok_or_else(|| SqlError::Resolution(format!("missing column {}", col.name)))?;
+                            coerce(&literal, col)
+                        }).collect::<SqlResult<Vec<_>>>()?;
+                        tx.insert(&row)?;
+                        Ok(SqlResultSet::Command { affected: 1 })
+                    }
+                    "select" => {
+                        let projected = if p.consume_symbol('*') {
+                            self.table.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+                        } else {
+                            let mut columns = vec![p.word()?];
+                            while p.consume_symbol(',') { columns.push(p.word()?); }
+                            columns
+                        };
+                        let positions = projected.iter().map(|c| locate(self.table,c))
+                            .collect::<SqlResult<Vec<_>>>()?;
+                        p.expect("from")?;
+                        if p.name()? != self.name {
+                            return Err(SqlError::Unsupported("cross-table transaction is unsupported".into()));
+                        }
+                        let rows = if p.consume_word("where") {
+                            p.pos -= 1;
+                            let key = key_predicate(&mut p, self.table)?;
+                            tx.get(&key)?.into_iter().collect::<Vec<_>>()
+                        } else {
+                            tx.scan()
+                        };
+                        p.end()?;
+                        Ok(SqlResultSet::Rows {
+                            columns: projected,
+                            rows: rows.into_iter().map(|row| {
+                                positions.iter().map(|i| row[*i].clone()).collect()
+                            }).collect(),
+                        })
+                    }
+                    "update" => {
+                        if p.name()? != self.name {
+                            return Err(SqlError::Unsupported("cross-table transaction is unsupported".into()));
+                        }
+                        p.expect("set")?;
+                        let updates = p.assignments()?;
+                        let key = key_predicate(&mut p, self.table)?;
+                        p.end()?;
+                        let mut replacements = BTreeMap::new();
+                        for (name, literal) in updates {
+                            if self.table.primary_key.columns.contains(&name) {
+                                return Err(SqlError::Unsupported("primary-key UPDATE unsupported".into()));
+                            }
+                            let index = locate(self.table, &name)?;
+                            if replacements.insert(index, coerce(&literal, &self.table.columns[index])?).is_some() {
+                                return Err(SqlError::Syntax("duplicate SET column".into()));
+                            }
+                        }
+                        let affected = if let Some(mut row) = tx.get(&key)? {
+                            for (index, value) in replacements { row[index] = value; }
+                            tx.replace(&row)?;
+                            1
+                        } else { 0 };
+                        Ok(SqlResultSet::Command { affected })
+                    }
+                    "delete" => {
+                        p.expect("from")?;
+                        if p.name()? != self.name {
+                            return Err(SqlError::Unsupported("cross-table transaction is unsupported".into()));
+                        }
+                        let key = key_predicate(&mut p, self.table)?;
+                        p.end()?;
+                        let affected = if tx.get(&key)?.is_some() {
+                            tx.delete(&key)?;
+                            1
+                        } else { 0 };
+                        Ok(SqlResultSet::Command { affected })
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => Err(SqlError::Unsupported(format!(
+                "transaction sessions do not support {command}"
+            ))),
         }
     }
 }
