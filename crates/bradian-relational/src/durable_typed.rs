@@ -14,6 +14,7 @@ use crate::transaction_domain::DomainError;
 
 const SCHEMA_PREFIX: &[u8] = b"\0bradian-domain-table-v1:";
 const ROW_PREFIX: &[u8] = b"BRPK";
+const PROPOSAL_PREFIX: &[u8] = b"\0bradian-schema-proposal-v1:";
 const INLINE_CAPACITY: usize = 3545;
 
 #[derive(Clone)]
@@ -46,6 +47,7 @@ pub struct DurableTypedStore {
     store: DurableMvccStore,
     tables: BTreeMap<TableId, Definition>,
     schema_epochs: BTreeMap<TableId, u64>,
+    proposals: BTreeMap<TableId, (Table, u64)>,
 }
 
 impl DurableTypedStore {
@@ -89,7 +91,7 @@ impl DurableTypedStore {
             ));
         }
         for (key, bytes) in &records {
-            if key.starts_with(SCHEMA_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
             let table_id = table_id_from_row_key(key)?;
             let schema = tables.get(&table_id).ok_or_else(|| {
                 DomainError::Corruption(format!(
@@ -133,8 +135,34 @@ impl DurableTypedStore {
                 )));
             }
         }
+        let mut proposals = BTreeMap::new();
         for (key, lsn, value) in &versions {
-            if key.starts_with(SCHEMA_PREFIX) { continue; }
+            if !key.starts_with(PROPOSAL_PREFIX) { continue; }
+            if key.len() != PROPOSAL_PREFIX.len() + 8 {
+                return Err(DomainError::Corruption("invalid G28 proposal key".into()));
+            }
+            let id = TableId(u64::from_be_bytes(
+                key[PROPOSAL_PREFIX.len()..].try_into().unwrap()
+            ));
+            let old = tables.get(&id).ok_or_else(|| DomainError::Corruption(
+                "G28 proposal references an unregistered table".into()
+            ))?;
+            if registered_at.get(&id).is_none_or(|registration| *lsn <= *registration) {
+                return Err(DomainError::Corruption("G28 proposal predates table registration".into()));
+            }
+            let data = value.as_ref().ok_or_else(|| DomainError::Corruption(
+                "G28 prepared proposal was deleted".into()
+            ))?;
+            let proposed: Table = serde_json::from_slice(data).map_err(|e|
+                DomainError::Corruption(format!("invalid G28 proposed schema: {e}"))
+            )?;
+            crate::schema_evolution::plan_nullable_additions(&old.table, &proposed)?;
+            if proposals.insert(id, (proposed, *lsn)).is_some() {
+                return Err(DomainError::Corruption("G28 proposal was rewritten".into()));
+            }
+        }
+        for (key, lsn, value) in &versions {
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
             let id = table_id_from_row_key(key)?;
             let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
                 format!("historical row refers to unregistered table {}", id.0)
@@ -153,7 +181,7 @@ impl DurableTypedStore {
                 }
             }
         }
-        Ok(Self { store, tables, schema_epochs: registered_at })
+        Ok(Self { store, tables, schema_epochs: registered_at, proposals })
     }
 
     pub fn active_tables(&self) -> Vec<TableId> {
@@ -181,6 +209,29 @@ impl DurableTypedStore {
     /// not inferred from the current catalog or process start time.
     pub fn schema_epochs(&self) -> Vec<(TableId, u64)> {
         self.schema_epochs.iter().map(|(id, lsn)| (*id, *lsn)).collect()
+    }
+
+    /// G28 prepares one immutable schema proposal in the SAME G22 WAL as row
+    /// versions. This is a durable intent only; it cannot activate a new
+    /// schema, alter the G11 catalog or change row decoding.
+    pub fn prepare_nullable_addition(&self, id: TableId, proposed: &Table) -> Result<u64, DomainError> {
+        let old = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
+        crate::schema_evolution::plan_nullable_additions(&old.table, proposed)?;
+        let mut key = PROPOSAL_PREFIX.to_vec();
+        key.extend_from_slice(&id.0.to_be_bytes());
+        let bytes = serde_json::to_vec(proposed)?;
+        let mut tx = self.store.begin();
+        // Re-check the physical namespace using the transaction snapshot,
+        // not just this handle's cache; duplicate proposals fail closed.
+        tx.insert(&key, &bytes).map_err(map_mvcc)?;
+        tx.commit().map_err(map_mvcc)
+    }
+
+    /// List recovered G28 prepared intents, without treating any proposal
+    /// as an active schema revision.
+    pub fn prepared_schema_proposals(&self) -> Vec<(TableId, Table, u64)> {
+        self.proposals.iter().map(|(id, (table, lsn))|
+            (*id, table.clone(), *lsn)).collect()
     }
 
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
@@ -240,7 +291,7 @@ impl DurableTypedStore {
         let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
-            if key.starts_with(SCHEMA_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let row = decode_row(&def.table, &bytes)?;
@@ -303,7 +354,7 @@ impl DurableTypedTransaction<'_> {
         for (key, bytes) in records {
             // The full physical scan participates in G20's conservative
             // global LSN change validation when the transaction writes.
-            if key.starts_with(SCHEMA_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let def = self.definition(id)?;
