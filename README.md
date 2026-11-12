@@ -51,6 +51,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Atomic checkpoint publication gate](docs/gates/BRD-G9-checkpoint-publication.md) | Manifest-committed generation selection, orphan quarantine and WAL-safe publication |
 | [Consistent backup/restore gate](docs/gates/BRD-G10-consistent-backup-restore.md) | Captures one synchronized checkpoint+WAL state and restores into a verified new database directory |
 | [Persistent relational catalog gate](docs/gates/BRD-G11-persistent-catalog.md) | Stable database/schema/table identities, replay-validated DDL, and metadata-only backup |
+| [Native SQL execution gate](docs/gates/BRD-G12-native-sql.md) | Bounded CREATE, INSERT, SELECT, UPDATE and DELETE using persistent catalog and typed tables |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
@@ -58,7 +59,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 ```text
 bradian-db/
 ├── crates/
-│   ├── bradian-relational/       # Persistent catalog, WAL rows, typed tables, disk B+tree
+│   ├── bradian-relational/       # Persistent catalog, native SQL, WAL rows, typed tables, disk B+tree
 │   ├── dap-core/                 # Legacy core primitives
 │   ├── dap-storage/              # Existing .derc analytical segments, WAL and snapshots
 │   ├── dap-runtime/              # Analytical execution operators
