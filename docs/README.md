@@ -36,6 +36,7 @@ This directory contains the engineering specifications, architectural decisions,
 22. **[Database-wide backup ADR](adr/0024-database-wide-consistent-backup.md)** — consistent triple-WAL source locking, bound component receipts and staged verified restore.
 23. **[MVCC foundation ADR](adr/0025-mvcc-row-version-foundation.md)** — pinned in-memory row versions, per-key first-committer-wins and WAL recovery of the latest state.
 24. **[Typed MVCC SQL ADR](adr/0026-typed-sql-mvcc-integration.md)** — G11 catalog/G15 schema pin validation and concurrent scoped SQL sessions over G20 versions.
+25. **[Durable MVCC history ADR](adr/0027-durable-mvcc-history.md)** — history keys persisted in one WAL batch, retained as-of reads and crash-safe version GC.
 
 ## Current milestone records
 
@@ -62,7 +63,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G19](gates/BRD-G19-database-wide-backup.md) | Coherent local catalog/domain/lifecycle backup and verified new-root restore | Source/tests committed; manual checks outstanding |
 | [BRD-G20](gates/BRD-G20-mvcc-foundation.md) | Opt-in WAL-backed row-level MVCC, pinned readers and version GC | Source/tests committed; manual checks outstanding |
 | [BRD-G21](gates/BRD-G21-typed-sql-mvcc.md) | Opt-in typed SQL concurrent MVCC sessions with per-key write conflict detection | Source/tests committed; manual checks outstanding |
-| Future gates | Persisted history and serializable SQL, atomic multi-store DDL, remote/PITR backup, mutable physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
+| [BRD-G22](gates/BRD-G22-durable-mvcc-history.md) | Independent durable row-version history with restart-safe as-of reads and manual GC | Source/tests committed; manual checks outstanding |
+| Future gates | SQL history integration, serializable SQL, atomic multi-store DDL, remote/PITR backup, mutable physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
