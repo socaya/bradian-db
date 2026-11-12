@@ -174,6 +174,10 @@ impl PersistentCatalog {
         self.inner.lock().journal.last_lsn()
     }
 
+    pub(crate) fn journal_row_count(&self) -> u64 {
+        self.inner.lock().journal.len() as u64
+    }
+
     /// Publish the catalog journal through Bradian's BRPG checkpoint protocol.
     /// The append-only logical DDL events themselves remain recoverable.
     pub fn checkpoint(&self) -> PersistentCatalogResult<u64> {
