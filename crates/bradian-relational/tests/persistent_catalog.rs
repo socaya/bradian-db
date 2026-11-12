@@ -242,3 +242,39 @@ fn snapshots_are_independent_of_subsequent_commits() {
     assert_eq!(before.databases().count(), 0);
     assert!(catalog.snapshot().database(id).is_some());
 }
+
+
+#[test]
+fn catalog_only_backup_preserves_replayable_metadata_journal() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("catalog");
+    let backup = base.path().join("catalog-backup");
+    let restored = base.path().join("catalog-restored");
+    let (database, schema, table_id);
+    {
+        let catalog = PersistentCatalog::open(&root).unwrap();
+        database = catalog.create_database("reports").unwrap();
+        schema = catalog.create_schema(database, "public").unwrap();
+        table_id = catalog.create_table(schema, table("summaries")).unwrap();
+        let receipt = catalog.backup_catalog_to(&backup).unwrap();
+        assert_eq!(receipt.last_lsn, catalog.last_lsn());
+    }
+    RowStore::restore_backup(&backup, &restored).unwrap();
+    let recovered = PersistentCatalog::open(&restored).unwrap();
+    assert_eq!(recovered.snapshot().database(database).unwrap().name, "reports");
+    assert_eq!(recovered.snapshot().schema(schema).unwrap().name, "public");
+    assert_eq!(recovered.snapshot().table(table_id).unwrap().name, "summaries");
+}
+
+#[test]
+fn catalog_only_backup_does_not_advance_metadata_identity_counter() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("catalog");
+    let catalog = PersistentCatalog::open(&root).unwrap();
+    let first = catalog.create_database("first").unwrap();
+    let lsn_before = catalog.last_lsn();
+    catalog.backup_catalog_to(base.path().join("backup")).unwrap();
+    assert_eq!(catalog.last_lsn(), lsn_before);
+    let second = catalog.create_database("second").unwrap();
+    assert_eq!(second.0, first.0 + 1);
+}
