@@ -216,11 +216,10 @@ fn as_of_before_first_import_visibility_returns_no_rows() {
     db.with_session(|s| {
         s.execute("BEGIN")?;
         // Durable MVCC namespace initialization LSN contains no typed rows.
-        assert_eq!(s.execute("SELECT * FROM bank.public.accounts AS OF 1")?,
-            SqlResultSet::Rows {
-                columns: vec!["id".into(), "balance".into()],
-                rows: vec![],
-            });
+        assert!(s.execute("SELECT * FROM bank.public.accounts AS OF 1").is_err());
+        // One malformed historical statement aborts this transaction.
+        assert!(!s.in_transaction());
+        s.execute("BEGIN")?;
         assert!(s.execute(&format!(
             "SELECT id FROM bank.public.accounts AS OF {}", latest + 100
         )).is_err());
