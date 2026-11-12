@@ -4,7 +4,7 @@ use bradian_relational::page::{
 
 #[test]
 fn physical_page_roundtrip_for_all_kinds() {
-    for kind in [PageKind::Data, PageKind::Index, PageKind::FreeMap] {
+    for kind in [PageKind::Data, PageKind::Index, PageKind::FreeMap, PageKind::Metadata] {
         for len in [0, 1, 256, MAX_PAYLOAD_SIZE] {
             let payload = (0..len).map(|i| (i % 251) as u8).collect();
             let original = Page::new(42, 8192, kind, payload).unwrap();
