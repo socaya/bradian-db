@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 use crate::btree::{DiskBTree, RowPointer};
@@ -142,7 +142,7 @@ pub fn verify(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
 /// Rebuild an *absent* index, using only the published snapshot as authority.
 /// A corrupt existing index must be addressed by an explicit repair procedure;
 /// silently overwriting it would conceal an integrity failure.
-pub fn rebuild_missing(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
+pub(crate) fn rebuild_missing(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
     if index_path(root, lsn).exists() {
         return verify(root, lsn);
     }
