@@ -12,6 +12,8 @@
 - [x] Exclusive source catalog and every existing table RowStore lock retained through cutover.
 - [x] Reject unknown/orphan legacy table directories and existing destinations.
 - [x] Refuse source/destination overlap and previously incomplete staging directories.
+- [x] Reject a source containing `shared-domain/` to prevent silently skipping already migrated data.
+- [x] Recheck destination existence before the final directory rename; competing destination creators still require operational exclusion.
 - [x] Verified catalog-only export/restore through native G10 storage recovery.
 - [x] Register the original stable TableIds and table schema pins in a new G15 shared-WAL domain.
 - [x] Insert typed rows into staged domain using bounded 128-row atomic G15 batches.
@@ -26,7 +28,7 @@ These checkboxes denote implementation and source-level test coverage, **not an 
 
 ## Regression scenarios
 
-`crates/bradian-relational/tests/legacy_migration.rs` exercises multi-table data import, empty schema-only tables, original data preservation, shared-domain SQL writes and restart, catalog/table lock contention, orphan directory refusal, existing destination and repeated cutover refusal, source/staging overlap and incomplete staging rejection.
+`crates/bradian-relational/tests/legacy_migration.rs` exercises multi-table data import, empty schema-only tables, original data preservation, shared-domain SQL writes and restart, catalog/table lock contention, orphan directory refusal, existing destination and repeated cutover refusal, source/staging overlap and incomplete staging rejection, corrupt source row rejection, and refusal to reimport an existing shared domain.
 
 ## Manual acceptance commands
 
