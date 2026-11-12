@@ -16,6 +16,7 @@ pub mod row_store;
 pub mod btree;
 pub mod buffer_pool;
 pub mod index_recovery;
+pub mod checkpoint_manifest;
 pub mod typed_table;
 
 pub use catalog::{Catalog, CatalogError};
