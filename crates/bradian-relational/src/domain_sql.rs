@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 
-use crate::{Table, TableId};
+use crate::Table;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
     coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
@@ -104,7 +104,7 @@ pub struct DomainSqlSession<'a> {
     last_commit_lsn: Option<u64>,
 }
 
-impl DomainSqlSession<'_> {
+impl<'a> DomainSqlSession<'a> {
     pub fn in_transaction(&self) -> bool { self.active.is_some() }
     pub fn last_commit_lsn(&self) -> Option<u64> { self.last_commit_lsn }
 
@@ -126,7 +126,8 @@ impl DomainSqlSession<'_> {
                 if self.active.is_some() {
                     return Err(SqlError::Unsupported("nested BEGIN is unsupported".into()));
                 }
-                self.active = Some(self.engine.domain.begin_transaction()?);
+                let tx: MultiTableTransaction<'a> = self.engine.domain.begin_transaction()?;
+                self.active = Some(tx);
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "commit" => {
