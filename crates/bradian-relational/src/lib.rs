@@ -27,6 +27,8 @@ pub mod legacy_migration;
 pub mod lifecycle;
 pub mod database_backup;
 pub mod mvcc;
+pub mod typed_mvcc;
+pub mod mvcc_sql;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
