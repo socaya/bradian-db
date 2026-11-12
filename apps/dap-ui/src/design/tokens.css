@@ -6,8 +6,8 @@
   --surface-page:       #fbfbfc;
   --surface-panel:      #ffffff;
   --surface-muted:      #f3f4f6;
-  --surface-nav:        #111827;
-  --surface-nav-active: #1f2937;
+  --surface-nav:        #082b56;
+  --surface-nav-active: #154475;
 
   /* Borders, hairlines, dividers. */
   --border-subtle:      #e4e6eb;
@@ -18,7 +18,7 @@
   --text-secondary:     #4b5563;
   --text-muted:         #6b7280;
   --text-inverse:       #f9fafb;
-  --text-link:          #1d4ed8;
+  --text-link:          #082b56;
 
   /* State pills — meaning first, colour is a hint, not a decoration. */
   --state-ok-fg:        #065f46;
@@ -84,8 +84,8 @@
     --surface-page:       #0b0d12;
     --surface-panel:      #11141b;
     --surface-muted:      #171b24;
-    --surface-nav:        #080a0f;
-    --surface-nav-active: #1a1f2b;
+    --surface-nav:        #061d3b;
+    --surface-nav-active: #103b68;
     --border-subtle:      #232735;
     --border-strong:      #323849;
     --text-primary:       #e5e7eb;
