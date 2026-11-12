@@ -73,6 +73,7 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G28](gates/BRD-G28-durable-schema-intents.md) | WAL-backed inactive schema proposals and restart-time integrity validation | Source/tests committed; runtime qualification outstanding |
 | [BRD-G29](gates/BRD-G29-durable-schema-cancellation.md) | WAL-durable prepared-schema cancellation and fail-closed restart recovery | Source/tests committed; runtime qualification outstanding |
 | [BRD-G30](gates/BRD-G30-ddl-coordination-fences.md) | Immutable catalog-LSN-bound DDL coordination fences and deterministic mismatch refusal | Source/tests committed; runtime qualification outstanding |
+| [BRD-G31](gates/BRD-G31-ddl-readiness-certificates.md) | WAL-durable inactive schema readiness records and verified restart recovery | Source/tests committed; runtime qualification outstanding |
 | Future gates | G18 lifecycle-aware history conversion, serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 ## Formal specification and assets
