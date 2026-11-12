@@ -69,7 +69,8 @@ impl DiskBTree {
             return Err(IndexError::Invalid("index build target already exists"));
         }
         for (i, (key, ptr)) in entries.iter().enumerate() {
-            if key.is_empty() || key.len() > MAX_KEY || ptr.page_id == 0 {
+            if key.is_empty() || key.len() > MAX_KEY || ptr.page_id == 0
+                || ptr.offset as usize >= MAX_PAYLOAD_SIZE {
                 return Err(IndexError::Invalid("invalid key or row pointer"));
             }
             if i > 0 && entries[i - 1].0 >= *key {
@@ -177,6 +178,7 @@ impl DiskBTree {
         let entries = u64::from_le_bytes(meta.payload[22..30].try_into().unwrap());
         if pages.checked_add(1).and_then(|n| n.checked_mul(PAGE_SIZE as u64)) != Some(len)
             || (root == 0) != (entries == 0) || root > pages
+            || (entries == 0 && pages != 0)
         {
             return Err(IndexError::Corruption("index metadata and file layout disagree"));
         }
@@ -226,6 +228,7 @@ impl DiskBTree {
         let mut current_id = leaf.page_id;
         let mut found = Vec::new();
         let mut visited = 0_u64;
+        let mut last_key: Option<Vec<u8>> = None;
         loop {
             visited += 1;
             if visited > self.pages { return Err(IndexError::Corruption("leaf chain contains a cycle")); }
@@ -234,6 +237,10 @@ impl DiskBTree {
             } else { self.page(current_id)? };
             let (rows, next) = read_leaf(&page.payload)?;
             for (key, pointer) in rows {
+                if last_key.as_ref().is_some_and(|previous| previous >= &key) {
+                    return Err(IndexError::Corruption("out-of-order leaf chain"));
+                }
+                last_key = Some(key.clone());
                 if key.as_slice() >= end { return Ok(found); }
                 if key.as_slice() >= start { found.push((key, pointer)); }
             }
