@@ -289,7 +289,7 @@ impl RowStore {
         let expected = inner.rows.get(key).cloned();
         if let Some(changed) = inner.delta.get(key) {
             // Tombstones are explicit: Some(None) means deleted.
-            if *changed != expected {
+            if changed.as_ref() != expected.as_ref() {
                 return Err(StoreError::Corruption("WAL delta disagrees with committed row map".into()));
             }
             return Ok(changed.clone());
