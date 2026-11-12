@@ -144,6 +144,12 @@ impl MultiTableStore {
         Err(DomainError::Conflict)
     }
 
+    /// Owned schema pins used by lifecycle integrity reconciliation. Never
+    /// expose the internal registry mutex to callers.
+    pub fn registered_tables(&self) -> Vec<Table> {
+        self.tables.lock().values().map(|entry| entry.table.clone()).collect()
+    }
+
     pub fn table_count(&self) -> usize { self.tables.lock().len() }
     pub fn last_lsn(&self) -> u64 { self.storage.last_lsn() }
     pub fn checkpoint(&self) -> DomainResult<u64> { Ok(self.storage.checkpoint()?) }
