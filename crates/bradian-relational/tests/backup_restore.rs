@@ -224,3 +224,49 @@ fn current_generation_backup_requires_committed_checkpoint() {
     assert!(!dest.exists());
     assert_eq!(store.last_lsn(), 1);
 }
+
+
+#[test]
+fn truncated_extra_wal_frame_must_not_be_silently_repaired_during_restore() {
+    let base = tempdir().unwrap();
+    let db = base.path().join("db");
+    let backup = base.path().join("backup");
+    let store = RowStore::open(&db).unwrap();
+    store.put(b"before", b"checkpoint").unwrap();
+    store.checkpoint().unwrap();
+    store.put(b"after", b"committed").unwrap();
+    store.backup_current_generation(&backup).unwrap();
+
+    // A partial trailing record is acceptable during ordinary crash
+    // recovery, but an immutable backup must be an exact captured object.
+    let path = backup.join("rows.wal");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"BRWL\x01"); // truncated next frame header
+    fs::write(&path, bytes).unwrap();
+
+    let restored = base.path().join("restore");
+    assert!(RowStore::restore_backup(&backup, &restored).is_err());
+    assert!(!restored.exists());
+}
+
+#[test]
+fn backup_into_legacy_checkpoint_without_manifest_is_migrated_safely() {
+    let base = tempdir().unwrap();
+    let db = base.path().join("legacy-db");
+    {
+        let store = RowStore::open(&db).unwrap();
+        store.put(b"legacy", b"kept").unwrap();
+        store.checkpoint().unwrap();
+    }
+    fs::remove_file(db.join("checkpoint.current")).unwrap();
+    let store = RowStore::open(&db).unwrap();
+    let backup = base.path().join("legacy-backup");
+    let receipt = store.backup_to(&backup).unwrap();
+    assert_eq!(receipt.checkpoint_lsn, 1);
+    assert_eq!(receipt.last_lsn, 1);
+    assert!(db.join("checkpoint.current").exists());
+
+    let restored = base.path().join("legacy-restored");
+    RowStore::restore_backup(&backup, &restored).unwrap();
+    assert_eq!(RowStore::open(&restored).unwrap().get(b"legacy"), Some(b"kept".to_vec()));
+}
