@@ -91,6 +91,16 @@ impl HistorySqlEngine {
     pub fn retention_floor(&self) -> u64 { self.domain.retention_floor() }
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
+    /// Create a separate verified G24 archive while both source storage locks
+    /// remain owned by this engine. G19 legacy archives are not compatible.
+    pub fn backup_to(
+        &self, destination: impl AsRef<Path>,
+    ) -> crate::history_backup::HistoryBackupResult<crate::history_backup::HistoryBackupReport> {
+        crate::history_backup::backup_history_database(
+            &self._root, destination.as_ref(), &self.catalog, &self.domain,
+        )
+    }
+
     /// Every callback owns a separate pinned MVCC snapshot. BEGIN
     /// opens a domain-wide row snapshot; COMMIT publishes one WAL frame.
     /// Leaving with a pending transaction discards all staged modifications.
