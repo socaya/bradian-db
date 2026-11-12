@@ -51,6 +51,10 @@ A crash between steps 2 and 3 leaves an authoritative snapshot without an index.
 
 The present bytewise key ordering does **not** claim to implement SQL collation order or numeric ordering for little-endian values. The typed key format guarantees equality and nonambiguous composite keys; a SQL-correct B+tree comparator and locale/collation versioning will be a separate contract.
 
+## WAL-backed mutable overlay (ADR 0012)
+
+The [G7 overlay](0012-wal-backed-mutable-index.md) applies committed post-checkpoint mutations to an ordered key/value-or-tombstone map while retaining the immutable physical B+tree for untouched rows. Point lookups and ranges now merge the committed WAL delta with published checkpoint records; a new checkpoint clears the delta after safely publishing a new physical generation. This is not in-place page mutation.
+
 ## Buffer pool integration (ADR 0011)
 
 The original G5 implementation performed direct physical reads on each lookup. The new [generation-scoped buffer pool](0011-generation-scoped-buffer-pool.md) retains verified B+tree and snapshot pages in bounded LRU caches. These caches are reused across point/range lookups of one immutable checkpoint generation, and are invalidated when a new checkpoint is published. The WAL-backed committed row map still overrides the older checkpoint index whenever there are newer writes.
