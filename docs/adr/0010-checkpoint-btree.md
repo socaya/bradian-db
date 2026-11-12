@@ -51,6 +51,10 @@ A crash between steps 2 and 3 leaves an authoritative snapshot without an index.
 
 The present bytewise key ordering does **not** claim to implement SQL collation order or numeric ordering for little-endian values. The typed key format guarantees equality and nonambiguous composite keys; a SQL-correct B+tree comparator and locale/collation versioning will be a separate contract.
 
+## Derived index reconstruction (ADR 0013)
+
+The [G8 reconstruction protocol](0013-derived-index-reconstruction.md) now handles the interrupted-publication case: a valid physical checkpoint can be recovered even if its derived index is missing. The locked RowStore rebuilds the B+tree from verified checkpoint row pointers, validates its leaf order and index point lookups, and publishes the rebuilt file before replaying newer WAL changes. Corrupt existing published indexes are not silently overwritten.
+
 ## WAL-backed mutable overlay (ADR 0012)
 
 The [G7 overlay](0012-wal-backed-mutable-index.md) applies committed post-checkpoint mutations to an ordered key/value-or-tombstone map while retaining the immutable physical B+tree for untouched rows. Point lookups and ranges now merge the committed WAL delta with published checkpoint records; a new checkpoint clears the delta after safely publishing a new physical generation. This is not in-place page mutation.
