@@ -17,6 +17,8 @@ use serde_json::{json, Value as JsonValue};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
 fn uid(s: &str) -> Uid {
     Uid::new(s).unwrap()
 }
@@ -140,7 +142,9 @@ async fn acceptance_1_correction_retracts_old_and_applies_new() {
     part.flush().unwrap();
 
     // HTTP query: SUM(value) grouped by ou,period must see 15, not 25 (no double-count).
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
     let body = json!({
         "request": {
             "kind": "aggregate",
@@ -157,6 +161,7 @@ async fn acceptance_1_correction_retracts_old_and_applies_new() {
         .oneshot(
             Request::post("/api/analytics/v1/query")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -205,7 +210,9 @@ async fn acceptance_3_idempotent_replay_has_single_effect() {
     }
     part.flush().unwrap();
 
-    let app = router(ServerState::new(engine));
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
     let body = json!({
         "request": {
             "kind": "aggregate",
@@ -221,6 +228,7 @@ async fn acceptance_3_idempotent_replay_has_single_effect() {
         .oneshot(
             Request::post("/api/analytics/v1/query")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
