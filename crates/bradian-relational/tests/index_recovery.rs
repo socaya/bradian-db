@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use bradian_relational::index_recovery::{rebuild_missing, verify};
+use bradian_relational::index_recovery::verify;
 use bradian_relational::row_store::{RowStore, StoreError};
 use tempfile::tempdir;
 
@@ -116,17 +116,19 @@ fn recovery_missing_index_is_idempotent_and_never_overwrites_existing() {
         let store = RowStore::open(dir.path()).unwrap();
         store.put(b"row", b"data").unwrap();
         store.checkpoint().unwrap();
+        let report = store.rebuild_missing_checkpoint_index().unwrap();
+        assert!(!report.rebuilt);
     }
     let index = dir.path().join("index-1.bri");
     let original = fs::read(&index).unwrap();
-    let first = rebuild_missing(dir.path(), 1).unwrap();
-    assert!(!first.rebuilt);
-    assert_eq!(fs::read(&index).unwrap(), original);
     fs::remove_file(&index).unwrap();
-    let second = rebuild_missing(dir.path(), 1).unwrap();
-    assert!(second.rebuilt);
+    // Reopening owns the directory lock and reconstructs only the missing
+    // derived index, without changing the authoritative checkpoint.
+    let store = RowStore::open(dir.path()).unwrap();
     assert_eq!(fs::read(&index).unwrap(), original);
-    assert!(!verify(dir.path(), 1).unwrap().rebuilt);
+    let again = store.rebuild_missing_checkpoint_index().unwrap();
+    assert!(!again.rebuilt);
+    assert!(!store.verify_checkpoint_index().unwrap().rebuilt);
 }
 
 #[test]
@@ -149,5 +151,5 @@ fn absent_snapshot_cannot_be_used_as_an_index_recovery_source() {
     let dir = tempdir().unwrap();
     let store = RowStore::open(dir.path()).unwrap();
     assert!(matches!(store.verify_checkpoint_index(), Err(StoreError::Corruption(_))));
-    assert!(rebuild_missing(dir.path(), 0).is_err());
+    assert!(matches!(store.rebuild_missing_checkpoint_index(), Err(StoreError::Corruption(_))));
 }
