@@ -151,3 +151,75 @@ fn sql_insert_column_order_can_differ_from_schema_order() {
     assert_eq!(db.execute("SELECT id,customer,amount FROM billing.public.invoices WHERE id=42").unwrap(),
         SqlResultSet::Rows {columns:vec!["id".into(),"customer".into(),"amount".into()],rows:vec![vec![Value::Int64(42),Value::String("Reverse".into()),Value::Decimal(235)]]});
 }
+
+
+#[test]
+fn typed_sql_table_transaction_commits_multiple_rows_as_one_wal_record() {
+    let root = tempdir().unwrap();
+    {
+        let engine = SqlEngine::open(root.path()).unwrap();
+        setup(&engine);
+        let (count, lsn) = engine.transact_table("billing.public.invoices", |tx| {
+            let before = tx.start_lsn();
+            tx.insert(&[
+                Value::Int64(11), Value::String("Alice".into()),
+                Value::Decimal(10000), Value::Boolean(false), Value::Null,
+            ])?;
+            tx.insert(&[
+                Value::Int64(12), Value::String("Bob".into()),
+                Value::Decimal(20000), Value::Boolean(false), Value::Null,
+            ])?;
+            assert_eq!(tx.scan().len(), 2);
+            Ok((before, tx.scan().len()))
+        }).unwrap();
+        assert_eq!(count.1, 2);
+        assert_eq!(lsn, count.0 + 1);
+        assert_eq!(engine.execute(
+            "SELECT id,customer FROM billing.public.invoices"
+        ).unwrap(), SqlResultSet::Rows {
+            columns: vec!["id".into(), "customer".into()],
+            rows: vec![
+                vec![Value::Int64(11), Value::String("Alice".into())],
+                vec![Value::Int64(12), Value::String("Bob".into())],
+            ],
+        });
+    }
+    let reopened = SqlEngine::open(root.path()).unwrap();
+    assert_eq!(reopened.execute(
+        "SELECT customer FROM billing.public.invoices WHERE id=12"
+    ).unwrap(), SqlResultSet::Rows {
+        columns: vec!["customer".into()],
+        rows: vec![vec![Value::String("Bob".into())]],
+    });
+}
+
+#[test]
+fn typed_sql_transaction_closure_error_aborts_all_changes() {
+    let root = tempdir().unwrap();
+    let engine = SqlEngine::open(root.path()).unwrap();
+    setup(&engine);
+    let result: Result<((), u64), SqlError> =
+        engine.transact_table("billing.public.invoices", |tx| {
+            tx.insert(&[
+                Value::Int64(30), Value::String("first".into()),
+                Value::Decimal(100), Value::Boolean(false), Value::Null,
+            ])?;
+            Err(SqlError::Unsupported("cancel requested".into()))
+        });
+    assert!(matches!(result, Err(SqlError::Unsupported(_))));
+    assert_eq!(engine.execute(
+        "SELECT id FROM billing.public.invoices WHERE id=30"
+    ).unwrap(), SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![] });
+}
+
+#[test]
+fn transaction_api_refuses_unqualified_and_unknown_tables() {
+    let root = tempdir().unwrap();
+    let engine = SqlEngine::open(root.path()).unwrap();
+    setup(&engine);
+    let callback = |_tx: &mut bradian_relational::typed_table::TableTransaction<'_>| {
+        Ok::<_, SqlError>(())
+    };
+    assert!(engine.transact_table("invoices", callback).is_err());
+    assert!(engine.transact_table("billing.public.absent", |_| Ok(())).is_err());
+}
