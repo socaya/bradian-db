@@ -23,9 +23,10 @@
 - [x] Preserve the legacy shared-domain root and refuse unsafe overlapping, occupied, unregistered or previously incomplete destinations.
 - [x] Explicitly reject G18-managed sources and unmigrated G14 table storage until a lifecycle-aware migration is implemented.
 - [x] Refuse G23 history roots in the G12, G16, G21 and G18 legacy owners so they cannot accidentally create competing physical stores.
-- [x] Eleven source-level integration tests committed, covering migration, historical SQL, WAL recovery, rollback and refusal modes.
+- [x] Thirteen source-level integration tests committed, covering migration, historical SQL, WAL recovery, rollback, refusal modes and retained-history corruption rejection.
+- [x] On open, verify every retained G22 row version (including superseded payloads and tombstones), reject unknown-table physical keys, and require schema-pin history to remain immutable and predate typed rows.
 
-Checkmarks denote committed source and test cases, **not observed passing test execution**.
+Checkmarks denote committed source and test cases, **not observed passing test execution**. The retained-version audit currently materializes owned metadata for all retained records, so large-history memory admission remains unqualified.
 
 ## Required manual validation
 
