@@ -89,6 +89,22 @@ impl HistorySqlEngine {
 
     pub fn last_lsn(&self) -> u64 { self.domain.last_lsn() }
     pub fn retention_floor(&self) -> u64 { self.domain.retention_floor() }
+
+    /// G26: immutable, validated schema registration epochs for this history
+    /// database. Schema changes after registration remain unsupported.
+    pub fn schema_epochs(&self) -> Vec<(crate::TableId, u64)> {
+        self.domain.schema_epochs()
+    }
+
+    /// Read the schema applicable at a retained historical WAL position.
+    /// The returned LSN is the original immutable schema registration commit.
+    pub fn schema_as_of(&self, qualified_table: &str, lsn: u64) -> SqlResult<(Table, u64)> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let table = self.resolve(&parts)?;
+        Ok(self.domain.schema_as_of(table.id, lsn)?)
+    }
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks
@@ -167,6 +183,33 @@ impl<'a> HistorySqlSession<'a> {
                     SqlError::Unsupported("ROLLBACK without BEGIN".into()))?;
                 tx.rollback();
                 Ok(SqlResultSet::Command { affected: 0 })
+            }
+            "describe" => {
+                // Read-only G26 inspection is available with or without BEGIN.
+                // It does not stage metadata changes or start an MVCC writer.
+                p.expect("table")?;
+                let table = self.engine.resolve(&p.name()?)?;
+                p.expect("as")?;
+                p.expect("of")?;
+                let lsn = p.number_u64()?;
+                p.end()?;
+                let (schema, registered) = self.engine.domain.schema_as_of(table.id, lsn)?;
+                let rows = schema.columns.into_iter().map(|column| vec![
+                    crate::typed_table::Value::String(column.name),
+                    crate::typed_table::Value::String(
+                        serde_json::to_string(&column.data_type)
+                            .expect("validated catalog data type is serializable")
+                    ),
+                    crate::typed_table::Value::Boolean(column.nullable),
+                    crate::typed_table::Value::String(registered.to_string()),
+                ]).collect();
+                Ok(SqlResultSet::Rows {
+                    columns: vec![
+                        "column_name".into(), "data_type".into(),
+                        "nullable".into(), "schema_registered_lsn".into(),
+                    ],
+                    rows,
+                })
             }
             "insert" | "select" | "update" | "delete" => {
                 // Resolve and parse before applying any change. On any error,
