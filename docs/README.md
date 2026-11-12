@@ -25,7 +25,8 @@ This directory contains the engineering specifications, architectural decisions,
 |---|---|---|
 | [BRD-G1](gates/BRD-G1-relational-catalog.md) | Relational catalog, typed column definitions, PK/FK metadata | In-memory schema management, no row data |
 | [BRD-G2](gates/BRD-G2-page-format.md) | Versioned physical page representation and corruption detection | Page codec only; not yet durable storage |
-| Future gates | WAL, transactional row storage, SQL engine, MVCC, HTAP, clusters, enterprise security | Must be implemented and qualified |
+| [BRD-G3](gates/BRD-G3-wal-row-store.md) | Synchronized key/value mutations, page checkpoints and WAL replay | Source and 17 tests committed; manual checks outstanding |
+| Future gates | SQL transactions, MVCC, disk B+tree, process locking, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
