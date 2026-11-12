@@ -338,7 +338,7 @@ impl HashAggregator {
 }
 
 fn merge_states_in_place(existing: &mut [AggState], incoming: Vec<AggState>) {
-    for (dst, src) in existing.iter_mut().zip(incoming.into_iter()) {
+    for (dst, src) in existing.iter_mut().zip(incoming) {
         merge_pair(dst, src);
     }
 }
