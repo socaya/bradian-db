@@ -125,9 +125,25 @@ impl DurableTypedStore {
     /// Point-in-time typed read, validated against the currently pinned
     /// immutable catalog schema. Online ALTER/DROP and historical schemas
     /// are not supported in this profile.
+    fn check_schema_as_of(&self, id: TableId, lsn: u64) -> Result<(), DomainError> {
+        let definition = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
+        let mut schema_key = SCHEMA_PREFIX.to_vec();
+        schema_key.extend_from_slice(&id.0.to_be_bytes());
+        let historical = self.store.read_as_of(&schema_key, lsn).map_err(map_mvcc)?;
+        if historical.as_deref() != Some(serde_json::to_vec(&definition.table)
+            .map_err(|e| DomainError::Corruption(e.to_string()))?.as_slice())
+        {
+            return Err(DomainError::Corruption(
+                format!("table {} schema not active at historical WAL LSN {lsn}", id.0),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn get_as_of(
         &self, id: TableId, pk: &[Value], lsn: u64,
     ) -> Result<Option<Vec<Value>>, DomainError> {
+        self.check_schema_as_of(id, lsn)?;
         let def = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
         let key = encode_key(&def.table, &def.pk_positions, pk)?;
         self.store.read_as_of(&key, lsn).map_err(map_mvcc)?
@@ -143,6 +159,7 @@ impl DurableTypedStore {
     /// Read-only historical full-table scan. The G22 retention floor rejects
     /// queries before the earliest permitted WAL horizon.
     pub fn scan_as_of(&self, id: TableId, lsn: u64) -> Result<Vec<Vec<Value>>, DomainError> {
+        self.check_schema_as_of(id, lsn)?;
         let def = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
         let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
         let mut rows = Vec::new();
