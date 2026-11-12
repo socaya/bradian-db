@@ -327,3 +327,116 @@ fn checkpoint_reuses_streaming_buffer_across_page_boundaries() {
         assert_eq!(store.get(key.as_bytes()), Some(vec![(i % 251) as u8; 245]));
     }
 }
+
+
+#[test]
+fn atomic_batch_of_multiple_rows_survives_restart_as_one_commit() {
+    use bradian_relational::row_store::RowMutation;
+
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        let committed = store.commit_batch(Some(0), &[
+            RowMutation::Put { key: b"a".to_vec(), value: b"one".to_vec() },
+            RowMutation::Put { key: b"b".to_vec(), value: b"two".to_vec() },
+            RowMutation::Put { key: b"a".to_vec(), value: b"updated".to_vec() },
+        ]).unwrap();
+        assert_eq!(committed, 1, "a batch consumes only one durable LSN");
+        assert_eq!(store.get(b"a"), Some(b"updated".to_vec()));
+        assert_eq!(store.get(b"b"), Some(b"two".to_vec()));
+    }
+    let store = open(dir.path());
+    assert_eq!(store.last_lsn(), 1);
+    assert_eq!(store.get(b"a"), Some(b"updated".to_vec()));
+    assert_eq!(store.get(b"b"), Some(b"two".to_vec()));
+    assert_eq!(store.delete(b"a").unwrap(), 2);
+    assert_eq!(store.commit_batch(None, &[
+        RowMutation::Delete { key: b"b".to_vec() },
+        RowMutation::Put { key: b"c".to_vec(), value: b"three".to_vec() },
+    ]).unwrap(), 3);
+    store.checkpoint().unwrap();
+    drop(store);
+    let restarted = open(dir.path());
+    assert_eq!(restarted.get(b"a"), None);
+    assert_eq!(restarted.get(b"b"), None);
+    assert_eq!(restarted.get(b"c"), Some(b"three".to_vec()));
+    assert_eq!(restarted.last_lsn(), 3);
+}
+
+#[test]
+fn stale_optimistic_batch_is_rejected_without_wal_append() {
+    use bradian_relational::row_store::RowMutation;
+
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    store.put(b"inventory", b"100").unwrap();
+    let length_before = fs::metadata(dir.path().join("rows.wal")).unwrap().len();
+    assert!(matches!(store.commit_batch(Some(0), &[
+        RowMutation::Put { key: b"inventory".to_vec(), value: b"0".to_vec() },
+    ]), Err(StoreError::Conflict { expected: 0, actual: 1 })));
+    assert_eq!(store.last_lsn(), 1);
+    assert_eq!(store.get(b"inventory"), Some(b"100".to_vec()));
+    assert_eq!(fs::metadata(dir.path().join("rows.wal")).unwrap().len(), length_before);
+}
+
+#[test]
+fn invalid_batch_rejects_entire_operation_before_appending() {
+    use bradian_relational::row_store::RowMutation;
+
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    assert!(matches!(store.commit_batch(None, &[]), Err(StoreError::InvalidRow(_))));
+    assert!(matches!(store.commit_batch(None, &[
+        RowMutation::Put { key: b"good".to_vec(), value: b"valid".to_vec() },
+        RowMutation::Put { key: b"".to_vec(), value: b"invalid".to_vec() },
+    ]), Err(StoreError::InvalidRow(_))));
+    assert!(store.is_empty());
+    assert_eq!(store.last_lsn(), 0);
+    assert_eq!(fs::metadata(dir.path().join("rows.wal")).unwrap().len(), 0);
+}
+
+#[test]
+fn torn_batch_replay_never_applies_only_part_of_the_batch() {
+    use bradian_relational::row_store::RowMutation;
+
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.put(b"existing", b"old").unwrap();
+        store.commit_batch(None, &[
+            RowMutation::Put { key: b"existing".to_vec(), value: b"new".to_vec() },
+            RowMutation::Put { key: b"new-row".to_vec(), value: b"inserted".to_vec() },
+        ]).unwrap();
+    }
+    let path = dir.path().join("rows.wal");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.truncate(bytes.len() - 3); // simulate an incomplete final frame
+    fs::write(&path, bytes).unwrap();
+    let recovered = open(dir.path());
+    assert_eq!(recovered.last_lsn(), 1);
+    assert_eq!(recovered.get(b"existing"), Some(b"old".to_vec()));
+    assert_eq!(recovered.get(b"new-row"), None);
+    assert_eq!(recovered.put(b"later", b"safe").unwrap(), 2);
+}
+
+#[test]
+fn malformed_batch_with_recomputed_crc_fails_closed() {
+    use bradian_relational::row_store::RowMutation;
+
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.commit_batch(None, &[
+            RowMutation::Put { key: b"a".to_vec(), value: b"one".to_vec() },
+            RowMutation::Put { key: b"b".to_vec(), value: b"two".to_vec() },
+        ]).unwrap();
+    }
+    let path = dir.path().join("rows.wal");
+    let mut bytes = fs::read(&path).unwrap();
+    // Body position 12..20 LSN, 20 opcode, 21..25 declared count.
+    bytes[21..25].copy_from_slice(&3_u32.to_le_bytes()); // only two serialized operations exist
+    let crc = crc32fast::hash(&bytes[12..]);
+    bytes[8..12].copy_from_slice(&crc.to_le_bytes());
+    fs::write(path, bytes).unwrap();
+    assert!(matches!(RowStore::open(dir.path()), Err(StoreError::Corruption(_))));
+}
