@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::{Table, TableId};
-use crate::durable_mvcc::{DurableDurableMvccError, DurableDurableMvccStats, DurableDurableMvccStore, DurableDurableMvccTransaction};
+use crate::durable_mvcc::{DurableMvccError, DurableMvccStats, DurableMvccStore, DurableMvccTransaction};
 use crate::typed_table::{
     decode_row, encode_key, encode_row, validate_table, TableError, Value,
 };
@@ -41,14 +41,14 @@ fn key_from_row(def: &Definition, row: &[Value]) -> Result<Vec<u8>, DomainError>
     Ok(encode_key(&def.table, &def.pk_positions, &pk)?)
 }
 
-/// A validated, exclusively owned view of a G15-formatted shared WAL.
+/// A validated, exclusively owned view of a G22 durable-history WAL.
 pub struct DurableTypedStore {
     store: DurableMvccStore,
     tables: BTreeMap<TableId, Definition>,
 }
 
 impl DurableTypedStore {
-    /// Requires a G15/G18-registered domain; does not create metadata pins.
+    /// Requires an explicitly provisioned G23 history domain; does not create metadata pins.
     /// All catalog tables need not be active, but all *stored* domain pins
     /// must match precisely the supplied authoritative catalog definitions.
     pub fn open(
