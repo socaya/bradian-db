@@ -27,6 +27,7 @@ This directory contains the engineering specifications, architectural decisions,
 13. **[Consistent backup/restore ADR](adr/0015-consistent-backup-restore.md)** — snapshot-plus-WAL capture, staged verification and safe restore.
 14. **[Persistent relational catalog ADR](adr/0016-persistent-ddl-catalog.md)** — synchronized DDL events, stable object IDs, deterministic validated replay.
 15. **[Native SQL execution ADR](adr/0017-native-sql-execution.md)** — parser, strict binder, native catalog/typed-row execution and supported SQL grammar.
+16. **[Single-table transaction ADR](adr/0018-single-table-transactions.md)** — row snapshot, staged writes, rollback and atomic WAL batch commits.
 
 ## Current milestone records
 
@@ -44,7 +45,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G10](gates/BRD-G10-consistent-backup-restore.md) | Verified single-store snapshot/WAL backup and restore | Source/tests committed; manual acceptance outstanding |
 | [BRD-G11](gates/BRD-G11-persistent-catalog.md) | Durable relational catalog and validated DDL journal | Source/tests committed; manual acceptance outstanding |
 | [BRD-G12](gates/BRD-G12-native-sql.md) | Executable bounded SQL CREATE, INSERT, SELECT, UPDATE, DELETE | Source/tests committed; manual checks outstanding |
-| Future gates | General SQL, unified catalog/table transactions, MVCC, mutable physical B+tree, HTAP, clusters and enterprise security | Must be implemented and qualified |
+| [BRD-G13](gates/BRD-G13-single-table-transactions.md) | Atomic local single-table transactions, conservative conflict rejection and rollback | Source/tests committed; manual checks outstanding |
+| Future gates | SQL BEGIN/COMMIT, cross-table ACID, MVCC, mutable physical B+tree, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
