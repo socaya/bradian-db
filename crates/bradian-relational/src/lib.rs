@@ -14,6 +14,7 @@ mod catalog;
 pub mod page;
 pub mod row_store;
 pub mod btree;
+pub mod buffer_pool;
 pub mod typed_table;
 
 pub use catalog::{Catalog, CatalogError};
