@@ -8,15 +8,16 @@
 //!
 //! IMPORTANT: this is a durable *single-process* storage slice, not SQL, MVCC,
 //! multi-operation transactions, a B+tree, or a multi-process lock manager.
-//! The caller must enforce exclusive access to the database directory.
+//! An OS-level exclusive lock prevents another cooperating RowStore instance
+//! from opening the same directory while this instance remains alive.
 //!
-//! Files: rows.wal, snapshot-<lsn>.brp, snapshot-<lsn>.tmp.
+//! Files: rows.lock, rows.wal, snapshot-<lsn>.brp, snapshot-<lsn>.tmp.
 //! Snapshots use the Page codec's 4096-byte physical pages and CRC integrity.
 //! On Unix, directory sync seals the rename. Windows/macOS power-loss guarantees
 //! require separate platform qualification; no claims are made before those tests.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
@@ -49,6 +50,8 @@ pub enum StoreError {
     Poisoned,
     #[error("monotonic row-log sequence exhausted")]
     SequenceExhausted,
+    #[error("row-store directory is already open for writing in another process")]
+    Busy,
     #[error("transaction conflict: expected committed LSN {expected}, observed {actual}")]
     Conflict { expected: u64, actual: u64 },
 }
@@ -76,6 +79,9 @@ struct Inner {
 #[derive(Debug)]
 pub struct RowStore {
     root: PathBuf,
+    // An advisory OS-level exclusive lock. The file is intentionally retained
+    // when the process exits; the kernel releases the lock automatically.
+    _lock: File,
     inner: Mutex<Inner>,
 }
 
@@ -83,6 +89,16 @@ impl RowStore {
     pub fn open(root: impl AsRef<Path>) -> StoreResult<Self> {
         let root = root.as_ref();
         fs::create_dir_all(root)?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(root.join("rows.lock"))?;
+        match lock.try_lock() {
+            Ok(()) => {},
+            Err(TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(TryLockError::Error(error)) => return Err(StoreError::Io(error)),
+        }
         let (checkpoint_lsn, mut rows) = read_latest_snapshot(root)?;
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
@@ -102,6 +118,7 @@ impl RowStore {
         wal.seek(SeekFrom::End(0))?;
         Ok(Self {
             root: root.to_owned(),
+            _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
                 wal,
