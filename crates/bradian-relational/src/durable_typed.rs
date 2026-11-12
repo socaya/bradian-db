@@ -191,7 +191,7 @@ fn map_mvcc(err: DurableMvccError) -> DomainError {
     }
 }
 
-/// Typed SQL-accessible transaction over G20 versions and G15 physical keys.
+/// Typed SQL-accessible transaction over G22 durable versions and G15 typed key encoding.
 pub struct DurableTypedTransaction<'a> {
     owner: &'a DurableTypedStore,
     inner: DurableMvccTransaction<'a>,
@@ -207,7 +207,7 @@ impl DurableTypedTransaction<'_> {
     pub fn get(&self, id: TableId, key: &[Value]) -> Result<Option<Vec<Value>>, DomainError> {
         let def = self.definition(id)?;
         let physical_key = encode_key(&def.table, &def.pk_positions, key)?;
-        self.inner.get(&physical_key).map(|bytes| {
+        self.inner.get(&physical_key).map_err(map_mvcc)?.map(|bytes| {
             let row = decode_row(&def.table, &bytes)?;
             if key_from_row(def, &row)? != physical_key {
                 return Err(DomainError::Corruption(
