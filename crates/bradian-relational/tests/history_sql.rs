@@ -226,3 +226,81 @@ fn as_of_before_first_import_visibility_returns_no_rows() {
         Ok(())
     }).unwrap();
 }
+
+
+#[test]
+fn historical_sql_obeys_durable_retention_floor_after_reopen() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    let (_dir, _source, history) = migrated();
+    let old_commit;
+    let new_commit;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        old_commit = db.last_lsn();
+        db.with_session(|s| {
+            s.execute("BEGIN")?;
+            s.execute("UPDATE bank.public.accounts SET balance=600 WHERE id=1")?;
+            s.execute("COMMIT")?;
+            Ok(())
+        }).unwrap();
+        new_commit = db.last_lsn();
+    }
+    {
+        // Only the dedicated G22 owner may prune its versioned domain,
+        // and all SQL owners must first release the exclusive RowStore lock.
+        let durable = DurableMvccStore::open(history.join("history-domain")).unwrap();
+        durable.prune_through(new_commit).unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        assert!(s.execute(&format!(
+            "SELECT balance FROM bank.public.accounts AS OF {old_commit} WHERE id=1"
+        )).is_err());
+        assert!(!s.in_transaction());
+        s.execute("BEGIN")?;
+        assert_eq!(s.execute(&format!(
+            "SELECT balance FROM bank.public.accounts AS OF {new_commit} WHERE id=1"
+        ))?, SqlResultSet::Rows {
+            columns: vec!["balance".into()],
+            rows: vec![vec![Value::Int64(600)]],
+        });
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn lifecycle_managed_source_requires_separate_verified_conversion() {
+    use bradian_relational::lifecycle::CatalogLifecycle;
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    seed(&source);
+    {
+        let owner = CatalogLifecycle::open(&source).unwrap();
+        assert_eq!(owner.reconcile().unwrap().len(), 2);
+    }
+    let destination = dir.path().join("refused");
+    assert!(matches!(
+        migrate_shared_to_history(&source, &destination),
+        Err(HistoryMigrationError::Invalid(_))
+    ));
+    assert!(!destination.exists());
+}
+
+#[test]
+fn historical_sql_rejects_malformed_lsn_values_and_abort_is_atomic() {
+    let (_dir, _source, history) = migrated();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let before = db.last_lsn();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE bank.public.accounts SET balance=111 WHERE id=1")?;
+        assert!(s.execute("SELECT balance FROM bank.public.accounts AS OF -1 WHERE id=1").is_err());
+        assert!(!s.in_transaction());
+        assert!(s.execute("COMMIT").is_err());
+        s.execute("BEGIN")?;
+        assert!(s.execute("SELECT balance FROM bank.public.accounts AS OF 1.5 WHERE id=1").is_err());
+        Ok(())
+    }).unwrap();
+    assert_eq!(db.last_lsn(), before);
+}
