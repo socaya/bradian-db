@@ -368,6 +368,11 @@ pub struct SqlEngine {
 
 impl SqlEngine {
     pub fn open(root: impl AsRef<Path>) -> SqlResult<Self> {
+        if root.as_ref().join("history-domain").exists() {
+            return Err(SqlError::Unsupported(
+                "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
+            ));
+        }
         std::fs::create_dir_all(root.as_ref())?;
         std::fs::create_dir_all(root.as_ref().join("tables"))?;
         let catalog = PersistentCatalog::open(root.as_ref().join("catalog"))?;
