@@ -153,3 +153,58 @@ fn absent_snapshot_cannot_be_used_as_an_index_recovery_source() {
     assert!(matches!(store.verify_checkpoint_index(), Err(StoreError::Corruption(_))));
     assert!(matches!(store.rebuild_missing_checkpoint_index(), Err(StoreError::Corruption(_))));
 }
+
+
+#[test]
+fn integrity_audit_detects_valid_crc_with_wrong_physical_row_pointer() {
+    use bradian_relational::page::{Page, PAGE_SIZE};
+
+    let dir = tempdir().unwrap();
+    {
+        let store = RowStore::open(dir.path()).unwrap();
+        store.put(b"first", b"one").unwrap();
+        store.put(b"second", b"two").unwrap();
+        store.checkpoint().unwrap();
+    }
+    let path = dir.path().join("index-2.bri");
+    let mut bytes = fs::read(&path).unwrap();
+    let leaf_offset = PAGE_SIZE;
+    let page = Page::decode(&bytes[leaf_offset..leaf_offset + PAGE_SIZE]).unwrap();
+    let mut wrong = page;
+    // Leaf node header is 11 bytes. An entry starts with a u16 key length,
+    // then the u64 physical snapshot page ID. The first key's page ID is at
+    // payload byte 13. Change it to 2 and recompute a VALID BRPG checksum.
+    wrong.payload[13..21].copy_from_slice(&2_u64.to_le_bytes());
+    let reencoded = wrong.encode().unwrap();
+    bytes[leaf_offset..leaf_offset + PAGE_SIZE].copy_from_slice(&reencoded);
+    fs::write(&path, bytes).unwrap();
+
+    let store = RowStore::open(dir.path()).unwrap();
+    // The index page itself has a valid CRC, but the pointer is not a valid
+    // representation of the authoritative row checkpoint.
+    assert!(store.verify_checkpoint_index().is_err());
+    assert_eq!(store.get(b"first"), Some(b"one".to_vec()));
+}
+
+#[test]
+fn missing_index_recovery_does_not_modify_snapshot_or_wal_bytes() {
+    let dir = tempdir().unwrap();
+    {
+        let store = RowStore::open(dir.path()).unwrap();
+        store.put(b"one", b"first").unwrap();
+        store.checkpoint().unwrap();
+        store.put(b"two", b"second").unwrap();
+    }
+    let snapshot = dir.path().join("snapshot-1.brp");
+    let wal = dir.path().join("rows.wal");
+    let expected_snapshot = fs::read(&snapshot).unwrap();
+    let expected_wal = fs::read(&wal).unwrap();
+    fs::remove_file(dir.path().join("index-1.bri")).unwrap();
+
+    let store = RowStore::open(dir.path()).unwrap();
+    assert_eq!(fs::read(&snapshot).unwrap(), expected_snapshot);
+    assert_eq!(fs::read(&wal).unwrap(), expected_wal);
+    assert_eq!(store.indexed_get(b"one").unwrap(), Some(b"first".to_vec()));
+    assert_eq!(store.indexed_get(b"two").unwrap(), Some(b"second".to_vec()));
+    assert_eq!(store.last_lsn(), 2);
+}
