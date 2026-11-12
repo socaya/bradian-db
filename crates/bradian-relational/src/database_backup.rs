@@ -11,10 +11,10 @@
 //! encrypted archives, or protection against noncooperating filesystem writers.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crc32fast::hash;
+use crc32fast::{hash, Hasher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -57,6 +57,9 @@ pub struct ComponentReceipt {
     pub checkpoint_lsn: u64,
     pub last_lsn: u64,
     pub rows: u64,
+    /// CRC32 over exactly the five G10 archive files (names and bytes).
+    /// Detects accidental substitution/damage, not malicious forgery.
+    pub archive_crc32: u32,
 }
 
 impl From<BackupReceipt> for ComponentReceipt {
@@ -65,6 +68,7 @@ impl From<BackupReceipt> for ComponentReceipt {
             checkpoint_lsn: receipt.checkpoint_lsn,
             last_lsn: receipt.last_lsn,
             rows: receipt.rows,
+            archive_crc32: 0,
         }
     }
 }
@@ -168,8 +172,46 @@ fn read_manifest(root: &Path) -> DatabaseBackupResult<DatabaseBackupReport> {
     Ok(envelope.payload.report)
 }
 
+/// Bind each component receipt to its exact backed-up bytes. Streaming
+/// verification avoids allocating whole snapshots and WALs in memory.
+fn archive_crc(root: &Path, receipt: ComponentReceipt) -> DatabaseBackupResult<u32> {
+    let files = [
+        "backup.info".to_owned(),
+        "checkpoint.current".to_owned(),
+        format!("snapshot-{}.brp", receipt.checkpoint_lsn),
+        format!("index-{}.bri", receipt.checkpoint_lsn),
+        "rows.wal".to_owned(),
+    ];
+    let mut checksum = Hasher::new();
+    for filename in files {
+        checksum.update(&(filename.len() as u32).to_le_bytes());
+        checksum.update(filename.as_bytes());
+        let mut file = File::open(root.join(&filename))?;
+        let mut chunk = [0_u8; 65536];
+        loop {
+            let n = file.read(&mut chunk)?;
+            if n == 0 { break; }
+            checksum.update(&chunk[..n]);
+        }
+    }
+    Ok(checksum.finalize())
+}
+
+fn verify_archive_crc(
+    root: &Path,
+    receipt: ComponentReceipt,
+) -> DatabaseBackupResult<()> {
+    if archive_crc(root, receipt)? != receipt.archive_crc32 {
+        return Err(DatabaseBackupError::Corruption(format!(
+            "component archive checksum differs: {}", root.display()
+        )));
+    }
+    Ok(())
+}
+
 fn receipt_matches(actual: BackupReceipt, expected: ComponentReceipt) -> bool {
-    ComponentReceipt::from(actual) == expected
+    actual.checkpoint_lsn == expected.checkpoint_lsn
+        && actual.last_lsn == expected.last_lsn && actual.rows == expected.rows
 }
 
 fn verify_reopened(
@@ -216,10 +258,16 @@ pub(crate) fn backup_database(
     let catalog_receipt = catalog.backup_catalog_to(staged.join(COMPONENTS[0]))?;
     let domain_receipt = domain.backup_to(staged.join(COMPONENTS[1]))?;
     let lifecycle_receipt = lifecycle.backup_to(staged.join(COMPONENTS[2]))?;
+    let mut catalog_point = ComponentReceipt::from(catalog_receipt);
+    let mut domain_point = ComponentReceipt::from(domain_receipt);
+    let mut lifecycle_point = ComponentReceipt::from(lifecycle_receipt);
+    catalog_point.archive_crc32 = archive_crc(&staged.join(COMPONENTS[0]), catalog_point)?;
+    domain_point.archive_crc32 = archive_crc(&staged.join(COMPONENTS[1]), domain_point)?;
+    lifecycle_point.archive_crc32 = archive_crc(&staged.join(COMPONENTS[2]), lifecycle_point)?;
     let report = DatabaseBackupReport {
-        catalog: catalog_receipt.into(),
-        domain: domain_receipt.into(),
-        lifecycle: lifecycle_receipt.into(),
+        catalog: catalog_point,
+        domain: domain_point,
+        lifecycle: lifecycle_point,
         active_tables: statuses.iter().map(|s| s.table_id.0).collect(),
     };
     write_manifest(&staged, &report)?;
@@ -257,6 +305,13 @@ pub fn restore_database(
         return Err(DatabaseBackupError::Invalid("backup is not a directory".into()));
     }
     let report = read_manifest(&backup)?;
+    for (component, expected) in [
+        (COMPONENTS[0], report.catalog),
+        (COMPONENTS[1], report.domain),
+        (COMPONENTS[2], report.lifecycle),
+    ] {
+        verify_archive_crc(&backup.join(component), expected)?;
+    }
     let (destination, staged) = canonical_new_destination(destination.as_ref(), &backup)?;
     fs::create_dir(&staged)?;
     for (component, expected) in [
