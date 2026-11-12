@@ -34,6 +34,7 @@ This directory contains the engineering specifications, architectural decisions,
 20. **[Legacy SQL migration ADR](adr/0022-verified-legacy-sql-migration.md)** — exclusive source locks, verified offline import and atomic new-destination cutover.
 21. **[Catalog/domain lifecycle ADR](adr/0023-catalog-domain-lifecycle-reconciliation.md)** — WAL-backed Pending/Active table provisioning and restart reconciliation.
 22. **[Database-wide backup ADR](adr/0024-database-wide-consistent-backup.md)** — consistent triple-WAL source locking, bound component receipts and staged verified restore.
+23. **[MVCC foundation ADR](adr/0025-mvcc-row-version-foundation.md)** — pinned in-memory row versions, per-key first-committer-wins and WAL recovery of the latest state.
 
 ## Current milestone records
 
@@ -58,7 +59,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G17](gates/BRD-G17-verified-legacy-migration.md) | Verified offline copy of legacy table data into shared-WAL SQL root | Source/tests committed; manual checks outstanding |
 | [BRD-G18](gates/BRD-G18-catalog-domain-lifecycle.md) | Recoverable table provisioning, matching catalog/domain schema pins | Source/tests committed; manual checks outstanding |
 | [BRD-G19](gates/BRD-G19-database-wide-backup.md) | Coherent local catalog/domain/lifecycle backup and verified new-root restore | Source/tests committed; manual checks outstanding |
-| Future gates | Atomic multi-store DDL, incremental/PITR/remote backup, MVCC, mutable physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
+| [BRD-G20](gates/BRD-G20-mvcc-foundation.md) | Opt-in WAL-backed row-level MVCC, pinned readers and version GC | Source/tests committed; manual checks outstanding |
+| Future gates | SQL-integrated/persistent MVCC, atomic multi-store DDL, remote/PITR backup, mutable physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
