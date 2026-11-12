@@ -10,7 +10,7 @@
 //! than silently accepting rows that might violate them. The table schema is
 //! pinned to its storage directory by a durable metadata record.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,31 @@ impl TableStore {
             }
         }
         Ok(Self { table, storage, pk_positions })
+    }
+
+    /// Start a single-table optimistic transaction with a consistent row
+    /// snapshot. No locks are held across application work, and rollback
+    /// never writes to disk. Commit uses one synchronized BRWL batch.
+    pub fn begin_transaction(&self) -> TableResult<TableTransaction<'_>> {
+        let (base_lsn, records) = self.storage.snapshot_with_lsn();
+        let mut snapshot = BTreeMap::new();
+        for (key, bytes) in records {
+            if key.as_slice() == META_KEY { continue; }
+            if !key.starts_with(KEY_MAGIC) {
+                return Err(TableError::Corruption("unexpected key namespace in table storage".into()));
+            }
+            let row = decode_row(&self.table, &bytes)?;
+            if self.key_from_row(&row)? != key {
+                return Err(TableError::Corruption("stored key does not match row primary key".into()));
+            }
+            snapshot.insert(key, row);
+        }
+        Ok(TableTransaction {
+            table: self,
+            base_lsn,
+            snapshot,
+            changes: BTreeMap::new(),
+        })
     }
 
     pub fn table(&self) -> &Table { &self.table }
@@ -372,4 +397,119 @@ fn encode_key(table: &Table, pk_positions: &[usize], pk: &[Value]) -> TableResul
         return Err(TableError::Value("encoded primary key exceeds 512-byte storage limit".into()));
     }
     Ok(out)
+}
+
+
+/// One optimistic, snapshot-based, single-table transaction.
+///
+/// Every mutation is staged in memory; a successful commit serializes all
+/// changed keys into exactly one CRC-protected, fsynced BRWL batch frame.
+/// The global LSN compare-and-swap rejects concurrent writes to the same
+/// RowStore, including unrelated keys. This conservative validation rules
+/// out write skew within a single RowStore, but is not multi-table MVCC.
+pub struct TableTransaction<'a> {
+    table: &'a TableStore,
+    base_lsn: u64,
+    snapshot: BTreeMap<Vec<u8>, Vec<Value>>,
+    changes: BTreeMap<Vec<u8>, Option<Vec<Value>>>,
+}
+
+impl TableTransaction<'_> {
+    pub fn start_lsn(&self) -> u64 { self.base_lsn }
+
+    /// Return a row as observed by this transaction, including its own
+    /// staged writes, independent of later external commits.
+    pub fn get(&self, primary_key: &[Value]) -> TableResult<Option<Vec<Value>>> {
+        let key = encode_key(&self.table.table, &self.table.pk_positions, primary_key)?;
+        Ok(match self.changes.get(&key) {
+            Some(value) => value.clone(),
+            None => self.snapshot.get(&key).cloned(),
+        })
+    }
+
+    /// Return ordered rows as of the initial snapshot plus staged mutations.
+    pub fn scan(&self) -> Vec<Vec<Value>> {
+        let mut rows = self.snapshot.clone();
+        for (key, value) in &self.changes {
+            match value {
+                Some(value) => { rows.insert(key.clone(), value.clone()); }
+                None => { rows.remove(key); }
+            }
+        }
+        rows.into_values().collect()
+    }
+
+    pub fn insert(&mut self, row: &[Value]) -> TableResult<()> {
+        let bytes = encode_row(&self.table.table, row)?;
+        let key = self.table.key_from_row(row)?;
+        if bytes.len() > 3546 {
+            return Err(TableError::Value("encoded row exceeds inline storage capacity".into()));
+        }
+        if self.visible(&key).is_some() {
+            return Err(TableError::DuplicateKey);
+        }
+        self.changes.insert(key, Some(row.to_vec()));
+        Ok(())
+    }
+
+    pub fn replace(&mut self, row: &[Value]) -> TableResult<()> {
+        let bytes = encode_row(&self.table.table, row)?;
+        let key = self.table.key_from_row(row)?;
+        if bytes.len() > 3546 {
+            return Err(TableError::Value("encoded row exceeds inline storage capacity".into()));
+        }
+        if self.visible(&key).is_none() {
+            return Err(TableError::NotFound);
+        }
+        self.changes.insert(key, Some(row.to_vec()));
+        Ok(())
+    }
+
+    pub fn delete(&mut self, primary_key: &[Value]) -> TableResult<()> {
+        let key = encode_key(&self.table.table, &self.table.pk_positions, primary_key)?;
+        if self.visible(&key).is_none() {
+            return Err(TableError::NotFound);
+        }
+        self.changes.insert(key, None);
+        Ok(())
+    }
+
+    fn visible(&self, key: &[u8]) -> Option<&Vec<Value>> {
+        match self.changes.get(key) {
+            Some(Some(value)) => Some(value),
+            Some(None) => None,
+            None => self.snapshot.get(key),
+        }
+    }
+
+    /// Abort without appending any WAL records. Dropping an uncommitted
+    /// transaction has the same effect.
+    pub fn rollback(self) {}
+
+    /// Commit all staged final row states in one durable WAL frame.
+    ///
+    /// On stale LSN, the entire operation is rejected, including read-only
+    /// dependency conflicts; no partial rows are published.
+    pub fn commit(self) -> TableResult<u64> {
+        if self.changes.is_empty() {
+            // A read-only transaction has a stable owned snapshot and does
+            // not need a WAL record or write-conflict validation.
+            return Ok(self.base_lsn);
+        }
+        let mut operations = Vec::with_capacity(self.changes.len());
+        for (key, value) in self.changes {
+            match value {
+                Some(row) => {
+                    let bytes = encode_row(&self.table.table, &row)?;
+                    operations.push(RowMutation::Put { key, value: bytes });
+                }
+                None => operations.push(RowMutation::Delete { key }),
+            }
+        }
+        match self.table.storage.commit_batch(Some(self.base_lsn), &operations) {
+            Ok(lsn) => Ok(lsn),
+            Err(StoreError::Conflict { .. }) => Err(TableError::Conflict),
+            Err(err) => Err(TableError::Storage(err)),
+        }
+    }
 }
