@@ -32,7 +32,8 @@ const ROW_HEADER: usize = 6;
 const MAX_KEY: usize = 512;
 const MAX_VALUE: usize = MAX_PAYLOAD_SIZE - ROW_HEADER - MAX_KEY;
 const META_LENGTH: usize = 24;
-const MAX_WAL_BODY: usize = 8 + 1 + ROW_HEADER + MAX_KEY + MAX_VALUE;
+const MAX_WAL_BODY: usize = 1024 * 1024;
+const MAX_BATCH_OPS: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -48,9 +49,18 @@ pub enum StoreError {
     Poisoned,
     #[error("monotonic row-log sequence exhausted")]
     SequenceExhausted,
+    #[error("transaction conflict: expected committed LSN {expected}, observed {actual}")]
+    Conflict { expected: u64, actual: u64 },
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
+
+/// One operation within an atomically committed, checksummed WAL batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowMutation {
+    Put { key: Vec<u8>, value: Vec<u8> },
+    Delete { key: Vec<u8> },
+}
 
 #[derive(Debug)]
 struct Inner {
@@ -157,6 +167,71 @@ impl RowStore {
         Ok(next)
     }
 
+    /// Atomically commit several row mutations under one durable WAL frame.
+    ///
+    /// All validation occurs before the WAL is modified. Once the frame is
+    /// synchronized, every operation becomes visible under one in-process
+    /// mutex acquisition. An incomplete batch is never replayed. Optional
+    /// optimistic validation prevents commits based on an outdated global LSN.
+    ///
+    /// This is not MVCC or a general SQL transaction: it provides atomic
+    /// batch updates and serialized commit order for one local RowStore.
+    pub fn commit_batch(
+        &self,
+        expected_lsn: Option<u64>,
+        mutations: &[RowMutation],
+    ) -> StoreResult<u64> {
+        if mutations.is_empty() || mutations.len() > MAX_BATCH_OPS {
+            return Err(StoreError::InvalidRow("transaction needs 1..=256 operations"));
+        }
+        let mut size = 13_usize; // LSN + opcode + operation count
+        for mutation in mutations {
+            let (key, value) = match mutation {
+                RowMutation::Put { key, value } => {
+                    validate_row(key, value)?;
+                    (key.as_slice(), value.as_slice())
+                }
+                RowMutation::Delete { key } => {
+                    validate_key(key)?;
+                    (key.as_slice(), &[][..])
+                }
+            };
+            size = size.checked_add(7 + key.len() + value.len())
+                .ok_or(StoreError::InvalidRow("transaction WAL frame exceeds limit"))?;
+            if size > MAX_WAL_BODY {
+                return Err(StoreError::InvalidRow("transaction WAL frame exceeds limit"));
+            }
+        }
+
+        let mut inner = self.inner.lock();
+        if inner.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        if let Some(expected) = expected_lsn {
+            if expected != inner.lsn {
+                return Err(StoreError::Conflict { expected, actual: inner.lsn });
+            }
+        }
+        let next = inner.lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
+        let frame = encode_batch(next, mutations, size);
+        if let Err(error) = inner.wal.write_all(&frame).and_then(|_| inner.wal.sync_all()) {
+            inner.poisoned = true;
+            return Err(StoreError::Io(error));
+        }
+        for mutation in mutations {
+            match mutation {
+                RowMutation::Put { key, value } => {
+                    inner.rows.insert(key.clone(), value.clone());
+                }
+                RowMutation::Delete { key } => {
+                    inner.rows.remove(key);
+                }
+            }
+        }
+        inner.lsn = next;
+        Ok(next)
+    }
+
     /// Publish a complete checkpoint and then truncate the WAL.
     ///
     /// Failure before WAL truncation leaves the old WAL intact. A successfully
@@ -228,6 +303,15 @@ fn checksum(bytes: &[u8]) -> u32 {
     h.finalize()
 }
 
+fn encode_frame(body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(WAL_HEADER + body.len());
+    frame.extend_from_slice(WAL_MAGIC);
+    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&checksum(body).to_le_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
 fn encode_wal(lsn: u64, key: &[u8], value: Option<&[u8]>) -> Vec<u8> {
     let value_len = value.map_or(0, |v| v.len());
     let mut body = Vec::with_capacity(8 + 1 + ROW_HEADER + key.len() + value_len);
@@ -239,12 +323,74 @@ fn encode_wal(lsn: u64, key: &[u8], value: Option<&[u8]>) -> Vec<u8> {
     if let Some(value) = value {
         body.extend_from_slice(value);
     }
-    let mut frame = Vec::with_capacity(WAL_HEADER + body.len());
-    frame.extend_from_slice(WAL_MAGIC);
-    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    frame.extend_from_slice(&checksum(&body).to_le_bytes());
-    frame.extend_from_slice(&body);
-    frame
+    encode_frame(&body)
+}
+
+fn encode_batch(lsn: u64, mutations: &[RowMutation], size: usize) -> Vec<u8> {
+    let mut body = Vec::with_capacity(size);
+    body.extend_from_slice(&lsn.to_le_bytes());
+    body.push(3); // one CRC-protected atomic multi-operation commit
+    body.extend_from_slice(&(mutations.len() as u32).to_le_bytes());
+    for mutation in mutations {
+        let (op, key, value) = match mutation {
+            RowMutation::Put { key, value } => (1_u8, key.as_slice(), value.as_slice()),
+            RowMutation::Delete { key } => (2_u8, key.as_slice(), &[][..]),
+        };
+        body.push(op);
+        body.extend_from_slice(&(key.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        body.extend_from_slice(key);
+        body.extend_from_slice(value);
+    }
+    encode_frame(&body)
+}
+
+fn decode_mutations(body: &[u8], offset: u64) -> StoreResult<Vec<RowMutation>> {
+    let malformed = || StoreError::Corruption(format!("malformed WAL body at byte {offset}"));
+    if body.len() < 13 {
+        return Err(malformed());
+    }
+    let batch = body[8] == 3;
+    let count = if batch {
+        u32::from_le_bytes(body[9..13].try_into().unwrap()) as usize
+    } else {
+        1
+    };
+    if count == 0 || count > MAX_BATCH_OPS {
+        return Err(malformed());
+    }
+    let mut pos = if batch { 13_usize } else { 8_usize };
+    let mut operations = Vec::with_capacity(count);
+    for _ in 0..count {
+        if body.len().saturating_sub(pos) < 7 {
+            return Err(malformed());
+        }
+        let op = body[pos];
+        let key_len = u16::from_le_bytes(body[pos + 1..pos + 3].try_into().unwrap()) as usize;
+        let value_len = u32::from_le_bytes(body[pos + 3..pos + 7].try_into().unwrap()) as usize;
+        let record_size = 7_usize.checked_add(key_len)
+            .and_then(|n| n.checked_add(value_len))
+            .ok_or_else(malformed)?;
+        if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE
+            || record_size > body.len() - pos
+            || (op == 2 && value_len != 0)
+            || (op != 1 && op != 2)
+        {
+            return Err(malformed());
+        }
+        let key = body[pos + 7..pos + 7 + key_len].to_vec();
+        let value = body[pos + 7 + key_len..pos + record_size].to_vec();
+        operations.push(if op == 1 {
+            RowMutation::Put { key, value }
+        } else {
+            RowMutation::Delete { key }
+        });
+        pos += record_size;
+    }
+    if pos != body.len() {
+        return Err(malformed());
+    }
+    Ok(operations)
 }
 
 fn replay(
@@ -269,7 +415,7 @@ fn replay(
             return Err(StoreError::Corruption(format!("bad WAL magic at byte {start}")));
         }
         let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-        if !(15..=MAX_WAL_BODY).contains(&len) {
+        if !(13..=MAX_WAL_BODY).contains(&len) {
             return Err(StoreError::Corruption(format!("invalid WAL frame length at byte {start}")));
         }
         let crc = u32::from_le_bytes(header[8..12].try_into().unwrap());
@@ -288,25 +434,21 @@ fn replay(
             return Err(StoreError::Corruption(format!("WAL sequence discontinuity at byte {start}")));
         }
         previous_in_wal = Some(seq);
-        let operation = body[8];
-        let key_len = u16::from_le_bytes(body[9..11].try_into().unwrap()) as usize;
-        let value_len = u32::from_le_bytes(body[11..15].try_into().unwrap()) as usize;
-        if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE
-            || body.len() != 15 + key_len + value_len
-            || (operation == 2 && value_len != 0)
-            || (operation != 1 && operation != 2)
-        {
-            return Err(StoreError::Corruption(format!("malformed WAL body at byte {start}")));
-        }
-        let key = body[15..15 + key_len].to_vec();
+        // Decode and validate the entire batch before modifying any row.
+        let operations = decode_mutations(&body, start)?;
         if seq > checkpoint_lsn {
             if seq != lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)? {
                 return Err(StoreError::Corruption(format!("WAL gap after checkpoint at byte {start}")));
             }
-            if operation == 1 {
-                rows.insert(key, body[15 + key_len..].to_vec());
-            } else {
-                rows.remove(&key);
+            for operation in operations {
+                match operation {
+                    RowMutation::Put { key, value } => {
+                        rows.insert(key, value);
+                    }
+                    RowMutation::Delete { key } => {
+                        rows.remove(&key);
+                    }
+                }
             }
             lsn = seq;
         }
