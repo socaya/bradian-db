@@ -11,12 +11,13 @@
 //! search and corruption validation. All IDs and lengths are little-endian.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use thiserror::Error;
 
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
+use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 
 const MAGIC: &[u8; 4] = b"BRIX";
 const VERSION: u16 = 1;
@@ -38,6 +39,8 @@ pub enum IndexError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Page(#[from] PageError),
+    #[error(transparent)]
+    Cache(#[from] CacheError),
     #[error("B+tree index is corrupt: {0}")]
     Corruption(&'static str),
     #[error("invalid B+tree index input: {0}")]
@@ -54,7 +57,7 @@ struct NodeDescriptor {
 
 #[derive(Debug)]
 pub struct DiskBTree {
-    file: File,
+    cache: PageCache,
     root: u64,
     pages: u64,
     entries: u64,
@@ -158,16 +161,18 @@ impl DiskBTree {
     }
 
     pub fn open(path: &Path, expected_lsn: u64) -> IndexResult<Self> {
-        let mut file = File::open(path)?;
-        let len = file.metadata()?.len();
-        if len < PAGE_SIZE as u64 || len % PAGE_SIZE as u64 != 0 {
-            return Err(IndexError::Corruption("invalid index file length"));
-        }
-        let mut bytes = [0_u8; PAGE_SIZE];
-        file.read_exact(&mut bytes)?;
-        let meta = Page::decode(&bytes)?;
-        if meta.kind != PageKind::Metadata || meta.page_id != 0 ||
-            meta.lsn != expected_lsn || meta.payload.len() != META_SIZE ||
+        Self::open_with_capacity(path, expected_lsn, 128)
+    }
+
+    /// Open an immutable index with an explicit maximum resident page count.
+    pub fn open_with_capacity(
+        path: &Path,
+        expected_lsn: u64,
+        capacity: usize,
+    ) -> IndexResult<Self> {
+        let mut cache = PageCache::open(path, expected_lsn, capacity)?;
+        let meta = cache.read(0)?;
+        if meta.kind != PageKind::Metadata || meta.payload.len() != META_SIZE ||
             &meta.payload[..4] != MAGIC ||
             u16::from_le_bytes(meta.payload[4..6].try_into().unwrap()) != VERSION
         {
@@ -176,31 +181,25 @@ impl DiskBTree {
         let root = u64::from_le_bytes(meta.payload[6..14].try_into().unwrap());
         let pages = u64::from_le_bytes(meta.payload[14..22].try_into().unwrap());
         let entries = u64::from_le_bytes(meta.payload[22..30].try_into().unwrap());
-        if pages.checked_add(1).and_then(|n| n.checked_mul(PAGE_SIZE as u64)) != Some(len)
+        if pages.checked_add(1) != Some(cache.page_count())
             || (root == 0) != (entries == 0) || root > pages
             || (entries == 0 && pages != 0)
         {
             return Err(IndexError::Corruption("index metadata and file layout disagree"));
         }
-        Ok(Self { file, root, pages, entries, lsn: expected_lsn })
+        Ok(Self { cache, root, pages, entries, lsn: expected_lsn })
     }
 
     pub fn len(&self) -> u64 { self.entries }
     pub fn is_empty(&self) -> bool { self.entries == 0 }
+    pub fn cache_stats(&self) -> CacheStats { self.cache.stats() }
 
     fn page(&mut self, id: u64) -> IndexResult<Page> {
         if id == 0 || id > self.pages {
             return Err(IndexError::Corruption("page reference outside index file"));
         }
-        let offset = id.checked_mul(PAGE_SIZE as u64)
-            .ok_or(IndexError::Corruption("page offset overflow"))?;
-        self.file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = [0_u8; PAGE_SIZE];
-        self.file.read_exact(&mut bytes)?;
-        let page = Page::decode(&bytes)?;
-        if page.kind != PageKind::Index || page.page_id != id || page.lsn != self.lsn ||
-            page.payload.len() < NODE_HEADER
-        {
+        let page = self.cache.read(id)?;
+        if page.kind != PageKind::Index || page.payload.len() < NODE_HEADER {
             return Err(IndexError::Corruption("invalid index page header"));
         }
         Ok(page)
