@@ -16,13 +16,7 @@ use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
     coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
 };
-use crate::transaction_domain::{DomainError, MultiTableStore, MultiTableTransaction};
-
-impl From<DomainError> for SqlError {
-    fn from(error: DomainError) -> Self {
-        SqlError::Unsupported(format!("shared transaction domain: {error}"))
-    }
-}
+use crate::transaction_domain::{MultiTableStore, MultiTableTransaction};
 
 /// SQL-enabled shared transaction domain. The durable catalog and the domain
 /// own separate locks and WALs: existing metadata is resolved but not changed
