@@ -47,6 +47,16 @@ impl MvccSqlEngine {
                 "G21 requires an existing provisioned G15/G18 database".into(),
             ));
         }
+        // A G18 lifecycle journal may contain an interrupted Pending pin.
+        // Recover/reconcile it before taking ownership of the catalog and
+        // domain for MVCC. The temporary coordinator releases every file
+        // lock before this engine opens its own exclusive RowStore.
+        if root.join("lifecycle").exists() {
+            crate::lifecycle::CatalogLifecycle::open(root)
+                .map_err(|e| SqlError::Unsupported(format!(
+                    "G18 lifecycle reconciliation failed: {e}"
+                )))?;
+        }
         let catalog = PersistentCatalog::open(root.join("catalog"))?;
         let definitions = catalog.snapshot().tables()
             .map(|table| (table.id, table.clone()))
