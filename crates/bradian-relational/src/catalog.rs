@@ -21,7 +21,7 @@ pub enum CatalogError {
 /// An isolated relational schema catalog. Mutation methods validate everything
 /// before publishing new objects. Concurrency, persistence and transactional DDL
 /// are not provided by this first milestone.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Catalog {
     next_id: u64,
     databases: BTreeMap<DatabaseId, Database>,
