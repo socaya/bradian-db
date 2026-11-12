@@ -223,3 +223,116 @@ fn transaction_api_refuses_unqualified_and_unknown_tables() {
     assert!(engine.transact_table("invoices", callback).is_err());
     assert!(engine.transact_table("billing.public.absent", |_| Ok(())).is_err());
 }
+
+
+#[test]
+fn scoped_begin_commit_stages_sql_until_one_durable_wal_commit() {
+    let base = tempdir().unwrap();
+    {
+        let engine = SqlEngine::open(base.path()).unwrap();
+        setup(&engine);
+        engine.with_sql_session("billing.public.invoices", |session| {
+            assert!(!session.in_transaction());
+            assert_eq!(session.execute("BEGIN TRANSACTION;")?,
+                SqlResultSet::Command { affected: 0 });
+            session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(11,'Alice',10.00,false,NULL)")?;
+            session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(12,'Bob',20.00,false,NULL)")?;
+            assert_eq!(
+                session.execute("SELECT id,customer FROM billing.public.invoices")?,
+                SqlResultSet::Rows {
+                    columns: vec!["id".into(), "customer".into()],
+                    rows: vec![
+                        vec![Value::Int64(11), Value::String("Alice".into())],
+                        vec![Value::Int64(12), Value::String("Bob".into())],
+                    ],
+                },
+            );
+            session.execute("UPDATE billing.public.invoices SET amount=12.50 WHERE id=11")?;
+            session.execute("DELETE FROM billing.public.invoices WHERE id=12")?;
+            assert_eq!(session.execute("COMMIT")?,
+                SqlResultSet::Command { affected: 0 });
+            assert!(session.last_commit_lsn().is_some());
+            assert!(!session.in_transaction());
+            Ok(())
+        }).unwrap();
+        assert_eq!(engine.execute("SELECT id,amount FROM billing.public.invoices").unwrap(),
+            SqlResultSet::Rows {
+                columns: vec!["id".into(), "amount".into()],
+                rows: vec![vec![Value::Int64(11), Value::Decimal(1250)]],
+            });
+    }
+    let reopened = SqlEngine::open(base.path()).unwrap();
+    assert_eq!(reopened.execute("SELECT customer FROM billing.public.invoices WHERE id=11").unwrap(),
+        SqlResultSet::Rows {
+            columns: vec!["customer".into()],
+            rows: vec![vec![Value::String("Alice".into())]],
+        });
+}
+
+#[test]
+fn scoped_sql_rollback_and_implicit_abort_do_not_publish_rows() {
+    let base = tempdir().unwrap();
+    let engine = SqlEngine::open(base.path()).unwrap();
+    setup(&engine);
+    engine.with_sql_session("billing.public.invoices", |session| {
+        session.execute("BEGIN")?;
+        session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(1,'Rollback',1.00,false,NULL)")?;
+        session.execute("ROLLBACK")?;
+        session.execute("BEGIN")?;
+        session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(2,'Uncommitted',2.00,false,NULL)")?;
+        Ok(()) // drop open session, implicit rollback
+    }).unwrap();
+    assert_eq!(engine.execute("SELECT * FROM billing.public.invoices").unwrap(),
+        SqlResultSet::Rows { columns: vec!["id".into(),"customer".into(),"amount".into(),"settled".into(),"note".into()], rows: vec![] });
+}
+
+#[test]
+fn scoped_sql_statement_error_aborts_all_prior_staged_changes() {
+    let base = tempdir().unwrap();
+    let engine = SqlEngine::open(base.path()).unwrap();
+    setup(&engine);
+    engine.with_sql_session("billing.public.invoices", |session| {
+        session.execute("BEGIN")?;
+        session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(1,'Valid',1.00,false,NULL)")?;
+        assert!(session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(2,'Invalid',1.000,false,NULL)").is_err());
+        assert!(!session.in_transaction());
+        assert!(session.execute("COMMIT").is_err());
+        session.execute("BEGIN")?;
+        session.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(3,'AfterAbort',3.00,true,NULL)")?;
+        session.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(engine.execute("SELECT id FROM billing.public.invoices").unwrap(),
+        SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![vec![Value::Int64(3)]] });
+}
+
+#[test]
+fn scoped_sql_session_rejects_nested_begin_cross_table_and_dml_without_begin() {
+    let base = tempdir().unwrap();
+    let engine = SqlEngine::open(base.path()).unwrap();
+    setup(&engine);
+    engine.with_sql_session("billing.public.invoices", |session| {
+        assert!(session.execute("SELECT * FROM billing.public.invoices").is_err());
+        session.execute("BEGIN")?;
+        assert!(session.execute("BEGIN").is_err());
+        assert!(!session.in_transaction());
+        session.execute("BEGIN")?;
+        assert!(session.execute("INSERT INTO billing.public.other(id) VALUES(1)").is_err());
+        assert!(!session.in_transaction());
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn session_commit_without_begin_and_unsupported_ddl_are_rejected() {
+    let base = tempdir().unwrap();
+    let engine = SqlEngine::open(base.path()).unwrap();
+    setup(&engine);
+    engine.with_sql_session("billing.public.invoices", |session| {
+        assert!(session.execute("COMMIT").is_err());
+        session.execute("BEGIN")?;
+        assert!(session.execute("CREATE TABLE billing.public.other(id BIGINT NOT NULL,PRIMARY KEY(id))").is_err());
+        assert!(!session.in_transaction());
+        Ok(())
+    }).unwrap();
+}
