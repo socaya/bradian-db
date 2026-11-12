@@ -73,6 +73,10 @@ reader.rollback();
 
 [G21](0026-typed-sql-mvcc-integration.md) adds a separate `MvccSqlEngine` using durable G11 catalog identities and validated G15 table schema pins with G20 per-key MVCC snapshots. It reuses the G16 parser and permits overlapping in-process SQL sessions without changing G16's legacy conflict semantics. G21 does not persist old versions or provide serializable isolation.
 
+## Durable history extension (ADR 0027)
+
+[G22](0027-durable-mvcc-history.md) introduces a *separate*, opt-in `BRADIAN-DURABLE-MVCC-V1` version-key storage format that persists historical values and tombstones in the same synchronized G3 WAL batch. Historical point reads can survive restart within a durable retention floor. This does not alter G20's in-memory history behavior or silently migrate G21 SQL.
+
 ## Evidence and qualification
 
 `crates/bradian-relational/src/mvcc.rs` implements pinned version chains, durable commits, conflict detection, read-your-writes and reclamation.
