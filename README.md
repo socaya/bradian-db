@@ -15,7 +15,7 @@ Bradian Database Systems is being engineered as a native, general-purpose databa
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree with WAL-backed mutable delta and bounded page cache; no SQL/MVCC |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree, native SQL subset and single-table atomic transactions; no multi-table SQL/MVCC |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
@@ -52,6 +52,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Consistent backup/restore gate](docs/gates/BRD-G10-consistent-backup-restore.md) | Captures one synchronized checkpoint+WAL state and restores into a verified new database directory |
 | [Persistent relational catalog gate](docs/gates/BRD-G11-persistent-catalog.md) | Stable database/schema/table identities, replay-validated DDL, and metadata-only backup |
 | [Native SQL execution gate](docs/gates/BRD-G12-native-sql.md) | Bounded CREATE, INSERT, SELECT, UPDATE and DELETE using persistent catalog and typed tables |
+| [Single-table transactions gate](docs/gates/BRD-G13-single-table-transactions.md) | Snapshot-based staging, rollback, optimistic conflicts, one durable WAL batch per commit |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
