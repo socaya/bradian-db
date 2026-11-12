@@ -30,6 +30,7 @@ use thiserror::Error;
 
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
+use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 
 const WAL_MAGIC: &[u8; 4] = b"BRWL";
 const WAL_HEADER: usize = 12;
@@ -48,6 +49,8 @@ pub enum StoreError {
     Page(#[from] PageError),
     #[error(transparent)]
     Index(#[from] IndexError),
+    #[error(transparent)]
+    Cache(#[from] CacheError),
     #[error("invalid row: {0}")]
     InvalidRow(&'static str),
     #[error("corrupt row store: {0}")]
@@ -77,6 +80,8 @@ struct Inner {
     wal: File,
     lsn: u64,
     checkpoint_lsn: u64,
+    index: Option<DiskBTree>,
+    snapshot_pages: Option<PageCache>,
     poisoned: bool,
 }
 
@@ -130,6 +135,8 @@ impl RowStore {
                 wal,
                 lsn,
                 checkpoint_lsn,
+                index: None,
+                snapshot_pages: None,
                 poisoned: false,
             }),
         })
@@ -262,52 +269,83 @@ impl RowStore {
     /// This method exposes checksum/index corruption as an error rather than
     /// silently treating a damaged page as an absent row.
     pub fn indexed_get(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
+        let expected = inner.rows.get(key).cloned();
         if inner.lsn != inner.checkpoint_lsn {
-            return Ok(inner.rows.get(key).cloned());
+            return Ok(expected);
         }
-        let index_path = self.root.join(format!("index-{}.bri", inner.lsn));
+        let lsn = inner.lsn;
+        let index_path = self.root.join(format!("index-{lsn}.bri"));
         if !index_path.exists() {
-            return Ok(inner.rows.get(key).cloned()); // legacy checkpoint
+            return Ok(expected); // legacy or partially published checkpoint
         }
-        let mut index = DiskBTree::open(&index_path, inner.lsn)?;
-        let result = match index.get(key)? {
-            Some(pointer) => Some(read_indexed_record(
-                &self.root.join(format!("snapshot-{}.brp", inner.lsn)),
-                inner.lsn, key, pointer,
-            )?),
-            None => None,
+        if inner.index.is_none() {
+            inner.index = Some(DiskBTree::open(&index_path, lsn)?);
+        }
+        let pointer = inner.index.as_mut().expect("opened index").get(key)?;
+        let result = if let Some(pointer) = pointer {
+            if inner.snapshot_pages.is_none() {
+                let path = self.root.join(format!("snapshot-{lsn}.brp"));
+                inner.snapshot_pages = Some(PageCache::open(&path, lsn, 128)?);
+            }
+            Some(read_indexed_record(
+                inner.snapshot_pages.as_mut().expect("opened snapshot"),
+                key, pointer,
+            )?)
+        } else {
+            None
         };
-        if result != inner.rows.get(key).cloned() {
-            return Err(StoreError::Corruption("index query differs from committed row map".into()));
+        if result != expected {
+            return Err(StoreError::Corruption("indexed result differs from committed row map".into()));
         }
         Ok(result)
     }
 
-    /// Inclusive start, exclusive end; uses an on-disk B+tree when the current
-    /// generation is fully checkpointed, otherwise the committed in-memory map.
+    /// Inclusive start and exclusive end. Physical index and snapshot pages are
+    /// retained in bounded caches across calls for the same checkpoint LSN.
     pub fn indexed_range(&self, start: &[u8], end: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
         if start >= end { return Ok(Vec::new()); }
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         let expected = inner.rows.range(start.to_vec()..end.to_vec())
             .map(|(k,v)| (k.clone(),v.clone())).collect::<Vec<_>>();
         if inner.lsn != inner.checkpoint_lsn {
             return Ok(expected);
         }
-        let index_path = self.root.join(format!("index-{}.bri", inner.lsn));
-        if !index_path.exists() { return Ok(expected); }
-        let mut index = DiskBTree::open(&index_path, inner.lsn)?;
-        let entries = index.range(start, end)?;
-        let snapshot_path = self.root.join(format!("snapshot-{}.brp", inner.lsn));
+        let lsn = inner.lsn;
+        let index_path = self.root.join(format!("index-{lsn}.bri"));
+        if !index_path.exists() {
+            return Ok(expected);
+        }
+        if inner.index.is_none() {
+            inner.index = Some(DiskBTree::open(&index_path, lsn)?);
+        }
+        let entries = inner.index.as_mut().expect("opened index").range(start, end)?;
+        if !entries.is_empty() && inner.snapshot_pages.is_none() {
+            let path = self.root.join(format!("snapshot-{lsn}.brp"));
+            inner.snapshot_pages = Some(PageCache::open(&path, lsn, 128)?);
+        }
         let mut result = Vec::with_capacity(entries.len());
         for (key, pointer) in entries {
-            let value = read_indexed_record(&snapshot_path, inner.lsn, &key, pointer)?;
+            let value = read_indexed_record(
+                inner.snapshot_pages.as_mut().expect("nonempty indexed range"),
+                &key, pointer,
+            )?;
             result.push((key,value));
         }
         if result != expected {
             return Err(StoreError::Corruption("indexed range differs from committed row map".into()));
         }
         Ok(result)
+    }
+
+    /// Cache occupancy and hit/miss counters for the current physical generation.
+    /// Caches are invalidated when a new checkpoint generation is published.
+    pub fn index_cache_stats(&self) -> Option<(CacheStats, Option<CacheStats>)> {
+        let inner = self.inner.lock();
+        inner.index.as_ref().map(|idx| (
+            idx.cache_stats(),
+            inner.snapshot_pages.as_ref().map(PageCache::stats),
+        ))
     }
 
     /// Publish a complete checkpoint and then truncate the WAL.
@@ -365,6 +403,8 @@ impl RowStore {
             return Err(StoreError::Io(error));
         }
         inner.checkpoint_lsn = lsn;
+        inner.index = None;
+        inner.snapshot_pages = None;
         // Older checkpoints are no longer needed once the newest snapshot is
         // published and WAL truncation is complete. Cleanup is opportunistic.
         let _ = prune_snapshots(&self.root, lsn);
@@ -692,20 +732,13 @@ fn write_snapshot(
 
 
 fn read_indexed_record(
-    path: &Path,
-    lsn: u64,
+    cache: &mut PageCache,
     expected_key: &[u8],
     pointer: RowPointer,
 ) -> StoreResult<Vec<u8>> {
-    let mut file = File::open(path)?;
-    let pos = pointer.page_id.checked_mul(PAGE_SIZE as u64)
-        .ok_or_else(|| StoreError::Corruption("indexed page offset overflow".into()))?;
-    file.seek(SeekFrom::Start(pos))?;
-    let mut bytes = [0_u8; PAGE_SIZE];
-    file.read_exact(&mut bytes)?;
-    let page = Page::decode(&bytes)?;
-    if page.kind != PageKind::Data || page.page_id != pointer.page_id || page.lsn != lsn {
-        return Err(StoreError::Corruption("index points to wrong snapshot page".into()));
+    let page = cache.read(pointer.page_id)?;
+    if page.kind != PageKind::Data {
+        return Err(StoreError::Corruption("index points to non-data checkpoint page".into()));
     }
     let offset = pointer.offset as usize;
     if offset > page.payload.len() || page.payload.len() - offset < ROW_HEADER {
