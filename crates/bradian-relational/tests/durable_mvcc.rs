@@ -136,7 +136,7 @@ fn retention_floor_is_durable_and_blocks_outdated_as_of_reads() {
         let mut tx = db.begin();
         tx.replace(b"k", b"third").unwrap();
         c = tx.commit().unwrap();
-        assert_eq!(db.prune_through(b).unwrap(), 0);
+        assert_eq!(db.prune_through(b).unwrap(), 1);
         assert!(matches!(
             db.read_as_of(b"k", a), Err(DurableMvccError::SnapshotUnavailable { .. })
         ));
