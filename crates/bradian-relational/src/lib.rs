@@ -30,6 +30,9 @@ pub mod mvcc;
 pub mod typed_mvcc;
 pub mod mvcc_sql;
 pub mod durable_mvcc;
+pub mod durable_typed;
+pub mod history_sql;
+pub mod history_migration;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
