@@ -8,14 +8,14 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks** with individually synchronized key/value mutations and atomic multi-key WAL batches and page checkpoints. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
+> **Development status — pre-release.** This repository currently contains an operational analytical-engine foundation, an in-memory relational schema catalog, a portable physical page codec, a **single-process WAL-backed persistent row store**, and **typed, schema-bound table CRUD with primary-key uniqueness checks**, synchronized WAL batches, page checkpoints, and a **disk-resident checkpoint B+tree** for indexed lookups and ranges. It does **not yet** provide production-grade general SQL, multi-operation ACID/MVCC transactions, a disk B+tree, distributed SQL, automatic sharding, or an independently qualified security stack. Product targets below are requirements, not claims of implemented functionality.
 
 ## Product architecture
 
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, page codec, durable row batches and typed primary-key table CRUD; no SQL/MVCC |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree index; no SQL/MVCC |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
@@ -44,6 +44,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Physical page gate](docs/gates/BRD-G2-page-format.md) | Portable page format and outstanding durability requirements |
 | [Atomic WAL row-store gate](docs/gates/BRD-G3-wal-row-store.md) | Local WAL-backed row operations and checkpoint recovery |
 | [Typed table gate](docs/gates/BRD-G4-typed-table-crud.md) | Persisted typed table CRUD, schema pinning and primary-key checks |
+| [Disk B+tree index gate](docs/gates/BRD-G5-checkpoint-btree.md) | Immutable on-disk B+tree, point lookup, range scans and WAL-aware routing |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
@@ -51,7 +52,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 ```text
 bradian-db/
 ├── crates/
-│   ├── bradian-relational/       # Generic catalog, WAL-backed rows, typed table CRUD
+│   ├── bradian-relational/       # Catalog, WAL-backed rows, typed tables, disk B+tree
 │   ├── dap-core/                 # Legacy core primitives
 │   ├── dap-storage/              # Existing .derc analytical segments, WAL and snapshots
 │   ├── dap-runtime/              # Analytical execution operators
