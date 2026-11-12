@@ -73,16 +73,19 @@ fn backup_preserves_checkpoint_plus_subsequent_wal_frames() {
     let store = RowStore::open(&root).unwrap();
     store.put(b"base", b"first").unwrap();
     store.checkpoint().unwrap();
-    // backup_to first checks whether checkpoint already exists, then copies WAL.
-    // The receipt must represent a recoverable state even when a newer write
-    // happens after this snapshot.
-    let report = store.backup_to(&backup).unwrap();
-    assert_eq!(report.checkpoint_lsn, report.last_lsn);
-    store.put(b"late", b"later").unwrap();
+    store.put(b"late", b"after-checkpoint").unwrap();
+    store.put(b"extra", b"also-in-WAL").unwrap();
+    let report = store.backup_current_generation(&backup).unwrap();
+    assert_eq!(report.checkpoint_lsn, 1);
+    assert_eq!(report.last_lsn, 3);
+    assert_eq!(report.rows, 3);
+    assert!(fs::metadata(backup.join("rows.wal")).unwrap().len() > 0);
     RowStore::restore_backup(&backup, &restored).unwrap();
     let recovered = RowStore::open(&restored).unwrap();
     assert_eq!(recovered.get(b"base"), Some(b"first".to_vec()));
-    assert_eq!(recovered.get(b"late"), None);
+    assert_eq!(recovered.get(b"late"), Some(b"after-checkpoint".to_vec()));
+    assert_eq!(recovered.get(b"extra"), Some(b"also-in-WAL".to_vec()));
+    assert_eq!(recovered.last_lsn(), 3);
 }
 
 #[test]
@@ -186,4 +189,38 @@ fn verified_backup_with_parallel_writers_contains_one_committed_state() {
     for i in 0..updated {
         assert_eq!(copy.get(format!("row-{i:03}").as_bytes()), Some(b"updated".to_vec()));
     }
+}
+
+#[test]
+fn corrupted_post_checkpoint_wal_is_rejected_during_restore() {
+    let base = tempdir().unwrap();
+    let db = base.path().join("db");
+    let backup = base.path().join("backup");
+    let store = RowStore::open(&db).unwrap();
+    store.put(b"base", b"checkpointed").unwrap();
+    store.checkpoint().unwrap();
+    store.put(b"after", b"wal-only").unwrap();
+    store.backup_current_generation(&backup).unwrap();
+
+    let path = backup.join("rows.wal");
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(path, bytes).unwrap();
+
+    let restored = base.path().join("restored");
+    assert!(RowStore::restore_backup(&backup, &restored).is_err());
+    assert!(!restored.exists());
+}
+
+#[test]
+fn current_generation_backup_requires_committed_checkpoint() {
+    let base = tempdir().unwrap();
+    let db = base.path().join("db");
+    let store = RowStore::open(&db).unwrap();
+    store.put(b"key", b"value").unwrap();
+    let dest = base.path().join("backup");
+    assert!(store.backup_current_generation(&dest).is_err());
+    assert!(!dest.exists());
+    assert_eq!(store.last_lsn(), 1);
 }
