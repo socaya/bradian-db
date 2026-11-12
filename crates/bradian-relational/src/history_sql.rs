@@ -1,6 +1,6 @@
 //! G23 opt-in SQL engine for G22 durable typed historical versions.
 //! SELECT ... FROM db.schema.table AS OF <WAL_LSN> [WHERE full_pk].
-//! History-domain format is separate from G15 history-domain storage.
+//! History-domain format is separate from G15 shared-domain storage.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,12 +35,12 @@ impl HistorySqlEngine {
         }
         // Opening history SQL must not create a new database implicitly.
         if !root.is_dir() { return Err(SqlError::Unsupported("history database root missing".into())); }
-        // G21 cannot provision missing tables. Opening a root that has
+        // G23 cannot provision missing tables. Opening a root that has
         // never been registered must fail rather than silently start a new
         // physical storage domain with zero data.
         if !root.join("catalog").is_dir() || !root.join("history-domain").is_dir() {
             return Err(SqlError::Unsupported(
-                "G21 requires an existing provisioned G15/G18 database".into(),
+                "G23 requires an existing provisioned durable-history database".into(),
             ));
         }
         // This dedicated history root has independently provisioned immutable
@@ -77,7 +77,7 @@ impl HistorySqlEngine {
         Ok(table.clone())
     }
 
-    /// Only schema pins already recorded by G15/G18 may be used.
+    /// Only independently provisioned durable schema pins may be used.
     pub fn registered_table_ids(&self) -> Vec<crate::TableId> {
         self.domain.active_tables()
     }
