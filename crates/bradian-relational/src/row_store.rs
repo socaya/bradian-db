@@ -31,6 +31,7 @@ use thiserror::Error;
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
+use crate::index_recovery::{self, IndexRecovery};
 
 const WAL_MAGIC: &[u8; 4] = b"BRWL";
 const WAL_HEADER: usize = 12;
@@ -114,6 +115,13 @@ impl RowStore {
             Err(TryLockError::Error(error)) => return Err(StoreError::Io(error)),
         }
         let (checkpoint_lsn, mut rows) = read_latest_snapshot(root)?;
+        // A committed checkpoint can outlive an interrupted derived-index
+        // publication. Rebuild only an absent index from verified pages.
+        if snapshot_path(root, checkpoint_lsn).exists()
+            && !index_recovery::index_path(root, checkpoint_lsn).exists()
+        {
+            index_recovery::rebuild_missing(root, checkpoint_lsn)?;
+        }
         let mut delta = BTreeMap::new();
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
@@ -379,6 +387,28 @@ impl RowStore {
             idx.cache_stats(),
             inner.snapshot_pages.as_ref().map(PageCache::stats),
         ))
+    }
+
+    /// Verify every checkpoint index pointer against immutable row pages.
+    /// Full verification is intentionally an explicit O(N log N) operation.
+    pub fn verify_checkpoint_index(&self) -> StoreResult<IndexRecovery> {
+        let inner = self.inner.lock();
+        if !snapshot_path(&self.root, inner.checkpoint_lsn).exists() {
+            return Err(StoreError::Corruption("no published checkpoint to verify".into()));
+        }
+        index_recovery::verify(&self.root, inner.checkpoint_lsn)
+    }
+
+    /// Reconstruct a missing derived index from the authoritative checkpoint.
+    /// Existing published indexes, even damaged ones, are never overwritten.
+    pub fn rebuild_missing_checkpoint_index(&self) -> StoreResult<IndexRecovery> {
+        let mut inner = self.inner.lock();
+        if !snapshot_path(&self.root, inner.checkpoint_lsn).exists() {
+            return Err(StoreError::Corruption("no published checkpoint to rebuild".into()));
+        }
+        inner.index = None;
+        inner.snapshot_pages = None;
+        index_recovery::rebuild_missing(&self.root, inner.checkpoint_lsn)
     }
 
     /// Publish a complete checkpoint and then truncate the WAL.
