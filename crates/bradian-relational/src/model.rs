@@ -49,7 +49,7 @@ pub struct ForeignKey {
     pub referenced_columns: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignKeySpec {
     pub name: String,
     pub columns: Vec<String>,
@@ -57,7 +57,7 @@ pub struct ForeignKeySpec {
     pub referenced_columns: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableSpec {
     pub name: String,
     pub columns: Vec<Column>,
