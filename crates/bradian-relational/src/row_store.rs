@@ -7,11 +7,14 @@
 //! checksummed frames; only an incomplete final frame is removed.
 //!
 //! IMPORTANT: this is a durable *single-process* storage slice, not SQL, MVCC,
-//! multi-operation transactions, a B+tree, or a multi-process lock manager.
+//! general SQL transactions, in-place mutable B+tree updates, or MVCC.
+//! A real immutable disk B+tree is rebuilt from checkpointed rows and is
+//! consulted for fully checkpointed point and range reads.
 //! An OS-level exclusive lock prevents another cooperating RowStore instance
 //! from opening the same directory while this instance remains alive.
 //!
-//! Files: rows.lock, rows.wal, snapshot-<lsn>.brp, snapshot-<lsn>.tmp.
+//! Files: rows.lock, rows.wal, snapshot-<lsn>.brp, snapshot-<lsn>.tmp,
+//! index-<lsn>.bri and index-<lsn>.tmp.
 //! Snapshots use the Page codec's 4096-byte physical pages and CRC integrity.
 //! On Unix, directory sync seals the rename. Windows/macOS power-loss guarantees
 //! require separate platform qualification; no claims are made before those tests.
@@ -78,7 +81,7 @@ struct Inner {
 }
 
 /// Durable, single-process row store. A mutex serializes operations within this
-/// instance; it is NOT an inter-process exclusive file lock.
+/// instance; an OS advisory lock restricts competing cooperating processes.
 #[derive(Debug)]
 pub struct RowStore {
     root: PathBuf,
