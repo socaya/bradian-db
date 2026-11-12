@@ -19,6 +19,7 @@ use crate::{
     Catalog, CatalogError, DatabaseId, ForeignKeySpec, SchemaId, TableId, TableSpec,
 };
 use crate::row_store::{RowStore, StoreError};
+use crate::backup::BackupReceipt;
 
 const MARKER_KEY: &[u8] = b"bradian.catalog.version";
 const MARKER_VALUE: &[u8] = b"BRADIAN-CATALOG-DDL-V1";
@@ -178,6 +179,17 @@ impl PersistentCatalog {
     pub fn checkpoint(&self) -> PersistentCatalogResult<u64> {
         let inner = self.inner.lock();
         Ok(inner.journal.checkpoint()?)
+    }
+
+    /// Export a consistent, independently verified backup of this catalog's
+    /// metadata journal only. It does NOT include referenced user table files.
+    /// The catalog mutex prevents any DDL while checkpointing and copying.
+    pub fn backup_catalog_to(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> PersistentCatalogResult<BackupReceipt> {
+        let inner = self.inner.lock();
+        Ok(inner.journal.backup_to(destination)?)
     }
 
     fn commit(&self, command: Command) -> PersistentCatalogResult<Option<u64>> {
