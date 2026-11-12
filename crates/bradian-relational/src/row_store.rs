@@ -1,0 +1,452 @@
+//! Single-writer durable key/value row storage for Bradian's relational kernel.
+//!
+//! The v1 protocol implements individually atomic INSERT/REPLACE and DELETE
+//! mutations, ordered by a monotonically increasing LSN. Every successful write
+//! is synced to the WAL before becoming visible in memory. A checkpoint publishes
+//! validated BRPG pages before truncating the WAL. Recovery replays complete,
+//! checksummed frames; only an incomplete final frame is removed.
+//!
+//! IMPORTANT: this is a durable *single-process* storage slice, not SQL, MVCC,
+//! multi-operation transactions, a B+tree, or a multi-process lock manager.
+//! The caller must enforce exclusive access to the database directory.
+//!
+//! Files: rows.wal, snapshot-<lsn>.brp, snapshot-<lsn>.tmp.
+//! Snapshots use the Page codec's 4096-byte physical pages and CRC integrity.
+//! On Unix, directory sync seals the rename. Windows/macOS power-loss guarantees
+//! require separate platform qualification; no claims are made before those tests.
+
+use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use crc32fast::Hasher;
+use thiserror::Error;
+
+use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
+
+const WAL_MAGIC: &[u8; 4] = b"BRWL";
+const WAL_HEADER: usize = 12;
+const ROW_HEADER: usize = 6;
+const MAX_KEY: usize = 512;
+const MAX_VALUE: usize = MAX_PAYLOAD_SIZE - ROW_HEADER - MAX_KEY;
+const META_LENGTH: usize = 24;
+const MAX_WAL_BODY: usize = 8 + 1 + ROW_HEADER + MAX_KEY + MAX_VALUE;
+
+#[derive(Debug, Error)]
+pub enum StoreError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Page(#[from] PageError),
+    #[error("invalid row: {0}")]
+    InvalidRow(&'static str),
+    #[error("corrupt row store: {0}")]
+    Corruption(String),
+    #[error("store is poisoned after a failed write or checkpoint; reopen after investigation")]
+    Poisoned,
+    #[error("monotonic row-log sequence exhausted")]
+    SequenceExhausted,
+}
+
+pub type StoreResult<T> = Result<T, StoreError>;
+
+#[derive(Debug)]
+struct Inner {
+    rows: BTreeMap<Vec<u8>, Vec<u8>>,
+    wal: File,
+    lsn: u64,
+    checkpoint_lsn: u64,
+    poisoned: bool,
+}
+
+/// Durable, single-process row store. A mutex serializes operations within this
+/// instance; it is NOT an inter-process exclusive file lock.
+#[derive(Debug)]
+pub struct RowStore {
+    root: PathBuf,
+    inner: Mutex<Inner>,
+}
+
+impl RowStore {
+    pub fn open(root: impl AsRef<Path>) -> StoreResult<Self> {
+        let root = root.as_ref();
+        fs::create_dir_all(root)?;
+        let (checkpoint_lsn, mut rows) = read_latest_snapshot(root)?;
+        let wal_path = root.join("rows.wal");
+        let mut wal = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(wal_path)?;
+        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows)?;
+        // An interrupted append is not a complete transaction. Repair the
+        // trailing, incomplete frame so future writes remain replayable.
+        if valid_length < wal.metadata()?.len() {
+            wal.set_len(valid_length)?;
+            wal.sync_all()?;
+        }
+        wal.seek(SeekFrom::End(0))?;
+        Ok(Self {
+            root: root.to_owned(),
+            inner: Mutex::new(Inner {
+                rows,
+                wal,
+                lsn,
+                checkpoint_lsn,
+                poisoned: false,
+            }),
+        })
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).rows.get(key).cloned()
+    }
+
+    /// Return an ordered, owned snapshot of the current rows. Not an MVCC snapshot.
+    pub fn scan(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+            .rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn last_lsn(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).lsn
+    }
+
+    /// Sync exactly one replace/insert operation before publishing it.
+    pub fn put(&self, key: &[u8], value: &[u8]) -> StoreResult<u64> {
+        validate_row(key, value)?;
+        self.mutate(key, Some(value))
+    }
+
+    /// A delete is durably logged even when the key did not previously exist.
+    pub fn delete(&self, key: &[u8]) -> StoreResult<u64> {
+        validate_key(key)?;
+        self.mutate(key, None)
+    }
+
+    fn mutate(&self, key: &[u8], value: Option<&[u8]>) -> StoreResult<u64> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        let next = inner.lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
+        let frame = encode_wal(next, key, value);
+        // Any WAL write/sync failure can leave an unknown partial record. The
+        // process must stop issuing writes until the log is recovered.
+        if let Err(error) = inner.wal.write_all(&frame).and_then(|_| inner.wal.sync_all()) {
+            inner.poisoned = true;
+            return Err(StoreError::Io(error));
+        }
+        match value {
+            Some(bytes) => { inner.rows.insert(key.to_vec(), bytes.to_vec()); }
+            None => { inner.rows.remove(key); }
+        }
+        inner.lsn = next;
+        Ok(next)
+    }
+
+    /// Publish a complete checkpoint and then truncate the WAL.
+    ///
+    /// Failure before WAL truncation leaves the old WAL intact. A successfully
+    /// renamed snapshot is authoritative even if a crash precedes WAL truncation:
+    /// replay ignores records at or below its committed checkpoint LSN.
+    pub fn checkpoint(&self) -> StoreResult<u64> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        if inner.checkpoint_lsn == inner.lsn && snapshot_path(&self.root, inner.lsn).exists() {
+            return Ok(inner.lsn);
+        }
+        let lsn = inner.lsn;
+        let tmp = self.root.join(format!("snapshot-{lsn}.tmp"));
+        let final_path = snapshot_path(&self.root, lsn);
+        // A previous interrupted checkpoint may leave a .tmp. Truncating only
+        // that file is safe: published .brp snapshots are never overwritten.
+        let write_result = (|| -> StoreResult<()> {
+            let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&tmp)?;
+            write_snapshot(&mut file, lsn, &inner.rows)?;
+            file.sync_all()?;
+            drop(file);
+            // Refuse overwriting an existing published snapshot.
+            if final_path.exists() {
+                return Err(StoreError::Corruption("checkpoint identity already exists".into()));
+            }
+            fs::rename(&tmp, &final_path)?;
+            sync_directory(&self.root)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            inner.poisoned = true;
+            return Err(error);
+        }
+        // Publish is durable before truncating the redundant WAL.
+        if let Err(error) = inner.wal.set_len(0).and_then(|_| inner.wal.sync_all())
+            .and_then(|_| inner.wal.seek(SeekFrom::Start(0)).map(|_| ()))
+        {
+            inner.poisoned = true;
+            return Err(StoreError::Io(error));
+        }
+        inner.checkpoint_lsn = lsn;
+        // Older checkpoints are no longer needed once the newest snapshot is
+        // published and WAL truncation is complete. Cleanup is opportunistic.
+        let _ = prune_snapshots(&self.root, lsn);
+        Ok(lsn)
+    }
+}
+
+fn validate_key(key: &[u8]) -> StoreResult<()> {
+    if key.is_empty() || key.len() > MAX_KEY {
+        return Err(StoreError::InvalidRow("key length must be 1..=512 bytes"));
+    }
+    Ok(())
+}
+
+fn validate_row(key: &[u8], value: &[u8]) -> StoreResult<()> {
+    validate_key(key)?;
+    if value.len() > MAX_VALUE {
+        return Err(StoreError::InvalidRow("value exceeds inline row-page limit"));
+    }
+    Ok(())
+}
+
+fn checksum(bytes: &[u8]) -> u32 {
+    let mut h = Hasher::new();
+    h.update(bytes);
+    h.finalize()
+}
+
+fn encode_wal(lsn: u64, key: &[u8], value: Option<&[u8]>) -> Vec<u8> {
+    let value_len = value.map_or(0, |v| v.len());
+    let mut body = Vec::with_capacity(8 + 1 + ROW_HEADER + key.len() + value_len);
+    body.extend_from_slice(&lsn.to_le_bytes());
+    body.push(if value.is_some() { 1 } else { 2 });
+    body.extend_from_slice(&(key.len() as u16).to_le_bytes());
+    body.extend_from_slice(&(value_len as u32).to_le_bytes());
+    body.extend_from_slice(key);
+    if let Some(value) = value {
+        body.extend_from_slice(value);
+    }
+    let mut frame = Vec::with_capacity(WAL_HEADER + body.len());
+    frame.extend_from_slice(WAL_MAGIC);
+    frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&checksum(&body).to_le_bytes());
+    frame.extend_from_slice(&body);
+    frame
+}
+
+fn replay(
+    wal: &mut File,
+    checkpoint_lsn: u64,
+    rows: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+) -> StoreResult<(u64, u64)> {
+    wal.seek(SeekFrom::Start(0))?;
+    let mut lsn = checkpoint_lsn;
+    let mut previous_in_wal = None::<u64>;
+    let mut valid_end = 0_u64;
+    loop {
+        let start = wal.stream_position()?;
+        let mut header = [0_u8; WAL_HEADER];
+        if let Err(err) = wal.read_exact(&mut header) {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Ok((lsn, valid_end));
+            }
+            return Err(StoreError::Io(err));
+        }
+        if &header[..4] != WAL_MAGIC {
+            return Err(StoreError::Corruption(format!("bad WAL magic at byte {start}")));
+        }
+        let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        if !(15..=MAX_WAL_BODY).contains(&len) {
+            return Err(StoreError::Corruption(format!("invalid WAL frame length at byte {start}")));
+        }
+        let crc = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        let mut body = vec![0_u8; len];
+        if let Err(err) = wal.read_exact(&mut body) {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Ok((lsn, valid_end));
+            }
+            return Err(StoreError::Io(err));
+        }
+        if checksum(&body) != crc {
+            return Err(StoreError::Corruption(format!("WAL CRC mismatch at byte {start}")));
+        }
+        let seq = u64::from_le_bytes(body[0..8].try_into().unwrap());
+        if seq == 0 || previous_in_wal.is_some_and(|previous| seq != previous.saturating_add(1)) {
+            return Err(StoreError::Corruption(format!("WAL sequence discontinuity at byte {start}")));
+        }
+        previous_in_wal = Some(seq);
+        let operation = body[8];
+        let key_len = u16::from_le_bytes(body[9..11].try_into().unwrap()) as usize;
+        let value_len = u32::from_le_bytes(body[11..15].try_into().unwrap()) as usize;
+        if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE
+            || body.len() != 15 + key_len + value_len
+            || (operation == 2 && value_len != 0)
+            || (operation != 1 && operation != 2)
+        {
+            return Err(StoreError::Corruption(format!("malformed WAL body at byte {start}")));
+        }
+        let key = body[15..15 + key_len].to_vec();
+        if seq > checkpoint_lsn {
+            if seq != lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)? {
+                return Err(StoreError::Corruption(format!("WAL gap after checkpoint at byte {start}")));
+            }
+            if operation == 1 {
+                rows.insert(key, body[15 + key_len..].to_vec());
+            } else {
+                rows.remove(&key);
+            }
+            lsn = seq;
+        }
+        valid_end = wal.stream_position()?;
+    }
+}
+
+fn snapshot_path(root: &Path, lsn: u64) -> PathBuf {
+    root.join(format!("snapshot-{lsn}.brp"))
+}
+
+fn list_snapshots(root: &Path) -> StoreResult<Vec<(u64, PathBuf)>> {
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(lsn) = name.strip_prefix("snapshot-")
+            .and_then(|s| s.strip_suffix(".brp"))
+            .and_then(|s| s.parse::<u64>().ok()) else { continue };
+        if entry.file_type()?.is_file() {
+            snapshots.push((lsn, entry.path()));
+        }
+    }
+    snapshots.sort_by_key(|(lsn, _)| *lsn);
+    Ok(snapshots)
+}
+
+fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, BTreeMap<Vec<u8>, Vec<u8>>)> {
+    let Some((lsn, path)) = list_snapshots(root)?.pop() else {
+        return Ok((0, BTreeMap::new()));
+    };
+    let mut file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < PAGE_SIZE as u64 || file_len % PAGE_SIZE as u64 != 0 {
+        return Err(StoreError::Corruption("snapshot has invalid file length".into()));
+    }
+    let mut bytes = [0_u8; PAGE_SIZE];
+    file.read_exact(&mut bytes)?;
+    let head = Page::decode(&bytes)?;
+    if head.kind != PageKind::Metadata || head.page_id != 0 || head.lsn != lsn
+        || head.payload.len() != META_LENGTH
+    {
+        return Err(StoreError::Corruption("invalid snapshot metadata page".into()));
+    }
+    let checkpoint = u64::from_le_bytes(head.payload[..8].try_into().unwrap());
+    let count = u64::from_le_bytes(head.payload[8..16].try_into().unwrap());
+    let pages = u64::from_le_bytes(head.payload[16..24].try_into().unwrap());
+    if checkpoint != lsn || pages.checked_add(1).and_then(|n| n.checked_mul(PAGE_SIZE as u64)) != Some(file_len)
+    {
+        return Err(StoreError::Corruption("snapshot metadata and file length disagree".into()));
+    }
+    let mut rows = BTreeMap::new();
+    let mut previous = None::<Vec<u8>>;
+    for page_id in 1..=pages {
+        file.read_exact(&mut bytes)?;
+        let page = Page::decode(&bytes)?;
+        if page.kind != PageKind::Data || page.page_id != page_id || page.lsn != lsn {
+            return Err(StoreError::Corruption("snapshot data page identity mismatch".into()));
+        }
+        let mut pos = 0;
+        while pos < page.payload.len() {
+            if page.payload.len() - pos < ROW_HEADER {
+                return Err(StoreError::Corruption("truncated snapshot record".into()));
+            }
+            let key_len = u16::from_le_bytes(page.payload[pos..pos + 2].try_into().unwrap()) as usize;
+            let value_len = u32::from_le_bytes(page.payload[pos + 2..pos + 6].try_into().unwrap()) as usize;
+            let size = ROW_HEADER.checked_add(key_len).and_then(|n| n.checked_add(value_len))
+                .ok_or_else(|| StoreError::Corruption("snapshot length overflow".into()))?;
+            if size > page.payload.len() - pos || key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE {
+                return Err(StoreError::Corruption("invalid snapshot row length".into()));
+            }
+            let key = page.payload[pos + ROW_HEADER..pos + ROW_HEADER + key_len].to_vec();
+            let value = page.payload[pos + ROW_HEADER + key_len..pos + size].to_vec();
+            if previous.as_ref().is_some_and(|prev| prev >= &key) {
+                return Err(StoreError::Corruption("snapshot rows are not strictly ordered".into()));
+            }
+            previous = Some(key.clone());
+            rows.insert(key, value);
+            pos += size;
+        }
+    }
+    if rows.len() as u64 != count {
+        return Err(StoreError::Corruption("snapshot row count mismatch".into()));
+    }
+    Ok((checkpoint, rows))
+}
+
+fn write_snapshot(
+    file: &mut File,
+    lsn: u64,
+    rows: &BTreeMap<Vec<u8>, Vec<u8>>,
+) -> StoreResult<()> {
+    let mut data_pages = Vec::<Vec<u8>>::new();
+    let mut buffer = Vec::new();
+    for (key, value) in rows {
+        validate_row(key, value)?;
+        let record_len = ROW_HEADER + key.len() + value.len();
+        if record_len > MAX_PAYLOAD_SIZE {
+            return Err(StoreError::InvalidRow("row cannot fit a single physical page"));
+        }
+        if buffer.len() + record_len > MAX_PAYLOAD_SIZE {
+            data_pages.push(std::mem::take(&mut buffer));
+        }
+        buffer.extend_from_slice(&(key.len() as u16).to_le_bytes());
+        buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(key);
+        buffer.extend_from_slice(value);
+    }
+    if !buffer.is_empty() {
+        data_pages.push(buffer);
+    }
+    let mut meta = Vec::with_capacity(META_LENGTH);
+    meta.extend_from_slice(&lsn.to_le_bytes());
+    meta.extend_from_slice(&(rows.len() as u64).to_le_bytes());
+    meta.extend_from_slice(&(data_pages.len() as u64).to_le_bytes());
+    let head = Page::new(0, lsn, PageKind::Metadata, meta)?;
+    file.write_all(&head.encode()?)?;
+    for (index, payload) in data_pages.into_iter().enumerate() {
+        let page = Page::new(index as u64 + 1, lsn, PageKind::Data, payload)?;
+        file.write_all(&page.encode()?)?;
+    }
+    Ok(())
+}
+
+fn prune_snapshots(root: &Path, keep: u64) -> StoreResult<()> {
+    for (lsn, path) in list_snapshots(root)? {
+        if lsn < keep {
+            fs::remove_file(path)?;
+        }
+    }
+    sync_directory(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(root: &Path) -> std::io::Result<()> {
+    File::open(root)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_root: &Path) -> std::io::Result<()> {
+    // Windows needs a separately tested directory-replacement durability layer.
+    Ok(())
+}
