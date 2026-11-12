@@ -128,6 +128,13 @@ pub fn verify(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
     if index.len() != entries.len() as u64 {
         return Err(StoreError::Corruption("derived index entry count disagrees with snapshot".into()));
     }
+    // A 513-byte all-FF bound sorts after every valid key (max 512 bytes).
+    // Reconcile the complete linked-leaf key sequence, not only individual
+    // point searches; this detects extra, absent and reordered leaf entries.
+    let all = index.range(&[], &[0xff; MAX_KEY + 1])?;
+    if all != entries {
+        return Err(StoreError::Corruption("derived index leaf sequence differs from snapshot".into()));
+    }
     for (key, pointer) in &entries {
         if index.get(key)? != Some(*pointer) {
             return Err(StoreError::Corruption("derived index pointer disagrees with snapshot".into()));
@@ -157,6 +164,9 @@ pub(crate) fn rebuild_missing(root: &Path, lsn: u64) -> StoreResult<IndexRecover
         let mut generated = DiskBTree::open(&tmp, lsn)?;
         if generated.len() != entries.len() as u64 {
             return Err(StoreError::Corruption("rebuilt index count mismatch".into()));
+        }
+        if generated.range(&[], &[0xff; MAX_KEY + 1])? != entries {
+            return Err(StoreError::Corruption("rebuilt index leaves do not match snapshot".into()));
         }
         for (key, pointer) in &entries {
             if generated.get(key)? != Some(*pointer) {
