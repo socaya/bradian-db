@@ -798,3 +798,90 @@ fn g29_abort_markers_survive_g24_backup_restore() {
         "bank.public.movements", db.last_lsn()
     ).unwrap().0.columns.len(), 3);
 }
+
+#[test]
+fn g30_coordination_fence_survives_restart_and_keeps_original_schema() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let fence_lsn;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (old, _) = db.schema_as_of("bank.public.accounts", db.last_lsn()).unwrap();
+        let mut proposed = old.clone();
+        proposed.columns.push(Column {
+            name: "details".into(), data_type: DataType::Text, nullable: true,
+        });
+        let prepared = db.prepare_nullable_addition("bank.public.accounts", &proposed).unwrap();
+        fence_lsn = db.coordinate_prepared_schema("bank.public.accounts").unwrap();
+        assert!(fence_lsn > prepared);
+        assert!(db.coordinate_prepared_schema("bank.public.accounts").is_err());
+        db.checkpoint().unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let records = db.ddl_coordination_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].1, fence_lsn);
+    assert_eq!(records[0].0.proposal_crc32 != 0, true);
+    assert_eq!(db.schema_as_of(
+        "bank.public.accounts", db.last_lsn()
+    ).unwrap().0.columns.len(), 2);
+    db.with_session(|session| {
+        session.execute("BEGIN")?;
+        assert_eq!(
+            session.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows {
+                columns: vec!["balance".into()],
+                rows: vec![vec![Value::Int64(1000)]],
+            }
+        );
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn g30_refuses_coordination_without_proposal_or_after_abort() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let initial = db.last_lsn();
+    assert!(db.coordinate_prepared_schema("bank.public.accounts").is_err());
+    assert_eq!(db.last_lsn(), initial);
+    let (original, _) = db.schema_as_of("bank.public.accounts", initial).unwrap();
+    let mut proposed = original.clone();
+    proposed.columns.push(Column {
+        name: "comment".into(), data_type: DataType::Text, nullable: true,
+    });
+    db.prepare_nullable_addition("bank.public.accounts", &proposed).unwrap();
+    db.abort_prepared_schema("bank.public.accounts").unwrap();
+    let aborted = db.last_lsn();
+    assert!(db.coordinate_prepared_schema("bank.public.accounts").is_err());
+    assert_eq!(db.last_lsn(), aborted);
+}
+
+#[test]
+fn g30_coordination_survives_g24_backup_and_restore() {
+    use bradian_relational::{Column, DataType};
+    use bradian_relational::history_backup::restore_history_database;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("g30-archive");
+    let target = dir.path().join("g30-restored");
+    let fence;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (old, _) = db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap();
+        let mut new_table = old.clone();
+        new_table.columns.push(Column {
+            name: "description".into(), data_type: DataType::Text, nullable: true,
+        });
+        db.prepare_nullable_addition("bank.public.movements", &new_table).unwrap();
+        fence = db.coordinate_prepared_schema("bank.public.movements").unwrap();
+        db.backup_to(&archive).unwrap();
+    }
+    restore_history_database(&archive, &target).unwrap();
+    let db = HistorySqlEngine::open(&target).unwrap();
+    assert_eq!(db.ddl_coordination_records().len(), 1);
+    assert_eq!(db.ddl_coordination_records()[0].1, fence);
+    assert_eq!(db.schema_as_of(
+        "bank.public.movements", db.last_lsn()
+    ).unwrap().0.columns.len(), 3);
+}
