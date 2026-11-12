@@ -15,7 +15,7 @@ Bradian Database Systems is being engineered as a native, general-purpose databa
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree, native SQL subset and single-table atomic transactions; no multi-table SQL/MVCC |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Catalog, WAL-backed typed rows, and immutable on-disk B+tree, native SQL subset and single-table SQL sessions and shared-WAL multi-table atomic domain; no general multi-table SQL/MVCC |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
@@ -54,6 +54,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Native SQL execution gate](docs/gates/BRD-G12-native-sql.md) | Bounded CREATE, INSERT, SELECT, UPDATE and DELETE using persistent catalog and typed tables |
 | [Single-table transactions gate](docs/gates/BRD-G13-single-table-transactions.md) | Snapshot-based staging, rollback, optimistic conflicts, one durable WAL batch per commit |
 | [Scoped SQL transaction sessions](docs/gates/BRD-G14-scoped-sql-transactions.md) | SQL BEGIN/COMMIT/ROLLBACK and DML within one Rust-callback table session |
+| [Shared-WAL multi-table transactions](docs/gates/BRD-G15-shared-wal-multi-table.md) | Atomic cross-table row changes in a separately registered transaction domain with one durable WAL batch |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
