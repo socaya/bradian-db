@@ -4,6 +4,10 @@
 **Status:** Functional source and regression tests committed on `main`; manual compilation, fault injection and cross-platform qualification remain outstanding.  
 **Prerequisites:** [ADR 0008 — WAL and checkpoint](0008-native-row-wal-checkpoint.md), [ADR 0010 — Physical B+tree](0010-checkpoint-btree.md), [ADR 0012 — WAL-backed delta](0012-wal-backed-mutable-index.md).
 
+## Generation publication update (ADR 0014)
+
+The [atomic manifest protocol](0014-atomic-checkpoint-manifest.md) selects the committed checkpoint LSN rather than trusting the largest snapshot filename. Derived index reconstruction occurs for the manifest-selected generation only. An uncommitted higher snapshot remains non-authoritative and WAL recovery supplies later commits until a fresh checkpoint is successfully published.
+
 ## Problem
 
 A published `snapshot-<lsn>.brp` is authoritative; its derived `index-<lsn>.bri` is an accelerator. G5 publishes the snapshot before the index and before truncating WAL. If a process terminates after snapshot publication but before index publication, a legitimate durable checkpoint can exist without an index. The old code recovered the rows but would not reconstruct the missing index. Later `checkpoint()` calls could return early because the snapshot already existed.
