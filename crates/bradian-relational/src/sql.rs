@@ -34,6 +34,8 @@ pub enum SqlError {
     #[error(transparent)]
     Table(#[from] TableError),
     #[error(transparent)]
+    Domain(#[from] crate::transaction_domain::DomainError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
