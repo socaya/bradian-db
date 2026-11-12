@@ -171,7 +171,8 @@ fn verify_directory(
     }
     recovered.verify_checkpoint_index()?;
     if let Some(expected) = expected_rows {
-        if recovered.scan().into_iter().collect::<BTreeMap<_, _>>() != *expected {
+        let actual = recovered.scan().into_iter().collect::<BTreeMap<_, _>>();
+        if &actual != expected {
             return Err(StoreError::Corruption("backed-up row values do not match the source".into()));
         }
     }
