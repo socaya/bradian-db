@@ -23,7 +23,7 @@
 - [x] Preserve the legacy shared-domain root and refuse unsafe overlapping, occupied, unregistered or previously incomplete destinations.
 - [x] Explicitly reject G18-managed sources and unmigrated G14 table storage until a lifecycle-aware migration is implemented.
 - [x] Refuse G23 history roots in the G12, G16, G21 and G18 legacy owners so they cannot accidentally create competing physical stores.
-- [x] Nine source-level integration tests committed, covering migration, historical SQL, WAL recovery, rollback and refusal modes.
+- [x] Twelve source-level integration tests committed, covering migration, historical SQL, WAL recovery, rollback and refusal modes.
 
 Checkmarks denote committed source and test cases, **not observed passing test execution**.
 
