@@ -16,7 +16,7 @@ Use the approved Bradian logos without altering path geometry, proportions, typo
 
 ## 2. Honest implementation status
 
-The repository currently includes analytical columnar storage (`.derc`), analytical operators, DHIS2 adapters, an analytical API, a React Studio foundation, a generic **in-memory** relational schema catalog, and a versioned physical page **codec**, and single-process WAL-backed key/value row persistence, plus schema-bound typed table CRUD with primary-key checks with synchronized writes, atomic multi-key batch commits, multi-page snapshots and restart recovery. A production database engine with disk B+tree indexes, full SQL execution, persistent catalog, multi-operation ACID/MVCC transactions, strongly consistent HTAP, self-managing distributed SQL cluster, enterprise identity/TLS, and certified recovery are **not yet implemented**.
+The repository currently includes analytical columnar storage (`.derc`), analytical operators, DHIS2 adapters, an analytical API, a React Studio foundation, a generic **in-memory** relational schema catalog, and a versioned physical page **codec**, and single-process WAL-backed key/value row persistence, immutable disk B+tree checkpoints and typed table CRUD with primary-key checks with synchronized writes, atomic multi-key batch commits, multi-page snapshots and restart recovery. A production database engine with mutable WAL-protected B+tree pages and buffer management, full SQL execution, persistent catalog, multi-operation ACID/MVCC transactions, strongly consistent HTAP, self-managing distributed SQL cluster, enterprise identity/TLS, and certified recovery are **not yet implemented**.
 
 Do not label a requirement DONE until both implementation and its correctness, security and recovery tests are demonstrated. Record deliverables in `docs/gates/` and explain incomplete functionality accurately in README and UI.
 
@@ -33,6 +33,8 @@ Do not label a requirement DONE until both implementation and its correctness, s
 No mandatory dependency on an external OLTP/OLAP database server is permitted for the Bradian core. Audited third-party libraries for crypto, networking and compression are acceptable. Never implement custom cryptographic algorithms.
 
 ## 4. Compatibility constraints
+
+For the checkpoint B+tree index and WAL-aware lookup, read [ADR 0010](docs/adr/0010-checkpoint-btree.md) and [BRD-G5](docs/gates/BRD-G5-checkpoint-btree.md). This is an immutable disk index over published checkpoints; do not conflate it with in-place B+tree updates, MVCC or a buffer manager.
 
 For typed persistent table CRUD, read [ADR 0009](docs/adr/0009-typed-table-rows.md) and [BRD-G4](docs/gates/BRD-G4-typed-table-crud.md). Secondary unique and foreign-key constraints are rejected until truly enforceable.
 
