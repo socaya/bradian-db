@@ -102,6 +102,56 @@ impl DurableTypedStore {
                 ));
             }
         }
+        // Validate EVERY retained version, not just the latest visible rows.
+        // A malformed older payload or a tombstoned unknown-table key must
+        // not become reachable through AS OF after the database is opened.
+        let versions = store.retained_versions();
+        let mut registered_at = BTreeMap::new();
+        for (key, lsn, value) in &versions {
+            if !key.starts_with(SCHEMA_PREFIX) { continue; }
+            if key.len() != SCHEMA_PREFIX.len() + 8 {
+                return Err(DomainError::Corruption("malformed historical schema key".into()));
+            }
+            let id = TableId(u64::from_be_bytes(
+                key[SCHEMA_PREFIX.len()..].try_into().unwrap()
+            ));
+            let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
+                format!("historical schema pin for unregistered table {}", id.0)
+            ))?;
+            let bytes = value.as_ref().ok_or_else(|| DomainError::Corruption(
+                format!("historical schema pin {} was deleted", id.0)
+            ))?;
+            if serde_json::from_slice::<Table>(bytes).ok().as_ref() != Some(&def.table) {
+                return Err(DomainError::Corruption(format!(
+                    "historical schema pin {} differs from authoritative catalog", id.0
+                )));
+            }
+            if registered_at.insert(id, *lsn).is_some() {
+                return Err(DomainError::Corruption(format!(
+                    "historical schema pin {} was rewritten", id.0
+                )));
+            }
+        }
+        for (key, lsn, value) in &versions {
+            if key.starts_with(SCHEMA_PREFIX) { continue; }
+            let id = table_id_from_row_key(key)?;
+            let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
+                format!("historical row refers to unregistered table {}", id.0)
+            ))?;
+            if registered_at.get(&id).is_none_or(|registered| lsn < registered) {
+                return Err(DomainError::Corruption(format!(
+                    "historical row predates schema registration for table {}", id.0
+                )));
+            }
+            if let Some(bytes) = value {
+                let row = decode_row(&def.table, bytes)?;
+                if key_from_row(def, &row)? != *key {
+                    return Err(DomainError::Corruption(
+                        "historical row key differs from decoded primary key".into()
+                    ));
+                }
+            }
+        }
         Ok(Self { store, tables })
     }
 
