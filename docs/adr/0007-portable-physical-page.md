@@ -13,7 +13,7 @@ Bradian's proprietary relational storage requires an operating-system-independen
 |---|---:|---|
 | 0 | 4 | Magic ASCII BRPG |
 | 4 | 2 | Format major version 1, little-endian |
-| 6 | 1 | Kind: 1 data, 2 index, 3 free map |
+| 6 | 1 | Kind: 1 data, 2 index, 3 free map, 4 snapshot metadata |
 | 7 | 1 | Flags reserved and required to be zero |
 | 8 | 8 | Page ID, little-endian u64 |
 | 16 | 8 | Last-log-sequence number, little-endian u64 |
