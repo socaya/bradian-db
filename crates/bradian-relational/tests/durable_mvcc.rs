@@ -263,3 +263,63 @@ fn read_only_transactions_do_not_append_wal_or_change_snapshot() {
     assert_eq!(old.commit().unwrap(), horizon);
     assert!(db.latest_lsn() > horizon);
 }
+
+
+#[test]
+fn verified_g10_backup_restores_historical_versions_and_floor() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("original");
+    let backup = dir.path().join("backup");
+    let restored = dir.path().join("restored");
+    let (v1, v2, v3);
+    {
+        let store = DurableMvccStore::open(&root).unwrap();
+        let mut tx = store.begin();
+        tx.insert(b"account", b"first").unwrap();
+        v1 = tx.commit().unwrap();
+        let mut tx = store.begin();
+        tx.replace(b"account", b"second").unwrap();
+        v2 = tx.commit().unwrap();
+        let mut tx = store.begin();
+        tx.replace(b"account", b"third").unwrap();
+        v3 = tx.commit().unwrap();
+        store.prune_through(v2).unwrap();
+        let report = store.backup_to(&backup).unwrap();
+        assert!(report.last_lsn >= v3);
+    }
+    DurableMvccStore::restore_backup(&backup, &restored).unwrap();
+    let store = DurableMvccStore::open(&restored).unwrap();
+    assert_eq!(store.retention_floor(), v2);
+    assert!(matches!(store.read_as_of(b"account", v1),
+        Err(DurableMvccError::SnapshotUnavailable { .. })));
+    assert_eq!(store.read_as_of(b"account", v2).unwrap(), Some(b"second".to_vec()));
+    assert_eq!(store.read_as_of(b"account", v3).unwrap(), Some(b"third".to_vec()));
+}
+
+#[test]
+fn retention_floor_advances_even_without_obsolete_version_deletions() {
+    let dir = tempdir().unwrap();
+    let store = DurableMvccStore::open(dir.path()).unwrap();
+    let mut tx = store.begin();
+    tx.insert(b"k", b"value").unwrap();
+    let first_commit = tx.commit().unwrap();
+    assert_eq!(store.prune_through(first_commit).unwrap(), 0);
+    let after_floor = store.latest_lsn();
+    assert!(after_floor > first_commit);
+    drop(store);
+    let restored = DurableMvccStore::open(dir.path()).unwrap();
+    assert_eq!(restored.retention_floor(), first_commit);
+    assert_eq!(restored.read_as_of(b"k", first_commit).unwrap(), Some(b"value".to_vec()));
+}
+
+#[test]
+fn key_and_value_limits_fail_before_any_wal_write() {
+    let dir = tempdir().unwrap();
+    let store = DurableMvccStore::open(dir.path()).unwrap();
+    let before = store.latest_lsn();
+    let mut tx = store.begin();
+    assert!(matches!(tx.insert(&vec![b'k'; 499], b"value"), Err(DurableMvccError::Capacity)));
+    assert!(matches!(tx.insert(b"okay", &vec![b'v'; 3546]), Err(DurableMvccError::Capacity)));
+    assert_eq!(store.latest_lsn(), before);
+    tx.rollback();
+}
