@@ -45,7 +45,8 @@ These represent **committed tests, not executed-test evidence**.
 - [ ] Manual `cargo test --workspace --locked` passes.
 - [ ] Manual `cargo clippy --workspace --all-targets --locked -- -D warnings` passes.
 - [ ] Platform-specific fsync and rename power-loss crash tests for Linux, Windows and macOS.
-- [ ] Inter-process exclusive file lock and stale-lock recovery tests.
+- [x] Source implementation and tests for OS-level exclusive file locking and reopening after release.
+- [ ] Platform-specific external-process lock lifecycle qualification (Windows/Linux/macOS).
 - [ ] Page and WAL encryption/key custody tests.
 - [ ] Disk-full, out-of-space, I/O failures, checksum and corrupt-directory fault injection.
 - [ ] Persistent catalog linkage and relational row encoding tests.
@@ -54,6 +55,6 @@ These represent **committed tests, not executed-test evidence**.
 
 ## Explicit limitation
 
-**G3 is not the full ACID relational DBMS gate.** Single-operation WAL sync, multi-key atomic batch commit and restart recovery are implemented but are not sufficient for production database guarantees, multi-row atomic transactions, inter-process safe concurrent writers or globally consistent snapshots. Keep the storage path exclusive to a single process. The legacy analytical `.derc` format and DHIS2 integrations remain unchanged.
+**G3 is not the full ACID relational DBMS gate.** Single-operation WAL sync, multi-key atomic batch commit and restart recovery are implemented but are not sufficient for production database guarantees, multi-row atomic transactions, inter-process safe concurrent writers or globally consistent snapshots. Bradian now enforces an OS-level exclusive advisory lock for cooperating RowStore instances; cross-platform power-loss, external-process and hostile-file access tests remain pending. The legacy analytical `.derc` format and DHIS2 integrations remain unchanged.
 
 CI automation is disabled by owner instruction. This gate remains **unaccepted** until manual checks and outstanding correctness requirements are verified.
