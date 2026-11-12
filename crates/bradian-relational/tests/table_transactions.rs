@@ -127,7 +127,8 @@ fn snapshot_reads_do_not_change_when_other_writers_commit() {
     assert_eq!(tx.get(&[Value::Int64(3)]).unwrap(), Some(row(3, 100)));
     assert_eq!(tx.get(&[Value::Int64(4)]).unwrap(), None);
     assert_eq!(tx.scan(), vec![row(3, 100)]);
-    assert_eq!(tx.commit().unwrap(), tx.start_lsn());
+    let snapshot_lsn = tx.start_lsn();
+    assert_eq!(tx.commit().unwrap(), snapshot_lsn);
 }
 
 #[test]
