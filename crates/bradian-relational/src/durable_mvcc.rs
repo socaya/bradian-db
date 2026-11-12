@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::row_store::{RowMutation, RowStore, StoreError};
+use crate::backup::BackupReceipt;
 
 const FORMAT_KEY: &[u8] = b"\0bradian.durable-mvcc.format";
 const FLOOR_KEY: &[u8] = b"\0bradian.durable-mvcc.floor";
@@ -182,6 +183,26 @@ impl DurableMvccStore {
             rows,
             state: Mutex::new(State { latest, floor, versions, pins: BTreeMap::new() }),
         })
+    }
+
+    /// G10 captures the exact version-key RowStore, including the retention
+    /// floor, commit-tagged rows and tombstones. It does not transfer active
+    /// in-process transaction pins into the restored process.
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> DurableMvccResult<BackupReceipt> {
+        let state = self.state.lock();
+        if state.latest != self.rows.last_lsn() {
+            return Err(DurableMvccError::Corruption("WAL changed outside durable MVCC".into()));
+        }
+        Ok(self.rows.backup_to(destination)?)
+    }
+
+    /// Restore only into an absent directory, with full G10 verification.
+    /// Call open() on the restored directory to verify G22's version format.
+    pub fn restore_backup(
+        backup: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> DurableMvccResult<BackupReceipt> {
+        Ok(RowStore::restore_backup(backup, destination)?)
     }
 
     pub fn latest_lsn(&self) -> u64 { self.state.lock().latest }
