@@ -6,6 +6,12 @@ Bradian is being developed as a proprietary cross-platform relational and analyt
 
 The target specification is [Bradian Master Architecture & SRS v1.1](docs/Bradian_Master_Architecture_SRS_v1.1.md), with the [source audit and staged roadmap](docs/implementation/BRADIAN_V1_1_AUDIT.md).
 
+## Current relational kernel milestones
+
+The independent `bradian-relational` crate now implements a validated **in-memory relational schema catalog** and a **versioned, checksummed 4 KiB portable physical page codec**. The page format is documented in [ADR 0007](docs/adr/0007-portable-physical-page.md), with progress tracked in [G2](docs/gates/BRD-G2-page-format.md).
+
+These are engineering primitives, **not** a durable row store. Row persistence, buffer management, WAL ordering, crash recovery, SQL execution, MVCC, transaction isolation, HTAP integration and distributed scaling remain unimplemented.
+
 ## Compatibility
 
 The `dap-*` crate names, source imports, `.derc` signatures and DHIS2-compatible endpoints remain unchanged pending dedicated migration and conformance testing. The canonical GitHub repository is [`socaya/bradian-db`](https://github.com/socaya/bradian-db).
