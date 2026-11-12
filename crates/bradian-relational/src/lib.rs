@@ -36,6 +36,7 @@ pub mod history_migration;
 pub mod history_backup;
 pub mod lifecycle_history_migration;
 pub mod schema_evolution;
+pub mod epoch_row;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
