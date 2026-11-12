@@ -25,6 +25,7 @@ This directory contains the engineering specifications, architectural decisions,
 11. **[Derived index recovery ADR](adr/0013-derived-index-reconstruction.md)** — rebuild absent checkpoint indexes from verified pages and audit physical index integrity.
 12. **[Checkpoint publication ADR](adr/0014-atomic-checkpoint-manifest.md)** — checksummed generation commit, orphan quarantine and WAL-safe recovery.
 13. **[Consistent backup/restore ADR](adr/0015-consistent-backup-restore.md)** — snapshot-plus-WAL capture, staged verification and safe restore.
+14. **[Persistent relational catalog ADR](adr/0016-persistent-ddl-catalog.md)** — synchronized DDL events, stable object IDs, deterministic validated replay.
 
 ## Current milestone records
 
@@ -40,7 +41,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G8](gates/BRD-G8-index-recovery.md) | Crash-safe missing-index reconstruction and authoritative checkpoint integrity audit | Source/tests committed; manual qualification outstanding |
 | [BRD-G9](gates/BRD-G9-checkpoint-publication.md) | Atomic committed checkpoint marker and recovery selection | Source/tests committed; manual checks outstanding |
 | [BRD-G10](gates/BRD-G10-consistent-backup-restore.md) | Verified single-store snapshot/WAL backup and restore | Source/tests committed; manual acceptance outstanding |
-| Future gates | In-place disk B+tree, writable buffer pool, SQL transactions, MVCC, HTAP, clusters and enterprise security | Must be implemented and qualified |
+| [BRD-G11](gates/BRD-G11-persistent-catalog.md) | Durable relational catalog and validated DDL journal | Source/tests committed; manual acceptance outstanding |
+| Future gates | Unified catalog/table transactions, SQL DDL/DML, MVCC, mutable physical B+tree, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
