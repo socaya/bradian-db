@@ -61,6 +61,10 @@ engine.with_session(|session| {
 
 This is a scoped native Rust callback API, not a remote SQL server connection or persistent wire-protocol session.
 
+## Lifecycle recovery update (ADR 0023)
+
+[G18](0023-catalog-domain-lifecycle-reconciliation.md) adds a separate lifecycle coordinator to durably journal Pending/Active table provisioning and reconcile incomplete schema pin registrations. It must release its file locks before DomainSqlEngine opens. It does not make independent catalog and data WALs one atomic DDL transaction.
+
 ## Durability and remaining boundaries
 
 - **Atomic row commit:** Works across registered tables inside one `shared-domain` WAL, not across multiple unrelated RowStores.
