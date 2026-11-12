@@ -21,6 +21,7 @@ pub mod backup;
 pub mod typed_table;
 pub mod persistent_catalog;
 pub mod sql;
+pub mod transaction_domain;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
