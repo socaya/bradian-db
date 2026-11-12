@@ -1,64 +1,61 @@
-# dap-admin-ui
+<p align="left">
+  <img src="public/bradian-logo-blue.svg" alt="Bradian Database Systems approved logo" width="340" />
+</p>
 
-Full-screen admin + analytics workbench for DAP (spec DER-ANL-PLAT-001 §13).
+# Bradian Studio
 
-## Stack
+**Browser-based administration and analytics workspace for Bradian Database Systems**
 
-- React 18 + TypeScript
-- React Router 6
-- TanStack Query (`@tanstack/react-query`)
-- Vite 5 bundler
-- Zero external design-system; `src/design/*.css` carries the spec-compliant tokens
+Bradian Studio is the web administration application for the Bradian database product. The existing frontend provides analytical engine monitoring and management, while the full enterprise database console described in the [Bradian Master Architecture & SRS v1.1](../../docs/Bradian_Master_Architecture_SRS_v1.1.md) is under active development.
 
-## Install and run
+**Current status:** pre-release analytical administration foundation. Database creation, native SQL DDL/DML, full user management, MVCC diagnostics and production cluster operations are **not** currently implemented.
 
-```bash
-cd apps/dap-admin-ui
+## Branding and interface
+
+- Use the approved white horizontal Bradian logo at `public/bradian-logo.svg` on dark navigation and the approved blue version at `public/bradian-logo-blue.svg` on light surfaces.
+- The browser favicon uses a crop of the approved blue artwork; the logo itself must not be redrawn.
+- Retain the calm enterprise design system: restrained navy/teal accents, visible typography, clear page structure, predictable spacing, no gradients or decorative status chips.
+- Display **Bradian Studio** as the application name, and **Bradian Database Systems** as the database product. Treat DHIS2 as an optional integration rather than the identity of the application.
+
+## Application structure
+
+The codebase currently resides in `apps/dap-ui/`, a legacy directory name preserved until the broader crate and integration migration is planned. The npm package is named `bradian-studio`.
+
+The frontend uses React, TypeScript, React Router, TanStack Query and Vite, with local CSS design tokens under `src/design/`. The API client is maintained in `src/api/client.ts` and connects to the analytical HTTP endpoints currently implemented in the Rust server.
+
+### Existing screens
+
+| Route | Current purpose |
+|---|---|
+| `/` | Operational overview and engine health |
+| `/sources` | Data-source inspection |
+| `/storage` | Existing analytical storage catalog |
+| `/workbench` | Analytics query workbench |
+| `/history` | Query history |
+| `/views` | Materialized views |
+| `/products` | Data products |
+| `/nodes` | Distributed analytics node views |
+| `/reconciliation` | Reconciliation diagnostics |
+| `/dhis2-parity` | Optional DHIS2 compatibility view |
+| `/security` | Security and audit UI foundation |
+| `/backups` | Backup and recovery view |
+| `/benchmarks` | Benchmark metrics |
+| `/settings` | UI settings prototype |
+
+These screens are not proof that every associated back-end operation is implemented.
+
+## Run locally
+
+```sh
+cd apps/dap-ui
 npm install
-npm run dev           # dev server on :5173, proxies /api -> :8080
-npm run build         # emits dist/ for static serving
-npm run typecheck
+npm run dev
 ```
 
-The dev server proxies `/api` to the Rust engine running on `127.0.0.1:8080`. To serve
-the production bundle, point any static file server at `dist/` (or mount it behind the
-`dap-serving` crate).
+Vite normally serves at `http://localhost:5173`; `/api` is proxied to the local Rust process at `127.0.0.1:8080`. To build a static bundle, run `npm run build`.
 
-## Pages (spec §13)
+**Authentication limitation:** the Bradian analytical API now requires a local-development administrator bearer token, but Studio does not yet implement a secure login/session exchange. No static token may be embedded in browser assets, JavaScript bundles, query strings or local storage to bypass that requirement. Full Studio login, session handling, CSRF protection and scoped authorization are future security milestones.
 
-| Route | Page |
-|---|---|
-| `/` | Platform Overview |
-| `/sources` | Data Sources |
-| `/storage` | Storage Catalog |
-| `/workbench` | Query Workbench (EXPLAIN + run + results) |
-| `/history` | Query History |
-| `/views` | Materialized Views |
-| `/products` | Data Products |
-| `/nodes` | Distributed Nodes |
-| `/reconciliation` | Reconciliation |
-| `/dhis2-parity` | DHIS2 Parity matrix |
-| `/security` | Security &amp; Audit |
-| `/backups` | Backups &amp; Recovery |
-| `/benchmarks` | Benchmarks |
-| `/settings` | Settings (quotas, flags) |
+## Engineering guidance
 
-## Design rules (spec §13)
-
-- Lists, details and edit forms are separate full-page routes. No master-detail splits
-  inside a single route.
-- Context drawers (the right column in two-column pages) are strictly for inspection and
-  diagnostics — never for editable forms.
-- Three surface planes only (page / panel / muted), one accent colour family for state,
-  no gradients, no decorative badges.
-- Every page explicitly handles loading / empty / offline / degraded / partial /
-  permission-denied / stale / conflicting / failed states via `src/components/States.tsx`.
-- Numeric columns use tabular numerics and right-align; identifier columns use a
-  monospace font.
-
-## Wiring
-
-- `src/api/types.ts` mirrors the Rust `dap-serving` structs. Keep in sync by hand (a
-  codegen pass against the `OpenAPI` schema is a later deliverable).
-- `src/api/client.ts` is a thin `fetch` wrapper that surfaces typed `ApiError`s so the
-  UI can map HTTP 401 / 403 / 404 / 410 / 413 / 500 to the right state.
+Follow the [Bradian documentation index](../../docs/README.md), [v1.1 SRS](../../docs/Bradian_Master_Architecture_SRS_v1.1.md) and the [implementation roadmap](../../docs/implementation/BRADIAN_V1_1_AUDIT.md). Avoid labeling planned screens as complete. Do not change existing analytical API paths or storage identifiers without compatibility testing.
