@@ -15,9 +15,9 @@ G18 databases maintain a G11 catalog, G15 shared-WAL row domain and G18 lifecycl
 2. Open `CatalogLifecycle`, reconcile pending provisioning intents, and capture a G19 three-component verified archive under an absent private sibling directory.
 3. Release the G18 owner after the G19 snapshot; G18 source remains available to its operator but subsequent changes will **not** appear in the destination.
 4. Restore the G19 archive into a second private sibling root. G19 reopens the complete lifecycle and verifies catalog, shared-domain schema pins, lifecycle identities, WAL LSNs and row counts.
-5. **Only in the restored temporary copy**, remove the legacy lifecycle journal, because the existing G23 importer intentionally refuses G18-managed roots. The original three-component G18 source is never stripped.
+5. Reopen the restored G18 copy and compare its catalog, shared-domain and lifecycle LSN/row-count identities against the captured G19 report **before** removing the legacy lifecycle journal. Only the restored temporary copy is stripped; the original three-component G18 source is never stripped.
 6. Reuse G23 `migrate_shared_to_history` to import immutable schema pins and current typed rows in bounded G22 WAL batches; verify row contents and table IDs before publishing a separate, absent history root.
-7. Compare captured source LSNs/table counts with the import report, then clean temporary sibling archive/copy directories on success. Interrupted or failed conversion artifacts remain for operator inspection and block unsafe repeated attempts.
+7. On successful independently verified G23 publication, clean temporary sibling archive/copy directories. Interrupted or failed conversion artifacts remain for operator inspection and block unsafe repeated attempts.
 
 There is no attempted reconstruction of pre-cutover history: G18 only held latest committed row state. The first historical row version becomes visible when its G22 import batch commits.
 
