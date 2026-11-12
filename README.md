@@ -61,6 +61,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Database-wide backup and restore](docs/gates/BRD-G19-database-wide-backup.md) | Coordinated catalog/domain/lifecycle checkpoint+WAL archives, checksummed manifest and verified new-root restore |
 | [MVCC row-version foundation](docs/gates/BRD-G20-mvcc-foundation.md) | Opt-in in-memory pinned row versions, per-key optimistic writes and WAL-durable latest state |
 | [Typed MVCC SQL integration](docs/gates/BRD-G21-typed-sql-mvcc.md) | Opt-in concurrent SQL snapshots over validated G15 table pins and G20 per-key conflict detection |
+| [Durable MVCC historical versions](docs/gates/BRD-G22-durable-mvcc-history.md) | Opt-in WAL-atomic version-key history, restart-safe as-of reads, explicit durable retention and GC |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
