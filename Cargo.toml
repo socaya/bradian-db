@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bradian-relational",
     "crates/dap-core",
     "crates/dap-catalog",
     "crates/dap-storage",
