@@ -30,6 +30,7 @@ The supported operations are:
 | `drop_database(database)` | Enforce RESTRICT while schemas remain |
 | `snapshot()` | Return a clone of the visible committed catalog |
 | `checkpoint()` | Publish catalog journal as BRPG snapshot and derived B+tree |
+| `backup_catalog_to(destination)` | Create a verified catalog-only G10 backup; excludes table-data stores |
 
 ## Atomic mutation protocol
 
@@ -58,7 +59,7 @@ Since the same sequence of successful creates and drops is replayed from the beg
 - The catalog is still an in-memory snapshot between accepted changes. Concurrent readers obtain owned snapshots, and concurrent writers are serialized through the catalog mutex.
 - No SQL parser, transactional ALTER TABLE, multi-statement DDL rollback, MVCC, cluster consensus, encryption, fine-grained role authorization or signed journal is provided.
 - CRC32 and typed replay verify accidental corruption and structural consistency, not cryptographic authenticity.
-- The G10 local row-store backup infrastructure exists but does not yet automatically coordinate **one consistent backup of catalog plus every referenced table**. Database-wide backup and restore are separate deliverables.
+- The G11 API can export a verified catalog-only backup using G10. It does not automatically coordinate **one consistent backup of catalog plus every referenced table**. Database-wide backup and restore are separate deliverables.
 
 ## Integration and acceptance tests
 
