@@ -281,25 +281,34 @@ impl RowStore {
     ///
     /// This method exposes checksum/index corruption as an error rather than
     /// silently treating a damaged page as an absent row.
+    /// Query a mutable logical index consisting of a committed WAL delta over
+    /// an immutable disk B+tree. Only keys changed after the last checkpoint
+    /// are stored in the delta; unchanged keys are resolved through disk pages.
     pub fn indexed_get(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
         let mut inner = self.inner.lock();
         let expected = inner.rows.get(key).cloned();
-        if inner.lsn != inner.checkpoint_lsn {
+        if let Some(changed) = inner.delta.get(key) {
+            // Tombstones are explicit: Some(None) means deleted.
+            if *changed != expected {
+                return Err(StoreError::Corruption("WAL delta disagrees with committed row map".into()));
+            }
+            return Ok(changed.clone());
+        }
+        let checkpoint = inner.checkpoint_lsn;
+        let index_path = self.root.join(format!("index-{checkpoint}.bri"));
+        if !index_path.exists() {
+            // No published index yet (or legacy checkpoint). The full row map
+            // remains authoritative and is always WAL-recoverable.
             return Ok(expected);
         }
-        let lsn = inner.lsn;
-        let index_path = self.root.join(format!("index-{lsn}.bri"));
-        if !index_path.exists() {
-            return Ok(expected); // legacy or partially published checkpoint
-        }
         if inner.index.is_none() {
-            inner.index = Some(DiskBTree::open(&index_path, lsn)?);
+            inner.index = Some(DiskBTree::open(&index_path, checkpoint)?);
         }
         let pointer = inner.index.as_mut().expect("opened index").get(key)?;
         let result = if let Some(pointer) = pointer {
             if inner.snapshot_pages.is_none() {
-                let path = self.root.join(format!("snapshot-{lsn}.brp"));
-                inner.snapshot_pages = Some(PageCache::open(&path, lsn, 128)?);
+                let path = self.root.join(format!("snapshot-{checkpoint}.brp"));
+                inner.snapshot_pages = Some(PageCache::open(&path, checkpoint, 128)?);
             }
             Some(read_indexed_record(
                 inner.snapshot_pages.as_mut().expect("opened snapshot"),
@@ -314,41 +323,52 @@ impl RowStore {
         Ok(result)
     }
 
-    /// Inclusive start and exclusive end. Physical index and snapshot pages are
-    /// retained in bounded caches across calls for the same checkpoint LSN.
+    /// Range reads merge the immutable checkpoint B+tree with the synchronized
+    /// WAL delta. Put replaces a checkpoint row, and delete is a tombstone.
+    /// Every result is checked against authoritative committed rows.
     pub fn indexed_range(&self, start: &[u8], end: &[u8]) -> StoreResult<Vec<(Vec<u8>, Vec<u8>)>> {
         if start >= end { return Ok(Vec::new()); }
         let mut inner = self.inner.lock();
         let expected = inner.rows.range(start.to_vec()..end.to_vec())
             .map(|(k,v)| (k.clone(),v.clone())).collect::<Vec<_>>();
-        if inner.lsn != inner.checkpoint_lsn {
-            return Ok(expected);
-        }
-        let lsn = inner.lsn;
-        let index_path = self.root.join(format!("index-{lsn}.bri"));
+        let checkpoint = inner.checkpoint_lsn;
+        let index_path = self.root.join(format!("index-{checkpoint}.bri"));
         if !index_path.exists() {
             return Ok(expected);
         }
         if inner.index.is_none() {
-            inner.index = Some(DiskBTree::open(&index_path, lsn)?);
+            inner.index = Some(DiskBTree::open(&index_path, checkpoint)?);
         }
         let entries = inner.index.as_mut().expect("opened index").range(start, end)?;
         if !entries.is_empty() && inner.snapshot_pages.is_none() {
-            let path = self.root.join(format!("snapshot-{lsn}.brp"));
-            inner.snapshot_pages = Some(PageCache::open(&path, lsn, 128)?);
+            let path = self.root.join(format!("snapshot-{checkpoint}.brp"));
+            inner.snapshot_pages = Some(PageCache::open(&path, checkpoint, 128)?);
         }
-        let mut result = Vec::with_capacity(entries.len());
+        let mut result = BTreeMap::new();
         for (key, pointer) in entries {
             let value = read_indexed_record(
                 inner.snapshot_pages.as_mut().expect("nonempty indexed range"),
                 &key, pointer,
             )?;
-            result.push((key,value));
+            result.insert(key, value);
         }
-        if result != expected {
-            return Err(StoreError::Corruption("indexed range differs from committed row map".into()));
+        for (key, value) in inner.delta.range(start.to_vec()..end.to_vec()) {
+            match value {
+                Some(value) => { result.insert(key.clone(), value.clone()); }
+                None => { result.remove(key); }
+            }
         }
-        Ok(result)
+        let merged = result.into_iter().collect::<Vec<_>>();
+        if merged != expected {
+            return Err(StoreError::Corruption("merged index/delta differs from committed row map".into()));
+        }
+        Ok(merged)
+    }
+
+    /// Current number of distinct keys changed since the latest checkpoint,
+    /// including deleted-key tombstones.
+    pub fn uncheckpointed_index_changes(&self) -> usize {
+        self.inner.lock().delta.len()
     }
 
     /// Cache occupancy and hit/miss counters for the current physical generation.
