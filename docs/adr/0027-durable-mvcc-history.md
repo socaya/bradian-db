@@ -81,6 +81,10 @@ G22 uses exclusive single-process storage locks and no network protocol. It does
 
 G22's historical version-key format is intentionally **incompatible with direct opening by G21's original typed-row parser**. A future gate must coordinate catalog schema pins, G15 data migration, G19 backup semantics, typed historical reads and SQL grammar without mixing two independent writers or silently discarding data.
 
+## Typed SQL integration update (ADR 0028)
+
+[G23](0028-durable-typed-sql-history.md) uses G22's independent durable history format to store validated typed G15 row keys and G11 catalog-pinned schemas. It introduces a separate HistorySqlEngine with bounded SELECT AS OF LSN queries and a verified offline G16 source-to-new-history-root importer; G22/G21 existing modes are not silently replaced. Earlier G16 commit history cannot be recovered by migrating latest-only rows.
+
 ## Verification evidence
 
 Implementation is `crates/bradian-relational/src/durable_mvcc.rs`; regression tests are in `crates/bradian-relational/tests/durable_mvcc.rs`. The tests include durable historical values after checkpoint/restart, tombstone/reinsert history, disjoint writers, same-key conflicts, scan conflicts, rollback, retention-floor persistence, pinned reader protection, GC baseline visibility, unknown-format rejection, WAL batch limits, multithreaded writers, read-only snapshots, G10 backup/restore and key/value bounds.
