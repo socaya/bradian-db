@@ -30,7 +30,7 @@ fn setup(root: &std::path::Path) -> (Table, Table) {
 
 fn force_pending(root: &std::path::Path, table: &Table) {
     let key = format!("table/{:016x}", table.id.0);
-    let mut raw = RowStore::open(root.join("lifecycle")).unwrap();
+    let raw = RowStore::open(root.join("lifecycle")).unwrap();
     let existing: serde_json::Value = serde_json::from_slice(&raw.get(key.as_bytes()).unwrap()).unwrap();
     let mut changed = existing;
     changed["state"] = serde_json::Value::String("Pending".into());
