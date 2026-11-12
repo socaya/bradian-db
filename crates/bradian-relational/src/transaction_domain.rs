@@ -152,6 +152,7 @@ impl MultiTableStore {
 
     pub fn table_count(&self) -> usize { self.tables.lock().len() }
     pub fn last_lsn(&self) -> u64 { self.storage.last_lsn() }
+    pub(crate) fn storage_row_count(&self) -> u64 { self.storage.len() as u64 }
     pub fn checkpoint(&self) -> DomainResult<u64> { Ok(self.storage.checkpoint()?) }
 
     /// Back up the entire registered multi-table domain as one verified WAL
