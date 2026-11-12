@@ -19,6 +19,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::{Table, TableId};
+use crate::backup::BackupReceipt;
 use crate::row_store::{RowMutation, RowStore, StoreError};
 use crate::typed_table::{
     decode_row, encode_key, encode_row, validate_table, TableError, Value,
@@ -146,6 +147,22 @@ impl MultiTableStore {
     pub fn table_count(&self) -> usize { self.tables.lock().len() }
     pub fn last_lsn(&self) -> u64 { self.storage.last_lsn() }
     pub fn checkpoint(&self) -> DomainResult<u64> { Ok(self.storage.checkpoint()?) }
+
+    /// Back up the entire registered multi-table domain as one verified WAL
+    /// generation. All schema pins and row data are stored under this same
+    /// RowStore. External G11 catalog directories are NOT included.
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> DomainResult<BackupReceipt> {
+        Ok(self.storage.backup_to(destination)?)
+    }
+
+    /// Restore a previously verified shared-domain backup into an absent
+    /// directory. Reopen the domain afterwards to verify schema/data bindings.
+    pub fn restore_backup(
+        backup: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> DomainResult<BackupReceipt> {
+        Ok(RowStore::restore_backup(backup, destination)?)
+    }
 
     /// Capture a consistent domain snapshot. A registration concurrent with
     /// this call is serialized by the registry mutex; row contents and LSN
