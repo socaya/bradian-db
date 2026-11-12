@@ -38,6 +38,8 @@ Native source-consistent backup and staged restore are specified in [ADR 0015](d
 
 Checkpoint-generation publication and fail-closed manifest recovery are specified in [ADR 0014](docs/adr/0014-atomic-checkpoint-manifest.md) and [BRD-G9](docs/gates/BRD-G9-checkpoint-publication.md). Always sync authoritative BRPG pages and the derived index before publishing the generation marker; truncate the WAL only after the marker is durable. Do not trust a higher snapshot filename when a committed manifest exists.
 
+Scoped SQL transaction sessions are defined in [ADR 0019](docs/adr/0019-scoped-sql-transaction-sessions.md) and [BRD-G14](docs/gates/BRD-G14-scoped-sql-transactions.md). `SqlEngine::with_sql_session` accepts SQL BEGIN/COMMIT/ROLLBACK and DML only against one resolved table; any statement error aborts staged work. Do not claim cross-table atomicity, network sessions or MVCC.
+
 Single-table transactions are implemented via `TableStore::begin_transaction` and `SqlEngine::transact_table`; see [ADR 0018](docs/adr/0018-single-table-transactions.md) and [BRD-G13](docs/gates/BRD-G13-single-table-transactions.md). A transaction snapshots one RowStore at a consistent LSN, stages validated changes, rolls back without touching WAL, and commits a bounded batch in one synchronized frame. Do not describe it as SQL BEGIN/COMMIT or multi-table ACID/MVCC.
 
 The first native SQL executor is implemented in `crates/bradian-relational/src/sql.rs`; see [ADR 0017](docs/adr/0017-native-sql-execution.md) and [BRD-G12](docs/gates/BRD-G12-native-sql.md). Preserve strict all-PK predicates and reject unsupported SQL; do not represent these single-row statements as multi-statement ACID transactions.
