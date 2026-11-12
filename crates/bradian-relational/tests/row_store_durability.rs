@@ -291,3 +291,39 @@ fn checkpoint_cannot_resurrect_deleted_rows_on_restart() {
     assert_eq!(restarted.len(), 0);
     assert_eq!(restarted.last_lsn(), 2);
 }
+
+
+#[test]
+fn maximum_inline_record_spans_exactly_one_payload_page() {
+    let dir = tempdir().unwrap();
+    let key = vec![b'k'; 512];
+    let value = vec![b'v'; 3546];
+    {
+        let store = open(dir.path());
+        store.put(&key, &value).unwrap();
+        store.checkpoint().unwrap();
+    }
+    let snapshot = dir.path().join("snapshot-1.brp");
+    assert_eq!(fs::metadata(snapshot).unwrap().len(), 2 * 4096);
+    assert_eq!(open(dir.path()).get(&key), Some(value));
+}
+
+#[test]
+fn checkpoint_reuses_streaming_buffer_across_page_boundaries() {
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        for i in 0..72 {
+            let key = format!("invoice-{i:04}");
+            let value = vec![(i % 251) as u8; 245];
+            store.put(key.as_bytes(), &value).unwrap();
+        }
+        assert_eq!(store.checkpoint().unwrap(), 72);
+    }
+    let store = open(dir.path());
+    assert_eq!(store.len(), 72);
+    for i in 0..72 {
+        let key = format!("invoice-{i:04}");
+        assert_eq!(store.get(key.as_bytes()), Some(vec![(i % 251) as u8; 245]));
+    }
+}
