@@ -8,7 +8,7 @@ The target specification is [Bradian Master Architecture & SRS v1.1](docs/Bradia
 
 ## Compatibility
 
-The `dap-*` crate names, source imports, `.derc` signatures and DHIS2-compatible endpoints remain unchanged pending dedicated migration and conformance testing. The desired repository name is `socaya/bradian-db`; renaming the remote GitHub repository is an administrative operation independent of code branding.
+The `dap-*` crate names, source imports, `.derc` signatures and DHIS2-compatible endpoints remain unchanged pending dedicated migration and conformance testing. The canonical GitHub repository is [`socaya/bradian-db`](https://github.com/socaya/bradian-db).
 
 ## Build and tests
 
