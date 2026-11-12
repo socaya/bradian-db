@@ -19,6 +19,7 @@ pub mod index_recovery;
 pub mod checkpoint_manifest;
 pub mod backup;
 pub mod typed_table;
+pub mod persistent_catalog;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
