@@ -72,6 +72,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [DDL coordination fences](docs/gates/BRD-G30-ddl-coordination-fences.md) | Durable G11 catalog LSN binding for inactive historical schema proposals; no ALTER activation |
 | [DDL readiness certificates](docs/gates/BRD-G31-ddl-readiness-certificates.md) | Durable inactive schema readiness decisions with replay and G24 restore verification |
 | [Epoch-bound row codec](docs/gates/BRD-G32-schema-epoch-row-codec.md) | Opt-in BRVE typed row envelope, strict schema epoch decoding and legacy format preservation |
+| [Inactive catalog schema revisions](docs/gates/BRD-G33-inactive-catalog-schema-revisions.md) | G11 WAL-replayed proposed table definitions with inactive schema isolation and safe compatibility checks |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
