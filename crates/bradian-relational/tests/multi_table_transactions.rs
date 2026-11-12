@@ -262,3 +262,69 @@ fn duplicate_key_and_read_only_snapshot_have_expected_semantics() {
     let verify = db.begin_transaction().unwrap();
     assert_eq!(verify.get(accounts.id, &[Value::Int64(3)]).unwrap(), Some(balance(3, 50)));
 }
+
+
+#[test]
+fn verified_domain_backup_restores_both_tables_and_schema_pins() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("domain");
+    let backup = base.path().join("domain-backup");
+    let restored = base.path().join("restored");
+    let (accounts, movements) = tables();
+    {
+        let db = MultiTableStore::open(&root).unwrap();
+        db.register_table(accounts.clone()).unwrap();
+        db.register_table(movements.clone()).unwrap();
+        let mut tx = db.begin_transaction().unwrap();
+        tx.insert(accounts.id, &balance(1, 100)).unwrap();
+        tx.insert(movements.id, &movement(9, 1, -40)).unwrap();
+        tx.commit().unwrap();
+        let receipt = db.backup_to(&backup).unwrap();
+        assert_eq!(receipt.rows, 4); // two schema metadata rows + two data rows
+    }
+    MultiTableStore::restore_backup(&backup, &restored).unwrap();
+    let db = MultiTableStore::open(&restored).unwrap();
+    assert_eq!(db.table_count(), 2);
+    let tx = db.begin_transaction().unwrap();
+    assert_eq!(tx.get(accounts.id, &[Value::Int64(1)]).unwrap(), Some(balance(1, 100)));
+    assert_eq!(tx.get(movements.id, &[Value::Int64(9)]).unwrap(), Some(movement(9, 1, -40)));
+}
+
+#[test]
+fn orphan_raw_row_detected_on_domain_open() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let (accounts, _) = tables();
+    {
+        let db = MultiTableStore::open(dir.path()).unwrap();
+        db.register_table(accounts).unwrap();
+    }
+    {
+        let raw = RowStore::open(dir.path()).unwrap();
+        raw.put(b"unauthorized-key", b"unverified").unwrap();
+    }
+    assert!(matches!(MultiTableStore::open(dir.path()), Err(DomainError::Corruption(_))));
+}
+
+#[test]
+fn changing_registered_row_bytes_without_matching_schema_is_rejected() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let (accounts, _) = tables();
+    {
+        let db = MultiTableStore::open(dir.path()).unwrap();
+        db.register_table(accounts.clone()).unwrap();
+        let mut tx = db.begin_transaction().unwrap();
+        tx.insert(accounts.id, &balance(8, 800)).unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let raw = RowStore::open(dir.path()).unwrap();
+        let (_, records) = raw.snapshot_with_lsn();
+        let row_key = records.into_iter()
+            .find(|(key,_)| key.starts_with(b"BRPK"))
+            .unwrap().0;
+        raw.put(&row_key, b"not-a-versioned-typed-row").unwrap();
+    }
+    assert!(MultiTableStore::open(dir.path()).is_err());
+}
