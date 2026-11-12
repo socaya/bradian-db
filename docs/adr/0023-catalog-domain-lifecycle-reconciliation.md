@@ -67,6 +67,10 @@ Operators must use a single lifecycle owner for provisioning and avoid independe
 
 A missing active domain pin remains a **hard integrity error**; automatic restoration requires verified backup/restore and an auditable repair workflow, not a blind re-registration. A valid `Pending` record with a matching catalog is automatically retried.
 
+## Coordinated database backup (ADR 0024)
+
+[G19](0024-database-wide-consistent-backup.md) captures the G11 catalog, G15 shared domain and G18 lifecycle journal under the coordinator's exclusive file locks and operation mutex. It independently restores and reconciles all three components before publishing a versioned archive, and rejects component substitution via bound checksums. It is a local coherent backup, not atomic multi-store DDL.
+
 ## Tests, release checks and traceability
 
 `crates/bradian-relational/tests/catalog_lifecycle.rs` exercises end-to-end G18 provisioning followed by G16 cross-table SQL and restart; replay of pending intent before/after the domain pin; adoption of G16 pin metadata; refusal of unknown table IDs, orphan physical pins, damaged markers, unknown journal keys, missing active pins and legacy storage; and exclusive owner locking.
