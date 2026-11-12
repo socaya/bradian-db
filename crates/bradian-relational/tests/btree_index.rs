@@ -179,6 +179,7 @@ fn wal_delta_point_reads_preserve_checkpoint_cache_and_new_mutations() {
     assert_eq!(store.indexed_get(b"key-0100").unwrap(), None);
     assert_eq!(store.indexed_get(b"key-0240").unwrap(), Some(b"inserted".to_vec()));
     assert_eq!(store.indexed_get(b"key-0239").unwrap(), Some(b"checkpoint".to_vec()));
+    assert_eq!(store.indexed_get(b"key-0239").unwrap(), Some(b"checkpoint".to_vec()));
 
     // Since unchanged rows are still accessed via the checkpoint tree, the
     // cache survives WAL changes rather than resetting to memory-only reads.
