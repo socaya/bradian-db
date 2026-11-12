@@ -1,0 +1,13 @@
+[package]
+name = "bradian-relational"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Generic Bradian relational catalog and schema validation (pre-transactional)"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
