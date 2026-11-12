@@ -1,3 +1,9 @@
+# Bradian v1.1 scope notice
+
+The status table below describes **legacy DAP analytics requirements only**. Its DONE rows do not mean that Bradian v1.1 relational OLTP, ACID/MVCC, broad SQL DDL/DML, unified HTAP, distributed transactions, automatic sharding, full RBAC or native TLS have shipped. See [v1.1 code audit](implementation/BRADIAN_V1_1_AUDIT.md). Bootstrap authentication is not a substitute for production database security.
+
+---
+
 # DAP — Implementation Requirements Traceability Matrix
 
 Source of truth: `docs/DER_Analytics_Platform_Architecture_and_Feature_Specification.md`
