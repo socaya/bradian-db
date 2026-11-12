@@ -33,6 +33,7 @@ use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 use crate::index_recovery::{self, IndexRecovery};
 use crate::checkpoint_manifest::{self, CheckpointManifest, ManifestError};
+use crate::backup::{self, BackupReceipt};
 
 const WAL_MAGIC: &[u8; 4] = b"BRWL";
 const WAL_HEADER: usize = 12;
@@ -181,6 +182,36 @@ impl RowStore {
 
     pub fn last_lsn(&self) -> u64 {
         self.inner.lock().lsn
+    }
+
+    /// Create a verified, self-contained backup of one recoverable committed
+    /// state. First establish a checkpoint, then hold the mutation mutex while
+    /// copying the checkpoint manifest, physical snapshot, B+tree and all newer
+    /// committed WAL records. Concurrent writes cannot change the captured
+    /// LSN during the copy. The backup appears at the destination only after
+    /// its recovered contents and every index pointer have been validated.
+    pub fn backup_to(&self, destination: impl AsRef<Path>) -> StoreResult<BackupReceipt> {
+        self.checkpoint()?;
+        let inner = self.inner.lock();
+        if inner.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        inner.wal.sync_all()?;
+        let receipt = BackupReceipt {
+            checkpoint_lsn: inner.checkpoint_lsn,
+            last_lsn: inner.lsn,
+            rows: inner.rows.len() as u64,
+        };
+        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows)
+    }
+
+    /// Restore a verified physical database backup into an absent directory.
+    /// An existing database is never overwritten.
+    pub fn restore_backup(
+        backup: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> StoreResult<BackupReceipt> {
+        backup::restore_backup(backup.as_ref(), destination.as_ref())
     }
 
     /// Sync exactly one replace/insert operation before publishing it.
