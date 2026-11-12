@@ -67,6 +67,7 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G22](gates/BRD-G22-durable-mvcc-history.md) | Independent durable row-version history with restart-safe as-of reads and manual GC | Source/tests committed; manual checks outstanding |
 | [BRD-G23](gates/BRD-G23-durable-typed-sql-history.md) | Opt-in historical SQL and offline G16 shared-domain migration | Source/tests committed; manual checks outstanding |
 | [BRD-G24](gates/BRD-G24-history-backup-restore.md) | Separate G23 history-domain archive with retained version and catalog verification | Source/tests committed; runtime qualification outstanding |
+| [BRD-G25](gates/BRD-G25-lifecycle-history-migration.md) | Verified G18 lifecycle snapshot and offline copy into new G23 history root | Source/tests committed; runtime qualification outstanding |
 | Future gates | G18 lifecycle-aware history conversion, serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 ## Formal specification and assets
