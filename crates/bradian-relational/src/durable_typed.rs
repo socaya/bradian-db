@@ -45,6 +45,7 @@ fn key_from_row(def: &Definition, row: &[Value]) -> Result<Vec<u8>, DomainError>
 pub struct DurableTypedStore {
     store: DurableMvccStore,
     tables: BTreeMap<TableId, Definition>,
+    schema_epochs: BTreeMap<TableId, u64>,
 }
 
 impl DurableTypedStore {
@@ -152,7 +153,7 @@ impl DurableTypedStore {
                 }
             }
         }
-        Ok(Self { store, tables })
+        Ok(Self { store, tables, schema_epochs: registered_at })
     }
 
     pub fn active_tables(&self) -> Vec<TableId> {
@@ -161,6 +162,25 @@ impl DurableTypedStore {
 
     pub fn table(&self, id: TableId) -> Option<&Table> {
         self.tables.get(&id).map(|definition| &definition.table)
+    }
+
+    /// G26: return the immutable table schema and its first committed WAL
+    /// registration LSN if it existed at the requested retained horizon.
+    /// No historical ALTER/DROP versions are implied by this read-only API.
+    pub fn schema_as_of(&self, id: TableId, lsn: u64) -> Result<(Table, u64), DomainError> {
+        self.check_schema_as_of(id, lsn)?;
+        let registration = *self.schema_epochs.get(&id)
+            .ok_or_else(|| DomainError::Corruption(
+                "durable schema registration is missing".into()
+            ))?;
+        Ok((self.tables.get(&id)
+            .ok_or(DomainError::UnknownTable(id.0))?.table.clone(), registration))
+    }
+
+    /// The registered schema epochs are extracted from verified G22 history,
+    /// not inferred from the current catalog or process start time.
+    pub fn schema_epochs(&self) -> Vec<(TableId, u64)> {
+        self.schema_epochs.iter().map(|(id, lsn)| (*id, *lsn)).collect()
     }
 
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
