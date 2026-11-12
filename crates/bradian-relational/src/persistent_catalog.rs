@@ -11,12 +11,13 @@
 //! designed. Its physical store is exclusively owned by one RowStore process.
 
 use std::path::Path;
+use std::collections::BTreeMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Catalog, CatalogError, DatabaseId, ForeignKeySpec, SchemaId, TableId, TableSpec,
+    Catalog, CatalogError, DatabaseId, ForeignKeySpec, SchemaId, Table, TableId, TableSpec,
 };
 use crate::row_store::{RowStore, StoreError};
 use crate::backup::BackupReceipt;
@@ -49,6 +50,7 @@ enum Command {
     DropTable { table: TableId },
     DropSchema { schema: SchemaId },
     DropDatabase { database: DatabaseId },
+    ProposeTableRevision { table: TableId, proposed: Table },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +63,7 @@ struct Event {
 }
 
 impl Event {
-    fn apply(&self, catalog: &mut Catalog) -> PersistentCatalogResult<Option<u64>> {
+    fn apply(&self, catalog: &mut Catalog, revisions: &mut BTreeMap<TableId, Table>) -> PersistentCatalogResult<Option<u64>> {
         let result = match &self.command {
             Command::CreateDatabase { name } => {
                 Some(catalog.create_database(name)?.0)
@@ -77,6 +79,9 @@ impl Event {
                 None
             }
             Command::DropTable { table } => {
+                if revisions.contains_key(table) {
+                    return Err(PersistentCatalogError::Corruption("table has pending schema revision".into()));
+                }
                 catalog.drop_table(*table)?;
                 None
             }
@@ -86,6 +91,18 @@ impl Event {
             }
             Command::DropDatabase { database } => {
                 catalog.drop_database(*database)?;
+                None
+            }
+            Command::ProposeTableRevision { table, proposed } => {
+                let original = catalog.table(*table).ok_or_else(||
+                    PersistentCatalogError::Corruption("revision refers to missing table".into())
+                )?;
+                crate::schema_evolution::plan_nullable_additions(original, proposed)
+                    .map_err(|e| PersistentCatalogError::Corruption(e.to_string()))?;
+                if revisions.contains_key(table) {
+                    return Err(PersistentCatalogError::Corruption("duplicate table revision".into()));
+                }
+                revisions.insert(*table, proposed.clone());
                 None
             }
         };
@@ -101,6 +118,7 @@ impl Event {
 #[derive(Debug)]
 struct Inner {
     catalog: Catalog,
+    revisions: BTreeMap<TableId, Table>,
     journal: RowStore,
 }
 
@@ -115,6 +133,7 @@ impl PersistentCatalog {
     pub fn open(path: impl AsRef<Path>) -> PersistentCatalogResult<Self> {
         let journal = RowStore::open(path)?;
         let mut catalog = Catalog::new();
+        let mut revisions = BTreeMap::new();
         let rows = journal.scan();
         if rows.is_empty() {
             journal.put(MARKER_KEY, MARKER_VALUE)?;
@@ -146,7 +165,7 @@ impl PersistentCatalog {
                         format!("unsupported DDL event version at LSN {next_lsn}"),
                     ));
                 }
-                event.apply(&mut catalog)
+                event.apply(&mut catalog, &mut revisions)
                     .map_err(|err| PersistentCatalogError::Corruption(
                         format!("DDL replay failed at LSN {next_lsn}: {err}"),
                     ))?;
@@ -161,13 +180,22 @@ impl PersistentCatalog {
                 ));
             }
         }
-        Ok(Self { inner: Mutex::new(Inner { catalog, journal }) })
+        Ok(Self { inner: Mutex::new(Inner { catalog, revisions, journal }) })
     }
 
     /// Return an owned consistent metadata view. A cloned catalog is necessary
     /// because future DDL must not mutate the reader's snapshot.
     pub fn snapshot(&self) -> Catalog {
         self.inner.lock().catalog.clone()
+    }
+
+    /// G33 proposals are durable, inactive and separate from the live catalog.
+    pub fn proposed_table_revisions(&self) -> Vec<Table> {
+        self.inner.lock().revisions.values().cloned().collect()
+    }
+
+    pub fn proposed_table_revision(&self, id: TableId) -> Option<Table> {
+        self.inner.lock().revisions.get(&id).cloned()
     }
 
     pub fn last_lsn(&self) -> u64 {
@@ -199,6 +227,7 @@ impl PersistentCatalog {
     fn commit(&self, command: Command) -> PersistentCatalogResult<Option<u64>> {
         let mut inner = self.inner.lock();
         let mut tentative = inner.catalog.clone();
+        let mut pending = inner.revisions.clone();
         // Validate and allocate stable identities before modifying the WAL.
         let mut event = Event {
             version: JOURNAL_VERSION,
@@ -217,6 +246,11 @@ impl PersistentCatalog {
                 None
             }
             Command::DropTable { table } => {
+                if pending.contains_key(table) {
+                    return Err(PersistentCatalogError::Corruption(
+                        "table has pending immutable revision".into()
+                    ));
+                }
                 tentative.drop_table(*table)?;
                 None
             }
@@ -226,6 +260,20 @@ impl PersistentCatalog {
             }
             Command::DropDatabase { database } => {
                 tentative.drop_database(*database)?;
+                None
+            }
+            Command::ProposeTableRevision { table, proposed } => {
+                let current = tentative.table(*table).ok_or_else(||
+                    PersistentCatalogError::Corruption("revision target missing".into())
+                )?;
+                crate::schema_evolution::plan_nullable_additions(current, proposed)
+                    .map_err(|e| PersistentCatalogError::Corruption(e.to_string()))?;
+                if pending.contains_key(table) {
+                    return Err(PersistentCatalogError::Corruption(
+                        "schema revision already proposed".into()
+                    ));
+                }
+                pending.insert(*table, proposed.clone());
                 None
             }
         };
@@ -241,7 +289,16 @@ impl PersistentCatalog {
             ));
         }
         inner.catalog = tentative;
+        inner.revisions = pending;
         Ok(event.result_id)
+    }
+
+    /// Append a replay-validated inactive schema proposal; NOT an ALTER.
+    pub fn propose_table_revision(
+        &self, table: TableId, proposed: Table,
+    ) -> PersistentCatalogResult<u64> {
+        self.commit(Command::ProposeTableRevision { table, proposed })?;
+        Ok(self.last_lsn())
     }
 
     pub fn create_database(&self, name: &str) -> PersistentCatalogResult<DatabaseId> {
