@@ -67,6 +67,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Lifecycle-to-history cutover](docs/gates/BRD-G25-lifecycle-history-migration.md) | Verified G18 snapshot and separately published G23 history root, preserving the original database |
 | [Historical schema inspection](docs/gates/BRD-G26-historical-schema-inspection.md) | Validated immutable G22 schema registration epochs and SQL DESCRIBE TABLE AS OF |
 | [Additive schema compatibility](docs/gates/BRD-G27-additive-schema-compatibility.md) | Read-only nullable-column compatibility planning and historical row projection |
+| [Durable prepared schema intents](docs/gates/BRD-G28-durable-schema-intents.md) | WAL-backed compatible schema proposal preparation and fail-closed restart validation; no ALTER activation |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
