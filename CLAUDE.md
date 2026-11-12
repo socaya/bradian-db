@@ -1,3 +1,17 @@
+# Bradian Database Systems — SRS v1.1 implementation direction
+
+**Authoritative target**: `docs/Bradian_Master_Architecture_SRS_v1.1.md`.
+**Source audit**: `docs/implementation/BRADIAN_V1_1_AUDIT.md`.
+**Previous foundation**: `docs/DER_Analytics_Platform_Architecture_and_Feature_Specification.md`.
+
+This repository started as the DAP analytical engine. Preserve working analytical code, `dap-*` crate imports, existing DHIS2 adapters and persisted `.derc` files until a tested compatibility migration exists. Bradian's full relational OLTP/HTAP/cluster/security targets are **not implemented** by renaming the product.
+
+Security: only the local temporary administrator bearer-token bridge has been introduced. All full SQL, durable authorization and TLS/mTLS work remains release-blocking. No unauthenticated API exposure or unsafe non-loopback bind is permitted in the bootstrap profile.
+
+Before every implementation milestone: audit code and v1.1 requirements, write an ADR for any durable format/protocol, add correctness/authorization/crash tests, run workspace CI, record evidence in `docs/gates/`, and avoid claiming partial functionality as done.
+
+---
+
 # CLAUDE.md — DAP (DER Analytics Platform) Implementation Guide
 
 This file governs implementation work on DAP. The authoritative functional/architectural source is
