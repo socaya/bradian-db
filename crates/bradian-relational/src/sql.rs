@@ -115,26 +115,26 @@ fn lex(source: &str) -> SqlResult<Vec<Token>> {
 }
 
 #[derive(Clone, Debug)]
-enum Literal {
+pub(crate) enum Literal {
     Null,
     Bool(bool),
     Number(String),
     Text(String),
 }
 
-struct Parser {
+pub(crate) struct Parser {
     tokens: Vec<Token>,
     pos: usize,
 }
 
 impl Parser {
-    fn new(sql: &str) -> SqlResult<Self> {
+    pub(crate) fn new(sql: &str) -> SqlResult<Self> {
         Ok(Self { tokens: lex(sql)?, pos: 0 })
     }
 
     fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
 
-    fn word(&mut self) -> SqlResult<String> {
+    pub(crate) fn word(&mut self) -> SqlResult<String> {
         match self.tokens.get(self.pos).cloned() {
             Some(Token::Word(word)) => {
                 self.pos += 1;
@@ -144,31 +144,31 @@ impl Parser {
         }
     }
 
-    fn consume_word(&mut self, value: &str) -> bool {
+    pub(crate) fn consume_word(&mut self, value: &str) -> bool {
         if matches!(self.peek(), Some(Token::Word(word)) if word.eq_ignore_ascii_case(value)) {
             self.pos += 1;
             true
         } else { false }
     }
 
-    fn expect(&mut self, value: &str) -> SqlResult<()> {
+    pub(crate) fn expect(&mut self, value: &str) -> SqlResult<()> {
         if self.consume_word(value) { Ok(()) }
         else { Err(SqlError::Syntax(format!("expected {value}"))) }
     }
 
-    fn consume_symbol(&mut self, value: char) -> bool {
+    pub(crate) fn consume_symbol(&mut self, value: char) -> bool {
         if self.peek() == Some(&Token::Symbol(value)) {
             self.pos += 1;
             true
         } else { false }
     }
 
-    fn symbol(&mut self, value: char) -> SqlResult<()> {
+    pub(crate) fn symbol(&mut self, value: char) -> SqlResult<()> {
         if self.consume_symbol(value) { Ok(()) }
         else { Err(SqlError::Syntax(format!("expected '{value}'"))) }
     }
 
-    fn name(&mut self) -> SqlResult<Vec<String>> {
+    pub(crate) fn name(&mut self) -> SqlResult<Vec<String>> {
         let mut parts = vec![self.word()?];
         while self.consume_symbol('.') {
             parts.push(self.word()?);
@@ -179,7 +179,7 @@ impl Parser {
         Ok(parts)
     }
 
-    fn list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> SqlResult<T>) -> SqlResult<Vec<T>> {
+    pub(crate) fn list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> SqlResult<T>) -> SqlResult<Vec<T>> {
         self.symbol('(')?;
         let mut values = Vec::new();
         loop {
@@ -190,7 +190,7 @@ impl Parser {
         Ok(values)
     }
 
-    fn literal(&mut self) -> SqlResult<Literal> {
+    pub(crate) fn literal(&mut self) -> SqlResult<Literal> {
         match self.tokens.get(self.pos).cloned() {
             Some(Token::Text(value)) => { self.pos += 1; Ok(Literal::Text(value)) }
             Some(Token::Number(value)) => { self.pos += 1; Ok(Literal::Number(value)) }
@@ -246,7 +246,7 @@ impl Parser {
         }
     }
 
-    fn assignments(&mut self) -> SqlResult<Vec<(String, Literal)>> {
+    pub(crate) fn assignments(&mut self) -> SqlResult<Vec<(String, Literal)>> {
         let mut fields = Vec::new();
         loop {
             let column = self.word()?;
@@ -269,19 +269,19 @@ impl Parser {
         Ok(tests)
     }
 
-    fn end(&mut self) -> SqlResult<()> {
+    pub(crate) fn end(&mut self) -> SqlResult<()> {
         self.consume_symbol(';');
         if self.pos == self.tokens.len() { Ok(()) }
         else { Err(SqlError::Unsupported("trailing tokens or multiple statements".into())) }
     }
 }
 
-fn qualified(parts: &[String], expected: usize) -> SqlResult<()> {
+pub(crate) fn qualified(parts: &[String], expected: usize) -> SqlResult<()> {
     if parts.len() == expected { Ok(()) }
     else { Err(SqlError::Resolution(format!("expected {expected}-part qualified name"))) }
 }
 
-fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
+pub(crate) fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
     if matches!(lit, Literal::Null) {
         return if column.nullable { Ok(Value::Null) }
         else { Err(SqlError::Type(format!("{} cannot be NULL", column.name))) };
@@ -315,12 +315,12 @@ fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
     }
 }
 
-fn locate(table: &Table, field: &str) -> SqlResult<usize> {
+pub(crate) fn locate(table: &Table, field: &str) -> SqlResult<usize> {
     table.columns.iter().position(|c| c.name == field)
         .ok_or_else(|| SqlError::Resolution(format!("unknown column {field}")))
 }
 
-fn key_predicate(
+pub(crate) fn key_predicate(
     parser: &mut Parser, table: &Table,
 ) -> SqlResult<Vec<Value>> {
     let entries = parser.predicate()?;
