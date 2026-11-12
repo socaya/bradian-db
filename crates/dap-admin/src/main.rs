@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "dap-admin", version, about = "DAP operator CLI")]
+#[command(name = "bradian-db", version, about = "Bradian Database Systems operator CLI")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -138,7 +138,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Version => {
-            println!("dap-admin {}", env!("CARGO_PKG_VERSION"));
+            println!("bradian-db {}", env!("CARGO_PKG_VERSION"));
         }
         Cmd::ExportSnapshot(a) => do_export(a)?,
         Cmd::RestoreSnapshot(a) => do_restore(a)?,
@@ -159,9 +159,16 @@ fn main() -> anyhow::Result<()> {
 
 async fn do_serve(a: ServeArgs) -> anyhow::Result<()> {
     use std::sync::Arc;
+    // The bootstrap-only HTTP API is never permitted to listen remotely.
+    let addr: std::net::SocketAddr = a.bind.parse()?;
+    anyhow::ensure!(addr.ip().is_loopback(),
+        "remote bind disabled until Bradian TLS and production authentication are implemented");
+    let bootstrap_token = std::env::var("BRADIAN_API_TOKEN")
+        .map_err(|_| anyhow::anyhow!("BRADIAN_API_TOKEN required for API startup"))?;
     let catalog = Arc::new(dap_catalog::Catalog::new());
     let engine = Arc::new(dap_serving::AnalyticsEngine::new(a.root, catalog));
     let state = dap_serving::ServerState::new(engine);
+    state.register_bootstrap_admin(&bootstrap_token).map_err(anyhow::Error::msg)?;
     let app = match a.ui_dir {
         Some(dir) => dap_serving::routes::router_with_static_ui(state, dir),
         None => dap_serving::router(state),
