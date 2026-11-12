@@ -30,13 +30,6 @@
   font-size: var(--fs-13);
   color: #e5e7eb;
 }
-.nav .brand .mark {
-  background: #1f2937;
-  border-radius: var(--r-4);
-  padding: 2px 6px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-11);
-}
 
 .nav .section-label {
   font-size: var(--fs-11);
@@ -61,7 +54,7 @@
   justify-content: space-between;
   gap: var(--sp-2);
 }
-.nav a:hover { background: #1f2937; color: #f4f4f4; }
+.nav a:hover { background: #154475; color: #ffffff; }
 .nav a.active { background: var(--surface-nav-active); color: #ffffff; }
 .nav a .hint {
   font-family: var(--font-mono);
