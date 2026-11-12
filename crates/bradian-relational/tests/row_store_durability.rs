@@ -215,3 +215,79 @@ fn repeated_checkpoint_keeps_newest_visible_state() {
     assert_eq!(store.get(b"x"), Some(b"new".to_vec()));
     assert_eq!(store.len(), 1);
 }
+
+
+#[test]
+fn concurrent_threads_share_one_serialized_wal() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempdir().unwrap();
+    let store = Arc::new(open(dir.path()));
+    let mut handles = Vec::new();
+    for worker in 0..4 {
+        let store = Arc::clone(&store);
+        handles.push(thread::spawn(move || {
+            for offset in 0..8 {
+                let key = format!("{worker}:{offset}");
+                let value = format!("value-{worker}-{offset}");
+                store.put(key.as_bytes(), value.as_bytes()).unwrap();
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    assert_eq!(store.len(), 32);
+    assert_eq!(store.last_lsn(), 32);
+    drop(store);
+    assert_eq!(open(dir.path()).len(), 32);
+}
+
+#[test]
+fn wal_magic_corruption_is_not_silently_truncated() {
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.put(b"a", b"data").unwrap();
+    }
+    let path = dir.path().join("rows.wal");
+    let mut body = fs::read(&path).unwrap();
+    body[0] ^= 0xff;
+    fs::write(path, body).unwrap();
+    assert!(matches!(RowStore::open(dir.path()), Err(StoreError::Corruption(_))));
+}
+
+#[test]
+fn wal_sequence_gap_is_an_error_even_with_valid_checksum() {
+    // Build one valid record, then change its sequence number and re-CRC the
+    // body to verify that structural sequence checks are independent of CRC.
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.put(b"record", b"value").unwrap();
+    }
+    let path = dir.path().join("rows.wal");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[12..20].copy_from_slice(&3_u64.to_le_bytes());
+    let checksum = crc32fast::hash(&bytes[12..]);
+    bytes[8..12].copy_from_slice(&checksum.to_le_bytes());
+    fs::write(path, bytes).unwrap();
+    assert!(matches!(RowStore::open(dir.path()), Err(StoreError::Corruption(_))));
+}
+
+#[test]
+fn checkpoint_cannot_resurrect_deleted_rows_on_restart() {
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.put(b"patient", b"record-a").unwrap();
+        store.checkpoint().unwrap();
+        store.delete(b"patient").unwrap();
+        store.checkpoint().unwrap();
+    }
+    let restarted = open(dir.path());
+    assert_eq!(restarted.get(b"patient"), None);
+    assert_eq!(restarted.len(), 0);
+    assert_eq!(restarted.last_lsn(), 2);
+}
