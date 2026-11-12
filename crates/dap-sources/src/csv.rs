@@ -124,7 +124,7 @@ where
             )));
         }
         let mut payload = serde_json::Map::new();
-        for (name, value) in header.iter().zip(row.into_iter()) {
+        for (name, value) in header.iter().zip(row) {
             payload.insert(name.clone(), serde_json::Value::String(value));
         }
         let shell = project(&payload)?;
