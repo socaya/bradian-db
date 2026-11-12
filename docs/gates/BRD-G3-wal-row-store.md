@@ -17,6 +17,10 @@ Recovery validates published pages, reads WAL frames sequentially and replays ch
 ## Implemented tests
 
 - [x] Restart replay of inserts, replacements and deletes.
+- [x] Atomically committed multi-key WAL batches under one LSN.
+- [x] Optional global-LSN optimistic conflict rejection before append.
+- [x] Torn final WAL batch rejection without partial application.
+- [x] Malformed batch with recomputed CRC rejected before changes.
 - [x] Ordered reads with binary keys.
 - [x] Exact maximum inline row capacity.
 - [x] Multi-page snapshot construction and restart.
@@ -50,6 +54,6 @@ These represent **committed tests, not executed-test evidence**.
 
 ## Explicit limitation
 
-**G3 is not the full ACID relational DBMS gate.** Single-operation WAL sync and restart recovery are implemented but are not sufficient for production database guarantees, multi-row atomic transactions, inter-process safe concurrent writers or globally consistent snapshots. Keep the storage path exclusive to a single process. The legacy analytical `.derc` format and DHIS2 integrations remain unchanged.
+**G3 is not the full ACID relational DBMS gate.** Single-operation WAL sync, multi-key atomic batch commit and restart recovery are implemented but are not sufficient for production database guarantees, multi-row atomic transactions, inter-process safe concurrent writers or globally consistent snapshots. Keep the storage path exclusive to a single process. The legacy analytical `.derc` format and DHIS2 integrations remain unchanged.
 
 CI automation is disabled by owner instruction. This gate remains **unaccepted** until manual checks and outstanding correctness requirements are verified.
