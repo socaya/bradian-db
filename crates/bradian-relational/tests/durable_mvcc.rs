@@ -323,3 +323,19 @@ fn key_and_value_limits_fail_before_any_wal_write() {
     assert_eq!(store.latest_lsn(), before);
     tx.rollback();
 }
+
+
+#[test]
+fn empty_but_preexisting_plain_rowstore_is_not_silently_initialized() {
+    let dir = tempdir().unwrap();
+    {
+        let raw = RowStore::open(dir.path()).unwrap();
+        raw.put(b"old", b"value").unwrap();
+        raw.delete(b"old").unwrap();
+        assert!(raw.is_empty());
+        assert!(raw.last_lsn() > 0);
+    }
+    assert!(matches!(
+        DurableMvccStore::open(dir.path()), Err(DurableMvccError::Corruption(_))
+    ));
+}
