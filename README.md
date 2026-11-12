@@ -1,40 +1,31 @@
-# DAP — DER Analytics Platform
+# Bradian Database Systems (`bradian-db`)
 
-Native, offline-capable, DHIS2-aware analytical engine. Columnar storage, vectorized execution,
-incremental materialized views, cost-based planning, secure federated analytics.
+**Status: pre-release analytical prototype, not a completed relational or distributed HTAP database.**
 
-**Specification:** [`docs/DER_Analytics_Platform_Architecture_and_Feature_Specification.md`](docs/DER_Analytics_Platform_Architecture_and_Feature_Specification.md)
-**Implementation rules:** [`CLAUDE.md`](CLAUDE.md)
-**Traceability matrix:** [`docs/traceability.md`](docs/traceability.md)
-**ADRs:** [`docs/adr/`](docs/adr/)
+Bradian is being developed as a proprietary cross-platform relational and analytical DBMS with native scaling and Bradian Studio. The inherited DAP Rust workspace already implements portions of the native `.derc` columnar storage, analytical execution, DHIS2 semantic integration and HTTP query service. These modules are retained for compatibility while the authoritative OLTP engine and distributed transaction architecture are developed.
 
-## Workspace
+The target specification is [Bradian Master Architecture & SRS v1.1](docs/Bradian_Master_Architecture_SRS_v1.1.md), with the [source audit and staged roadmap](docs/implementation/BRADIAN_V1_1_AUDIT.md).
 
-```
-crates/
-  dap-core       typed value model, UIDs, periods, errors
-  dap-catalog    versioned DHIS2 semantic catalog
-  dap-storage    .derc segment format, WAL, manifests, compaction
-  dap-runtime    column batches, vectorized operators, scheduler
-  dap-planner    parser, binder, logical plan, cost-based optimizer
-  dap-ingest     canonical change log, idempotent ingestion
-  dap-views      incremental materialized views, retractions
-  dap-dhis2      DHIS2 aggregate/event/tracker/indicator semantics
-  dap-security   authentication, authorization, audit
-  dap-serving    HTTP/JSON analytical API (axum)
-  dap-admin      operator CLI + diagnostics
-  dap-benchmark  reproducible benchmark harness
-```
+## Compatibility
 
-## Build and test
+The `dap-*` crate names, source imports, `.derc` signatures and DHIS2-compatible endpoints remain unchanged pending dedicated migration and conformance testing. The desired repository name is `socaya/bradian-db`; renaming the remote GitHub repository is an administrative operation independent of code branding.
 
-```bash
+## Build and tests
+
+```sh
 cargo check --workspace
-cargo test  --workspace
+cargo test --workspace
+cd apps/dap-ui && npm ci || npm install
+npm run typecheck
+npm run build
 ```
 
-## Status
+## Temporary development API protection
 
-Pre-release. See [`docs/traceability.md`](docs/traceability.md) for per-requirement status.
-No runtime dependency on ClickHouse, Apache Doris, DuckDB, or any externally-operated OLAP engine
-(spec §1).
+Use a securely generated `BRADIAN_API_TOKEN` (at least 32 non-whitespace characters). The bootstrap server requires this token for analytical endpoints and accepts only loopback binds; the public liveness probe is `GET /healthz`. The frontend does not have a login/session workflow yet and therefore cannot use protected endpoints until one is implemented.
+
+See [bootstrap auth limitations](docs/security/BOOTSTRAP_API_AUTH.md). This is **not production-ready** identity management, TLS, RBAC or data isolation.
+
+## Engineering constraints
+
+Do not install another OLTP/OLAP server as Bradian's database core. Reviewed cryptographic, networking and compression libraries are allowed. Never claim full OLTP, HTAP, SQL compliance, horizontal scaling, storage encryption, high availability or production security without implementation and test evidence.
