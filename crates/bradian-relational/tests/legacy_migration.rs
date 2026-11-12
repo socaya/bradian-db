@@ -236,3 +236,40 @@ fn migration_with_only_catalog_metadata_keeps_unprovisioned_tables_empty() {
         Ok(())
     }).unwrap();
 }
+
+
+#[test]
+fn corrupted_legacy_row_aborts_before_publishing_any_destination() {
+    use bradian_relational::persistent_catalog::PersistentCatalog;
+    use bradian_relational::row_store::RowStore;
+
+    let base = tempdir().unwrap();
+    let source = base.path().join("legacy");
+    let dest = base.path().join("rejected");
+    create_legacy(&source);
+    let table_id = {
+        let catalog = PersistentCatalog::open(source.join("catalog")).unwrap();
+        catalog.snapshot().tables().find(|t| t.name == "accounts").unwrap().id
+    };
+    {
+        let raw = RowStore::open(source.join("tables").join(table_id.0.to_string())).unwrap();
+        raw.put(b"unknown-physical-key", b"invalid").unwrap();
+    }
+    assert!(migrate_legacy_sql(&source, &dest).is_err());
+    assert!(!dest.exists());
+    assert!(source.join("tables").join(table_id.0.to_string()).exists());
+}
+
+#[test]
+fn migrated_destination_has_only_catalog_and_shared_domain_storage() {
+    let base = tempdir().unwrap();
+    let source = base.path().join("legacy");
+    let dest = base.path().join("shared");
+    create_legacy(&source);
+    let report = migrate_legacy_sql(&source, &dest).unwrap();
+    assert!(report.total_rows > 0);
+    assert!(dest.join("catalog").exists());
+    assert!(dest.join("shared-domain").exists());
+    assert!(!dest.join("tables").exists());
+    assert!(source.join("tables").exists());
+}
