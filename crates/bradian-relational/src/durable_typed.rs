@@ -15,6 +15,7 @@ use crate::transaction_domain::DomainError;
 const SCHEMA_PREFIX: &[u8] = b"\0bradian-domain-table-v1:";
 const ROW_PREFIX: &[u8] = b"BRPK";
 const PROPOSAL_PREFIX: &[u8] = b"\0bradian-schema-proposal-v1:";
+const ABORT_PREFIX: &[u8] = b"\0bradian-schema-abort-v1:";
 const INLINE_CAPACITY: usize = 3545;
 
 #[derive(Clone)]
@@ -48,6 +49,7 @@ pub struct DurableTypedStore {
     tables: BTreeMap<TableId, Definition>,
     schema_epochs: BTreeMap<TableId, u64>,
     proposals: BTreeMap<TableId, (Table, u64)>,
+    aborted: BTreeMap<TableId, u64>,
 }
 
 impl DurableTypedStore {
@@ -91,7 +93,7 @@ impl DurableTypedStore {
             ));
         }
         for (key, bytes) in &records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
             let table_id = table_id_from_row_key(key)?;
             let schema = tables.get(&table_id).ok_or_else(|| {
                 DomainError::Corruption(format!(
@@ -161,8 +163,27 @@ impl DurableTypedStore {
                 return Err(DomainError::Corruption("G28 proposal was rewritten".into()));
             }
         }
+        let mut aborted = BTreeMap::new();
         for (key, lsn, value) in &versions {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
+            if !key.starts_with(ABORT_PREFIX) { continue; }
+            if key.len() != ABORT_PREFIX.len() + 8 {
+                return Err(DomainError::Corruption("invalid G29 abort marker key".into()));
+            }
+            let id = TableId(u64::from_be_bytes(
+                key[ABORT_PREFIX.len()..].try_into().unwrap()
+            ));
+            let (_, prepared_at) = proposals.get(&id).ok_or_else(||
+                DomainError::Corruption("G29 abort marker without prepared intent".into())
+            )?;
+            if *lsn <= *prepared_at || value.as_deref() != Some(b"ABORTED-V1".as_slice()) {
+                return Err(DomainError::Corruption("invalid G29 aborted intent sequence or payload".into()));
+            }
+            if aborted.insert(id, *lsn).is_some() {
+                return Err(DomainError::Corruption("G29 abort marker was rewritten".into()));
+            }
+        }
+        for (key, lsn, value) in &versions {
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
             let id = table_id_from_row_key(key)?;
             let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
                 format!("historical row refers to unregistered table {}", id.0)
@@ -181,7 +202,7 @@ impl DurableTypedStore {
                 }
             }
         }
-        Ok(Self { store, tables, schema_epochs: registered_at, proposals })
+        Ok(Self { store, tables, schema_epochs: registered_at, proposals, aborted })
     }
 
     pub fn active_tables(&self) -> Vec<TableId> {
@@ -232,6 +253,37 @@ impl DurableTypedStore {
     pub fn prepared_schema_proposals(&self) -> Vec<(TableId, Table, u64)> {
         self.proposals.iter().map(|(id, (table, lsn))|
             (*id, table.clone(), *lsn)).collect()
+    }
+
+    /// G29: durably retire a prepared proposal without changing the G11
+    /// catalog or any historical row. The abort marker is append-only and
+    /// replay-validated. It is deliberately not an ALTER/activation protocol.
+    pub fn abort_prepared_schema(&self, id: TableId) -> Result<u64, DomainError> {
+        let mut proposal_key = PROPOSAL_PREFIX.to_vec();
+        proposal_key.extend_from_slice(&id.0.to_be_bytes());
+        let mut abort_key = ABORT_PREFIX.to_vec();
+        abort_key.extend_from_slice(&id.0.to_be_bytes());
+        let mut tx = self.store.begin();
+        // Use the current MVCC snapshot, not the opening cache: proposals
+        // added after this owner was opened remain discoverable.
+        let proposed = tx.get(&proposal_key).map_err(map_mvcc)?
+            .ok_or_else(|| DomainError::Corruption(
+                "cannot abort a missing prepared schema proposal".into()
+            ))?;
+        let table: Table = serde_json::from_slice(&proposed)?;
+        let original = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
+        crate::schema_evolution::plan_nullable_additions(&original.table, &table)?;
+        if tx.get(&abort_key).map_err(map_mvcc)?.is_some() {
+            return Err(DomainError::Corruption("schema proposal was already aborted".into()));
+        }
+        tx.insert(&abort_key, b"ABORTED-V1").map_err(map_mvcc)?;
+        tx.commit().map_err(map_mvcc)
+    }
+
+    /// Recovery status is a snapshot of the history WAL at engine open.
+    /// Reopen the owner to inspect new decisions made during this process.
+    pub fn aborted_schema_proposals(&self) -> Vec<(TableId, u64)> {
+        self.aborted.iter().map(|(id, lsn)| (*id, *lsn)).collect()
     }
 
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
@@ -291,7 +343,7 @@ impl DurableTypedStore {
         let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let row = decode_row(&def.table, &bytes)?;
@@ -354,7 +406,7 @@ impl DurableTypedTransaction<'_> {
         for (key, bytes) in records {
             // The full physical scan participates in G20's conservative
             // global LSN change validation when the transaction writes.
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) { continue; }
+            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let def = self.definition(id)?;
