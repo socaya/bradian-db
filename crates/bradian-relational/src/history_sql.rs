@@ -105,6 +105,27 @@ impl HistorySqlEngine {
         let table = self.resolve(&parts)?;
         Ok(self.domain.schema_as_of(table.id, lsn)?)
     }
+    /// G27 preview: decode retained rows with the ORIGINAL immutable schema
+    /// and present them under a proposed append-only nullable-column shape.
+    /// No catalog or historical WAL changes are made by this method.
+    pub fn preview_nullable_additions_as_of(
+        &self,
+        qualified_table: &str,
+        lsn: u64,
+        proposed: &Table,
+    ) -> SqlResult<Vec<Vec<crate::typed_table::Value>>> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let current = self.resolve(&parts)?;
+        let (original, _) = self.domain.schema_as_of(current.id, lsn)?;
+        let plan = crate::schema_evolution::plan_nullable_additions(&original, proposed)?;
+        let rows = self.domain.scan_as_of(original.id, lsn)?;
+        rows.iter().map(|row| {
+            crate::schema_evolution::project_row(&plan, row).map_err(SqlError::from)
+        }).collect()
+    }
+
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks
