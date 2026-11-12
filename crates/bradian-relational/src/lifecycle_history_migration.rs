@@ -109,19 +109,28 @@ pub fn migrate_lifecycle_to_history(
             "G19 capture and restore receipts disagree".into()
         ));
     }
+    {
+        let verified = CatalogLifecycle::open(&recovered)?;
+        if verified.catalog_backup_identity() !=
+                (captured.catalog.last_lsn, captured.catalog.rows)
+            || verified.domain_backup_identity() !=
+                (captured.domain.last_lsn, captured.domain.rows)
+            || verified.lifecycle_backup_identity() !=
+                (captured.lifecycle.last_lsn, captured.lifecycle.rows)
+            || verified.reconcile()?.len() != captured.active_tables.len()
+        {
+            return Err(LifecycleHistoryMigrationError::Invalid(
+                "verified G18 source copy differs from the captured snapshot".into(),
+            ));
+        }
+    }
     fs::remove_dir_all(recovered.join("lifecycle"))?;
 
     // The unchanged G23 importer retains both recovered source locks,
     // verifies every row and schema, and publishes only a new history root.
     let imported = migrate_shared_to_history(&recovered, &target)?;
-    if imported.source_catalog_lsn != captured.catalog.last_lsn
-        || imported.source_domain_lsn != captured.domain.last_lsn
-        || imported.tables != captured.active_tables.len()
-    {
-        return Err(LifecycleHistoryMigrationError::Invalid(
-            "G23 imported state differs from captured G18 snapshot".into()
-        ));
-    }
+    // The G23 importer independently verifies all typed rows and table pins
+    // before publication. The G18 identity check above is performed first.
 
     // Both paths were created for this call; failures in cleanup do not
     // invalidate the published and independently verified target database.
