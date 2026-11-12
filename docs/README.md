@@ -21,6 +21,7 @@ This directory contains the engineering specifications, architectural decisions,
 7. **[Typed table ADR](adr/0009-typed-table-rows.md)** — persisted schema pinning, typed row format and primary-key integrity.
 8. **[Disk B+tree index ADR](adr/0010-checkpoint-btree.md)** — immutable on-disk multi-level index, checkpoint integration and recovery boundaries.
 9. **[Read-only buffer pool ADR](adr/0011-generation-scoped-buffer-pool.md)** — bounded LRU page caching and immutable generation safety.
+10. **[Mutable index overlay ADR](adr/0012-wal-backed-mutable-index.md)** — WAL-committed logical delta and on-disk checkpoint B+tree merging.
 
 ## Current milestone records
 
@@ -32,7 +33,8 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G4](gates/BRD-G4-typed-table-crud.md) | Typed table CRUD, schema identity, composite PKs, validation | Source/tests committed; manual checks outstanding |
 | [BRD-G5](gates/BRD-G5-checkpoint-btree.md) | Immutable physical B+tree index with point and range lookups | Source/tests committed; manual checks outstanding |
 | [BRD-G6](gates/BRD-G6-buffer-pool.md) | Bounded physical page cache, CRC validation, immutable-generation invalidation | Source/tests committed; manual checks outstanding |
-| Future gates | Writable buffer pool, mutable B+tree, SQL transactions, MVCC, HTAP, clusters and enterprise security | Must be implemented and qualified |
+| [BRD-G7](gates/BRD-G7-mutable-index-delta.md) | Incrementally updated WAL index overlay with tombstones and range merging | Source/tests committed; manual checks outstanding |
+| Future gates | In-place disk B+tree, writable buffer pool, SQL transactions, MVCC, HTAP, clusters and enterprise security | Must be implemented and qualified |
 
 ## Formal specification and assets
 
