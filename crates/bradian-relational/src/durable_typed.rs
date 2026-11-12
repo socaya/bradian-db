@@ -179,7 +179,7 @@ impl DurableTypedStore {
         }
         let mut aborted = BTreeMap::new();
         for (key, lsn, value) in &versions {
-            if !key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) { continue; }
+            if !key.starts_with(ABORT_PREFIX) { continue; }
             if key.len() != ABORT_PREFIX.len() + 8 {
                 return Err(DomainError::Corruption("invalid G29 abort marker key".into()));
             }
