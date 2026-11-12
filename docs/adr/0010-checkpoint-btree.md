@@ -51,6 +51,12 @@ A crash between steps 2 and 3 leaves an authoritative snapshot without an index.
 
 The present bytewise key ordering does **not** claim to implement SQL collation order or numeric ordering for little-endian values. The typed key format guarantees equality and nonambiguous composite keys; a SQL-correct B+tree comparator and locale/collation versioning will be a separate contract.
 
+## Buffer pool integration (ADR 0011)
+
+The original G5 implementation performed direct physical reads on each lookup. The new [generation-scoped buffer pool](0011-generation-scoped-buffer-pool.md) retains verified B+tree and snapshot pages in bounded LRU caches. These caches are reused across point/range lookups of one immutable checkpoint generation, and are invalidated when a new checkpoint is published. The WAL-backed committed row map still overrides the older checkpoint index whenever there are newer writes.
+
+This is a read-only physical cache; it does **not** implement dirty-page flushing, page splits in place or buffer-pool latching. The B+tree remains a derived immutable index over the authoritative published snapshot.
+
 ## Safety, scale and limitations
 
 The tree is genuinely persisted and queried from disk. However, it is **not** a fully mutable, concurrent, disk-first transactional B+tree. Changes after a checkpoint are held in the WAL-backed in-memory map until the next checkpoint rebuild; no in-place page split, merge, free-page reuse, buffer-pool caching, page-level latching or incremental secondary index maintenance is claimed.
