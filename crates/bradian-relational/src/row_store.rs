@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use crc32fast::Hasher;
 use thiserror::Error;
@@ -103,17 +103,17 @@ impl RowStore {
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).rows.get(key).cloned()
+        self.inner.lock().rows.get(key).cloned()
     }
 
     /// Return an ordered, owned snapshot of the current rows. Not an MVCC snapshot.
     pub fn scan(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock()
             .rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).rows.len()
+        self.inner.lock().rows.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -121,7 +121,7 @@ impl RowStore {
     }
 
     pub fn last_lsn(&self) -> u64 {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).lsn
+        self.inner.lock().lsn
     }
 
     /// Sync exactly one replace/insert operation before publishing it.
@@ -137,7 +137,7 @@ impl RowStore {
     }
 
     fn mutate(&self, key: &[u8], value: Option<&[u8]>) -> StoreResult<u64> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         if inner.poisoned {
             return Err(StoreError::Poisoned);
         }
@@ -163,7 +163,7 @@ impl RowStore {
     /// renamed snapshot is authoritative even if a crash precedes WAL truncation:
     /// replay ignores records at or below its committed checkpoint LSN.
     pub fn checkpoint(&self) -> StoreResult<u64> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         if inner.poisoned {
             return Err(StoreError::Poisoned);
         }
