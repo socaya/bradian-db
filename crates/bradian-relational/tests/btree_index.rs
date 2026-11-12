@@ -74,7 +74,7 @@ fn index_page_corruption_and_wrong_lsn_fail_closed() {
     DiskBTree::build(&path, 5, &[
         (b"a".to_vec(), RowPointer { page_id: 1, offset: 0 }),
     ]).unwrap();
-    assert!(matches!(DiskBTree::open(&path, 6), Err(IndexError::Corruption(_))));
+    assert!(matches!(DiskBTree::open(&path, 6), Err(IndexError::Cache(_))));
     let mut bytes = fs::read(&path).unwrap();
     bytes[4096 + 34] ^= 0x41;
     fs::write(&path, bytes).unwrap();
