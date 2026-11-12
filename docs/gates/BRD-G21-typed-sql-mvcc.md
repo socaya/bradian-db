@@ -3,7 +3,7 @@
 **Specification:** Bradian Database Systems Master Architecture & SRS v1.1  
 **Architecture:** [ADR 0026](../adr/0026-typed-sql-mvcc-integration.md)  
 **Implementation:** `crates/bradian-relational/src/typed_mvcc.rs` and `src/mvcc_sql.rs`  
-**Status:** Source and nine regression tests committed to `main`; independent compilation, test execution and fault injection remain outstanding.
+**Status:** Source and twelve regression tests committed to `main`; independent compilation, test execution and fault injection remain outstanding.
 
 ## Implemented capabilities
 
@@ -27,7 +27,7 @@
 
 ## Regression cases
 
-`tests/mvcc_sql.rs` includes nine tests: cross-table SQL commit/restart and G16 interoperability, overlapping snapshot visibility, concurrent disjoint-key writers, conflicting same-key updates, scan-phantom conflict, rollback/statement-error abort, unregistered/legacy storage rejection, missing domain refusal, and history retention/restart.
+`tests/mvcc_sql.rs` includes twelve tests: cross-table SQL commit/restart and G16 interoperability, overlapping snapshot visibility, concurrent disjoint-key writers, conflicting same-key updates, scan-phantom conflict, rollback/statement-error abort, unregistered/legacy storage rejection, missing domain refusal, history retention/restart, G18 pending-intent replay, storage-owner exclusion, and independent read-only snapshot pins.
 
 ## Manual acceptance
 
