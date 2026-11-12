@@ -155,7 +155,7 @@ impl TableStore {
 
     pub fn get(&self, primary_key: &[Value]) -> TableResult<Option<Vec<Value>>> {
         let key = encode_key(&self.table, &self.pk_positions, primary_key)?;
-        self.storage.get(&key).map(|bytes| {
+        self.storage.indexed_get(&key)?.map(|bytes| {
             let row = decode_row(&self.table, &bytes)?;
             if self.key_from_row(&row)? != key {
                 return Err(TableError::Corruption("stored primary key does not match row data".into()));
