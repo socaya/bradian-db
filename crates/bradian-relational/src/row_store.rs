@@ -80,6 +80,8 @@ impl RowStore {
             .read(true)
             .write(true)
             .open(wal_path)?;
+        // Persist the directory entry for newly created WAL files on Unix.
+        sync_directory(root)?;
         let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows)?;
         // An interrupted append is not a complete transaction. Repair the
         // trailing, incomplete frame so future writes remain replayable.
@@ -282,7 +284,7 @@ fn replay(
             return Err(StoreError::Corruption(format!("WAL CRC mismatch at byte {start}")));
         }
         let seq = u64::from_le_bytes(body[0..8].try_into().unwrap());
-        if seq == 0 || previous_in_wal.is_some_and(|previous| seq != previous.saturating_add(1)) {
+        if seq == 0 || previous_in_wal.is_some_and(|previous| previous.checked_add(1) != Some(seq)) {
             return Err(StoreError::Corruption(format!("WAL sequence discontinuity at byte {start}")));
         }
         previous_in_wal = Some(seq);
