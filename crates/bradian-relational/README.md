@@ -1,9 +1,35 @@
-# Bradian Relational Catalog
+# Bradian Native Relational Storage
 
-A first, independent foundation for Bradian's general-purpose SQL catalog. Models databases, schemas, tables, columns and constraint definitions with validated creation and dependency-safe deletion. Separate from DHIS2 metadata.
+**Package:** `bradian-relational`  
+**Target specification:** Bradian Database Systems Master Architecture & SRS v1.1
 
-```sh
-cargo test -p bradian-relational
+This crate contains three operational building blocks that remain separate from the legacy DAP analytical engine and DHIS2-specific schema semantics:
+
+1. **Generic relational schema catalog.** In-memory databases, schemas, typed columns, primary and unique-key definitions, foreign-key metadata and dependency-restricted object removal.
+2. **Portable physical pages.** The versioned `BRPG` 4096-byte binary page codec, explicit little-endian fields, CRC32 integrity verification, and strict decoding.
+3. **Durable single-process row storage.** `RowStore` performs individually atomic insert/replace/delete operations, syncs the `BRWL` before publishing each write, loads `.brp` checkpoint pages, replays committed log records on restart, repairs a truncated *final* WAL frame, and rejects corruption.
+
+## Running the implementation
+
+```rust
+use bradian_relational::row_store::RowStore;
+
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join("bradian-row-example");
+    let store = RowStore::open(&root)?;
+    store.put(b"customer:1", b"active")?;
+    assert_eq!(store.get(b"customer:1").as_deref(), Some(&b"active"[..]));
+    store.checkpoint()?;
+    Ok(())
+}
 ```
 
-**Important:** This crate is intentionally **in-memory** and is not a transaction manager, SQL parser, persistent row store, or runtime PK/FK constraint engine. It does not claim ACID or SQL compliance. See `docs/adr/0006-generic-relational-catalog.md` and the master SRS v1.1.
+```sh
+cargo test -p bradian-relational --locked
+```
+
+The Rust API provides `open`, `put`, `delete`, `get`, `scan`, `len`, `last_lsn`, and `checkpoint`. It accepts binary keys of 1–512 bytes and inline values up to 3,546 bytes. A single mutex serializes writers and reads within one process. A `put` or `delete` return value is its synchronized WAL sequence number. A snapshot rebuilds all records onto 4 KiB physical pages and is published before WAL truncation.
+
+**Important limitations:** This crate is **not** a SQL server, persistent catalog, database transaction manager, MVCC engine, on-disk B+tree, multi-process lock manager, encrypted database, or fully tested cross-platform power-loss implementation. Do not open the same store path concurrently from different processes. Full transactions, isolation, deferred constraint enforcement, process-wide exclusive locks, key management, page allocation/free lists and filesystem failure injection remain separate mandatory engineering gates.
+
+See [ADR 0008](../../docs/adr/0008-native-row-wal-checkpoint.md), [ADR 0007](../../docs/adr/0007-portable-physical-page.md) and the [v1.1 specification](../../docs/Bradian_Master_Architecture_SRS_v1.1.md). Rust tests are included, but automatic CI is disabled under the present repository policy.
