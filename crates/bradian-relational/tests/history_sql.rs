@@ -432,3 +432,83 @@ fn g24_backup_and_restore_refuse_occupied_or_overlapping_destinations() {
     assert!(restore_history_database(&archive, dir.path().join("restore")).is_err());
     assert!(!dir.path().join("restore").exists());
 }
+
+#[test]
+fn g25_verified_g18_lifecycle_cutover_preserves_original_and_rows() {
+    use bradian_relational::lifecycle::CatalogLifecycle;
+    use bradian_relational::lifecycle_history_migration::migrate_lifecycle_to_history;
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("g18-source");
+    let destination = dir.path().join("g25-history");
+    seed(&source);
+    let original_lsn;
+    {
+        let owner = CatalogLifecycle::open(&source).unwrap();
+        assert_eq!(owner.reconcile().unwrap().len(), 2);
+        original_lsn = owner.last_domain_lsn();
+    }
+    let result = migrate_lifecycle_to_history(&source, &destination).unwrap();
+    assert_eq!(result.imported.rows, 3);
+    assert_eq!(result.imported.tables, 2);
+    assert_eq!(result.captured_domain_lsn, original_lsn);
+    assert!(source.join("lifecycle").exists());
+    assert!(source.join("shared-domain").exists());
+    assert!(!destination.join("lifecycle").exists());
+    assert!(!destination.join("shared-domain").exists());
+    {
+        let historical = HistorySqlEngine::open(&destination).unwrap();
+        historical.with_session(|session| {
+            session.execute("BEGIN")?;
+            assert_eq!(
+                session.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+                SqlResultSet::Rows {
+                    columns: vec!["balance".into()],
+                    rows: vec![vec![Value::Int64(1000)]],
+                }
+            );
+            Ok(())
+        }).unwrap();
+    }
+    // The original G18 owner still opens and retains independently usable data.
+    let original = CatalogLifecycle::open(&source).unwrap();
+    assert_eq!(original.reconcile().unwrap().len(), 2);
+}
+
+#[test]
+fn g25_refuses_open_lifecycle_owner_and_previous_target() {
+    use bradian_relational::lifecycle::CatalogLifecycle;
+    use bradian_relational::lifecycle_history_migration::migrate_lifecycle_to_history;
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("g18-source");
+    let destination = dir.path().join("history");
+    seed(&source);
+    let owner = CatalogLifecycle::open(&source).unwrap();
+    assert!(migrate_lifecycle_to_history(&source, &destination).is_err());
+    assert!(!destination.exists());
+    drop(owner);
+    migrate_lifecycle_to_history(&source, &destination).unwrap();
+    assert!(migrate_lifecycle_to_history(&source, &destination).is_err());
+}
+
+#[test]
+fn g25_refuses_incomplete_migration_staging_and_wrong_source_format() {
+    use bradian_relational::lifecycle::CatalogLifecycle;
+    use bradian_relational::lifecycle_history_migration::migrate_lifecycle_to_history;
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let destination = dir.path().join("history");
+    seed(&source);
+    // Only G18 lifecycle source format is eligible.
+    assert!(migrate_lifecycle_to_history(&source, &destination).is_err());
+    {
+        let owner = CatalogLifecycle::open(&source).unwrap();
+        assert_eq!(owner.reconcile().unwrap().len(), 2);
+    }
+    let staging = dir.path().join(".history.bradian-g25-source-archive");
+    std::fs::create_dir(&staging).unwrap();
+    assert!(migrate_lifecycle_to_history(&source, &destination).is_err());
+    assert!(!destination.exists());
+    std::fs::remove_dir(&staging).unwrap();
+    // The physical source tree may not contain the new target.
+    assert!(migrate_lifecycle_to_history(&source, source.join("nested-history")).is_err());
+}
