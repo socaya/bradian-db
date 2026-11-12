@@ -5,7 +5,7 @@
 
 This crate contains three operational building blocks that remain separate from the legacy DAP analytical engine and DHIS2-specific schema semantics:
 
-1. **WAL-backed persistent relational catalog.** `PersistentCatalog` commits validated database/schema/table DDL and foreign-key definitions through synchronized journal events, preserves stable object IDs across restart, and rejects corrupted or missing events. The original in-memory `Catalog` remains the validator.
+1. **WAL-backed persistent relational catalog.** `PersistentCatalog` commits validated database/schema/table DDL and foreign-key definitions through synchronized journal events, preserves stable object IDs across restart, rejects corrupted or missing events, and supports `backup_catalog_to` for verified metadata-only backups. The original in-memory `Catalog` remains the validator.
 2. **Portable physical pages.** The versioned `BRPG` 4096-byte binary page codec, explicit little-endian fields, CRC32 integrity verification, and strict decoding.
 3. **Consistent backup and restore.** `RowStore::backup_to` and `backup_current_generation` capture an atomic manifest/snapshot/index/WAL state, verify the staged copy, and publish a backup directory. `RowStore::restore_backup` validates the copied files and restores only to a new directory.
 4. **Atomic checkpoint publication.** A versioned, CRC-checked `BRCP` manifest selects the committed physical generation; writes preserve WAL until publication succeeds and quarantine interrupted orphan snapshots before retrying.
