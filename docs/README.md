@@ -16,7 +16,8 @@ This directory contains the engineering specifications, architectural decisions,
 2. **[Implementation audit and phased roadmap](implementation/BRADIAN_V1_1_AUDIT.md)** — maps existing source code to the SRS and records the not-yet-implemented engineering work.
 3. **[Bradian security bootstrap guide](security/BOOTSTRAP_API_AUTH.md)** — local development authentication boundary and its important security limitations.
 4. **[Relational catalog ADR](adr/0006-generic-relational-catalog.md)** — logical database/schema/table IDs, scope, constraints and migration limitations.
-5. **[Portable page format ADR](adr/0007-portable-physical-page.md)** — first native physical page envelope and what remains for true crash-safe storage.
+5. **[Portable page format ADR](adr/0007-portable-physical-page.md)** — versioned 4 KiB page format and corruption checks.
+6. **[Native row WAL and checkpoint ADR](adr/0008-native-row-wal-checkpoint.md)** — synchronized single-key row mutations, page snapshots, fail-closed recovery and current limitations.
 
 ## Current milestone records
 
