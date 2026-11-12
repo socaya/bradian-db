@@ -70,6 +70,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Durable prepared schema intents](docs/gates/BRD-G28-durable-schema-intents.md) | WAL-backed compatible schema proposal preparation and fail-closed restart validation; no ALTER activation |
 | [Durable schema intent cancellation](docs/gates/BRD-G29-durable-schema-cancellation.md) | WAL-atomic aborted decisions, validated after restart and backup restore; ALTER remains disabled |
 | [DDL coordination fences](docs/gates/BRD-G30-ddl-coordination-fences.md) | Durable G11 catalog LSN binding for inactive historical schema proposals; no ALTER activation |
+| [DDL readiness certificates](docs/gates/BRD-G31-ddl-readiness-certificates.md) | Durable inactive schema readiness decisions with replay and G24 restore verification |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
