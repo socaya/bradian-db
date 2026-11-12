@@ -581,3 +581,48 @@ fn g26_schema_history_rejects_pre_registration_and_invalid_horizons() {
     assert!(db.schema_as_of("bank.public.accounts", earlier).is_err());
     assert!(db.schema_as_of("bank.public.movements", earlier).is_err());
 }
+
+#[test]
+fn g27_preview_projects_retained_rows_without_changing_the_history_wal() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let before;
+    let old_rows;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        before = db.last_lsn();
+        let (original, _) = db.schema_as_of("bank.public.accounts", before).unwrap();
+        let mut proposed = original.clone();
+        proposed.columns.push(Column {
+            name: "comment".into(), data_type: DataType::Text, nullable: true,
+        });
+        old_rows = db.preview_nullable_additions_as_of(
+            "bank.public.accounts", before, &proposed,
+        ).unwrap();
+        assert_eq!(old_rows.len(), 2);
+        assert_eq!(old_rows[0], vec![
+            Value::Int64(1), Value::Int64(1000), Value::Null,
+        ]);
+        assert_eq!(old_rows[1], vec![
+            Value::Int64(2), Value::Int64(600), Value::Null,
+        ]);
+        assert_eq!(db.last_lsn(), before);
+        db.checkpoint().unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let (original, _) = db.schema_as_of("bank.public.accounts", before).unwrap();
+    let mut proposed = original.clone();
+    proposed.columns.push(Column {
+        name: "comment".into(), data_type: DataType::Text, nullable: true,
+    });
+    assert_eq!(db.preview_nullable_additions_as_of(
+        "bank.public.accounts", before, &proposed,
+    ).unwrap(), old_rows);
+    assert_eq!(db.last_lsn(), before);
+    // Current catalog remains the unmodified original schema.
+    assert_eq!(db.schema_as_of("bank.public.accounts", before).unwrap().0.columns.len(), 2);
+    proposed.columns.last_mut().unwrap().nullable = false;
+    assert!(db.preview_nullable_additions_as_of(
+        "bank.public.accounts", before, &proposed,
+    ).is_err());
+}
