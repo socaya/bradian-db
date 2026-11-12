@@ -58,6 +58,7 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 | [Shared-domain SQL transactions](docs/gates/BRD-G16-shared-domain-sql.md) | SQL BEGIN/COMMIT across explicitly registered shared-WAL tables, with legacy table storage refused |
 | [Verified legacy SQL migration](docs/gates/BRD-G17-verified-legacy-migration.md) | Offline locked copy of legacy tables into a separately verified shared-WAL destination; original rows retained |
 | [Catalog/domain lifecycle recovery](docs/gates/BRD-G18-catalog-domain-lifecycle.md) | WAL-backed Pending/Active provisioning, automatic restart reconciliation and schema-pin integrity checks |
+| [Database-wide backup and restore](docs/gates/BRD-G19-database-wide-backup.md) | Coordinated catalog/domain/lifecycle checkpoint+WAL archives, checksummed manifest and verified new-root restore |
 | [Bootstrap API security](docs/security/BOOTSTRAP_API_AUTH.md) | Temporary local development restrictions |
 
 ## Repository organization
