@@ -32,6 +32,7 @@ use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 use crate::index_recovery::{self, IndexRecovery};
+use crate::checkpoint_manifest::{self, CheckpointManifest, ManifestError};
 
 const WAL_MAGIC: &[u8; 4] = b"BRWL";
 const WAL_HEADER: usize = 12;
@@ -52,6 +53,8 @@ pub enum StoreError {
     Index(#[from] IndexError),
     #[error(transparent)]
     Cache(#[from] CacheError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
     #[error("invalid row: {0}")]
     InvalidRow(&'static str),
     #[error("corrupt row store: {0}")]
@@ -117,10 +120,13 @@ impl RowStore {
         let (checkpoint_lsn, mut rows) = read_latest_snapshot(root)?;
         // A committed checkpoint can outlive an interrupted derived-index
         // publication. Rebuild only an absent index from verified pages.
-        if snapshot_path(root, checkpoint_lsn).exists()
-            && !index_recovery::index_path(root, checkpoint_lsn).exists()
-        {
-            index_recovery::rebuild_missing(root, checkpoint_lsn)?;
+        if snapshot_path(root, checkpoint_lsn).exists() {
+            if !index_recovery::index_path(root, checkpoint_lsn).exists() {
+                index_recovery::rebuild_missing(root, checkpoint_lsn)?;
+            }
+            if let Some(manifest) = checkpoint_manifest::load(root)? {
+                checkpoint_manifest::check_index(root, manifest)?;
+            }
         }
         let mut delta = BTreeMap::new();
         let wal_path = root.join("rows.wal");
@@ -425,6 +431,12 @@ impl RowStore {
             return Ok(inner.lsn);
         }
         let lsn = inner.lsn;
+        // The manifest is the publication boundary. A prior crashed attempt
+        // may have left snapshot/index filenames for this same WAL LSN, but
+        // those files were never committed as the active generation.
+        if let Some(committed) = checkpoint_manifest::load(&self.root)? {
+            checkpoint_manifest::quarantine_uncommitted(&self.root, committed, lsn)?;
+        }
         let tmp = self.root.join(format!("snapshot-{lsn}.tmp"));
         let final_path = snapshot_path(&self.root, lsn);
         // A previous interrupted checkpoint may leave a .tmp. Truncating only
@@ -452,6 +464,18 @@ impl RowStore {
             DiskBTree::build(&index_tmp, lsn, &pointers)?;
             fs::rename(&index_tmp, &index_final)?;
             sync_directory(&self.root)?;
+            let page_size = PAGE_SIZE as u64;
+            let snapshot_pages = fs::metadata(&final_path)?.len() / page_size;
+            let index_pages = fs::metadata(&index_final)?.len() / page_size;
+            let manifest = CheckpointManifest {
+                lsn,
+                rows: inner.rows.len() as u64,
+                data_pages: snapshot_pages.checked_sub(1)
+                    .ok_or_else(|| StoreError::Corruption("empty snapshot file".into()))?,
+                index_pages: index_pages.checked_sub(1)
+                    .ok_or_else(|| StoreError::Corruption("empty index file".into()))?,
+            };
+            checkpoint_manifest::publish(&self.root, manifest)?;
             Ok(())
         })();
         if let Err(error) = write_result {
@@ -675,7 +699,15 @@ fn list_snapshots(root: &Path) -> StoreResult<Vec<(u64, PathBuf)>> {
 }
 
 fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, BTreeMap<Vec<u8>, Vec<u8>>)> {
-    let Some((lsn, path)) = list_snapshots(root)?.pop() else {
+    let manifest = checkpoint_manifest::load(root)?;
+    let snapshot = match manifest {
+        Some(m) => {
+            checkpoint_manifest::check_snapshot(root, m)?;
+            Some((m.lsn, snapshot_path(root, m.lsn)))
+        }
+        None => list_snapshots(root)?.pop(), // read-only compatibility with pre-manifest stores
+    };
+    let Some((lsn, path)) = snapshot else {
         return Ok((0, BTreeMap::new()));
     };
     let mut file = File::open(path)?;
@@ -730,6 +762,11 @@ fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, BTreeMap<Vec<u8>, Vec<
     }
     if rows.len() as u64 != count {
         return Err(StoreError::Corruption("snapshot row count mismatch".into()));
+    }
+    if let Some(m) = manifest {
+        if m.rows != count || m.data_pages != pages {
+            return Err(StoreError::Corruption("checkpoint manifest and snapshot contents disagree".into()));
+        }
     }
     Ok((checkpoint, rows))
 }
