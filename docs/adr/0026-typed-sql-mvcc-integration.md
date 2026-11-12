@@ -73,6 +73,10 @@ engine.with_session(|session| {
 
 An existing G16 database must be closed before opening G21. To resume G16 after G21, close the MVCC engine; the latest WAL-backed data remains readable in the original format.
 
+## Durable-history foundation (ADR 0027)
+
+[G22](0027-durable-mvcc-history.md) adds a separate versioned native RowStore history format with durable as-of values and retention-aware cleanup. G21 still uses in-memory historical row versions in the original G15/G16 physical format. A later verified migration and typed SQL adapter are required to use G22 durable-history semantics from SQL.
+
 ## Source and release verification
 
 Implementation: `crates/bradian-relational/src/typed_mvcc.rs`, `src/mvcc_sql.rs`. Tests: `crates/bradian-relational/tests/mvcc_sql.rs`. Existing G20 `src/mvcc.rs` and G15 typed codecs are reused without changing their durable format.
