@@ -70,6 +70,7 @@ This directory contains the engineering specifications, architectural decisions,
 | [BRD-G25](gates/BRD-G25-lifecycle-history-migration.md) | Verified G18 lifecycle snapshot and offline copy into new G23 history root | Source/tests committed; runtime qualification outstanding |
 | [BRD-G26](gates/BRD-G26-historical-schema-inspection.md) | Read-only immutable schema epochs and DESCRIBE TABLE AS OF | Source/tests committed; runtime qualification outstanding |
 | [BRD-G27](gates/BRD-G27-additive-schema-compatibility.md) | Nullable-column schema compatibility planning and read-only historical projection | Source/tests committed; runtime qualification outstanding |
+| [BRD-G28](gates/BRD-G28-durable-schema-intents.md) | WAL-backed inactive schema proposals and restart-time integrity validation | Source/tests committed; runtime qualification outstanding |
 | Future gates | G18 lifecycle-aware history conversion, serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 ## Formal specification and assets
