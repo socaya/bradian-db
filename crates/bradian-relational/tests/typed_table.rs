@@ -217,3 +217,45 @@ fn replace_cannot_change_primary_key_and_delete_requires_existing_row() {
     assert!(matches!(t.replace(&invoice(2, "different key")), Err(TableError::NotFound)));
     assert_eq!(t.get(&[Value::Int64(1)]).unwrap(), Some(invoice(1, "original")));
 }
+
+
+#[test]
+fn point_reads_and_scans_reject_stored_row_corruption() {
+    use bradian_relational::row_store::RowStore;
+
+    let dir = tempdir().unwrap();
+    let key;
+    {
+        let table = TableStore::open(dir.path(), schema()).unwrap();
+        table.insert(&invoice(11, "original")).unwrap();
+    }
+    {
+        let raw = RowStore::open(dir.path()).unwrap();
+        key = raw.scan().into_iter().find(|(k, _)| k.starts_with(b"BRPK")).unwrap().0;
+        raw.put(&key, b"not-a-typed-row").unwrap();
+    }
+    let reopened = TableStore::open(dir.path(), schema()).unwrap();
+    assert!(matches!(reopened.get(&[Value::Int64(11)]), Err(TableError::Corruption(_))));
+    assert!(matches!(reopened.scan(), Err(TableError::Corruption(_))));
+}
+
+#[test]
+fn point_reads_verify_value_matches_physical_primary_key() {
+    use bradian_relational::row_store::RowStore;
+
+    let dir = tempdir().unwrap();
+    let table_meta = schema();
+    let key;
+    {
+        let table = TableStore::open(dir.path(), table_meta.clone()).unwrap();
+        table.insert(&invoice(11, "original")).unwrap();
+    }
+    {
+        let raw = RowStore::open(dir.path()).unwrap();
+        key = raw.scan().into_iter().find(|(k, _)| k.starts_with(b"BRPK")).unwrap().0;
+        raw.put(&key, &encode_row(&table_meta, &invoice(22, "wrong-key")).unwrap()).unwrap();
+    }
+    let reopened = TableStore::open(dir.path(), table_meta).unwrap();
+    assert!(matches!(reopened.get(&[Value::Int64(11)]), Err(TableError::Corruption(_))));
+    assert!(matches!(reopened.scan(), Err(TableError::Corruption(_))));
+}
