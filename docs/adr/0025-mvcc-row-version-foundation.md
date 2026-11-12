@@ -69,6 +69,10 @@ reader.rollback();
 - No secondary UNIQUE/FK/CHECK constraints, MVCC indexes, serializable transactions, group commit, deadlock detection, optimistic read sets, transaction timeout enforcement, encryption or cluster-wide isolation are provided.
 - Performance remains constrained by in-memory versions and the G3 atomic WAL batch size. Independent benchmarking is required before claiming OLTP concurrency gains.
 
+## SQL typed integration update (ADR 0026)
+
+[G21](0026-typed-sql-mvcc-integration.md) adds a separate `MvccSqlEngine` using durable G11 catalog identities and validated G15 table schema pins with G20 per-key MVCC snapshots. It reuses the G16 parser and permits overlapping in-process SQL sessions without changing G16's legacy conflict semantics. G21 does not persist old versions or provide serializable isolation.
+
 ## Evidence and qualification
 
 `crates/bradian-relational/src/mvcc.rs` implements pinned version chains, durable commits, conflict detection, read-your-writes and reclamation.
