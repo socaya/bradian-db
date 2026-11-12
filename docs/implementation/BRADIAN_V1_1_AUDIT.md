@@ -2,7 +2,11 @@
 
 **Baseline:** `docs/Bradian_Master_Architecture_SRS_v1.1.md`. **Reviewed source:** the original Rust DAP analytical workspace. This document reports implementation status, not a completed DBMS.
 
-## Actual baseline
+## Updated implementation status (12 November 2026)
+
+The Bradian relational crate now includes an in-memory generic catalog, a versioned physical page codec and a real **single-process WAL-backed row store** with inserts, replacements, deletes, ordered scans, page checkpoints and restart recovery. See [ADR 0008](../adr/0008-native-row-wal-checkpoint.md) and [G3](../gates/BRD-G3-wal-row-store.md). The row store remains a bounded independent subsystem; it does **not** provide complete relational SQL, distributed transactions, MVCC, on-disk B+trees, multi-process file locking or enterprise recovery qualification. Automatic CI remains disabled by owner request.
+
+## Original audit baseline
 
 The repository contains a proprietary analytical column format (`.derc`), WAL-backed analytical partitions, vectorized operators, DHIS2 semantic modules, an Axum analytical API, a React analytics administration interface, and test suites. It does **not** contain a verified independent general-purpose authoritative relational database with complete SQL DDL/DML, B+tree row pages, ACID/MVCC transactions, cross-shard atomic commits, distributed consensus, or strongly consistent HTAP projections.
 
