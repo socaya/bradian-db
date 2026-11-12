@@ -911,3 +911,93 @@ fn g30_reopen_refuses_catalog_changes_after_coordination() {
     // to present the mismatched pair as a coordinated database.
     assert!(HistorySqlEngine::open(&history).is_err());
 }
+
+#[test]
+fn g31_readiness_recovers_without_activating_the_schema() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let recorded;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (old, _) = db.schema_as_of("bank.public.accounts", db.last_lsn()).unwrap();
+        let mut next = old.clone();
+        next.columns.push(Column {
+            name: "status_note".into(), data_type: DataType::Text, nullable: true,
+        });
+        let prepared = db.prepare_nullable_addition("bank.public.accounts", &next).unwrap();
+        let fenced = db.coordinate_prepared_schema("bank.public.accounts").unwrap();
+        recorded = db.certify_schema_readiness("bank.public.accounts").unwrap();
+        assert!(prepared < fenced && fenced < recorded);
+        assert!(db.certify_schema_readiness("bank.public.accounts").is_err());
+        db.checkpoint().unwrap();
+    }
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let certificates = db.ddl_readiness_records();
+    assert_eq!(certificates.len(), 1);
+    assert_eq!(certificates[0].1, recorded);
+    assert_eq!(certificates[0].0.table_id, db.schema_as_of(
+        "bank.public.accounts", db.last_lsn()
+    ).unwrap().0.id);
+    assert_eq!(db.schema_as_of(
+        "bank.public.accounts", db.last_lsn()
+    ).unwrap().0.columns.len(), 2);
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        assert_eq!(s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows {
+                columns: vec!["balance".into()],
+                rows: vec![vec![Value::Int64(1000)]],
+            });
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn g31_readiness_rejects_absent_fence_and_cancelled_proposals() {
+    use bradian_relational::{Column, DataType};
+    let (_dir, _source, history) = migrated();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let begin = db.last_lsn();
+    assert!(db.certify_schema_readiness("bank.public.accounts").is_err());
+    assert_eq!(db.last_lsn(), begin);
+    let (old, _) = db.schema_as_of("bank.public.accounts", begin).unwrap();
+    let mut next = old.clone();
+    next.columns.push(Column {
+        name: "extra".into(), data_type: DataType::Text, nullable: true,
+    });
+    db.prepare_nullable_addition("bank.public.accounts", &next).unwrap();
+    db.coordinate_prepared_schema("bank.public.accounts").unwrap();
+    db.abort_prepared_schema("bank.public.accounts").unwrap();
+    let after_abort = db.last_lsn();
+    assert!(db.certify_schema_readiness("bank.public.accounts").is_err());
+    assert_eq!(db.last_lsn(), after_abort);
+}
+
+#[test]
+fn g31_readiness_survives_verified_g24_backup_restore() {
+    use bradian_relational::{Column, DataType};
+    use bradian_relational::history_backup::restore_history_database;
+    let (dir, _source, history) = migrated();
+    let archive = dir.path().join("g31-archive");
+    let restored = dir.path().join("g31-restored");
+    let ready;
+    {
+        let db = HistorySqlEngine::open(&history).unwrap();
+        let (old, _) = db.schema_as_of("bank.public.movements", db.last_lsn()).unwrap();
+        let mut proposed = old.clone();
+        proposed.columns.push(Column {
+            name: "reason".into(), data_type: DataType::Text, nullable: true,
+        });
+        db.prepare_nullable_addition("bank.public.movements", &proposed).unwrap();
+        db.coordinate_prepared_schema("bank.public.movements").unwrap();
+        ready = db.certify_schema_readiness("bank.public.movements").unwrap();
+        db.backup_to(&archive).unwrap();
+    }
+    restore_history_database(&archive, &restored).unwrap();
+    let db = HistorySqlEngine::open(&restored).unwrap();
+    assert_eq!(db.ddl_readiness_records().len(), 1);
+    assert_eq!(db.ddl_readiness_records()[0].1, ready);
+    assert_eq!(db.schema_as_of(
+        "bank.public.movements", db.last_lsn()
+    ).unwrap().0.columns.len(), 3);
+}
