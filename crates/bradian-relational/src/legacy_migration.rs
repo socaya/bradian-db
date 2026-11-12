@@ -149,6 +149,13 @@ pub fn migrate_legacy_sql(
 ) -> MigrationResult<MigrationReport> {
     let source_root = fs::canonicalize(source_root.as_ref())?;
     let (destination, staging) = validate_destination(&source_root, destination_root.as_ref())?;
+    // A G15/G16 source already has authoritative shared-WAL rows. Treating
+    // it as a G14 legacy root could silently omit its committed data.
+    if fs::symlink_metadata(source_root.join("shared-domain")).is_ok() {
+        return Err(MigrationError::Invalid(
+            "source already has shared-domain storage; legacy migration is not applicable".into(),
+        ));
+    }
     let catalog_dir = source_root.join("catalog");
     if !catalog_dir.is_dir() {
         return Err(MigrationError::Invalid("legacy catalog directory is missing".into()));
@@ -252,6 +259,14 @@ pub fn migrate_legacy_sql(
     }
 
     directory_sync(&staging)?;
+    if fs::symlink_metadata(&destination).is_ok() {
+        return Err(MigrationError::Invalid(
+            "destination appeared during migration; refusing replacement".into(),
+        ));
+    }
+    // Directory rename is atomic on supported local filesystems, but a
+    // portable no-replace rename is not supplied by std::fs. Deployment
+    // qualification must prevent competing destination creators.
     fs::rename(&staging, &destination)?;
     directory_sync(destination.parent().expect("canonical destination has parent"))?;
     Ok(MigrationReport {
