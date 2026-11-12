@@ -29,6 +29,11 @@ pub struct MvccSqlEngine {
 
 impl MvccSqlEngine {
     pub fn open(root: impl AsRef<Path>) -> SqlResult<Self> {
+        if root.as_ref().join("history-domain").exists() {
+            return Err(SqlError::Unsupported(
+                "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
+            ));
+        }
         let root = root.as_ref();
         // Refuse opening a root with ANY legacy per-table data. No implicit
         // migration, dual writes, or ambiguous source of truth is allowed.
