@@ -71,10 +71,10 @@ remains mandatory on reopen.
 
 ## Publication status
 
-G35 is published as the baseline commit above. The G36–G38 implementation and
-verification in this report are complete locally; publication of this batch to
-the public repository is pending explicit approval after automatic review blocked
-the upload. No deployment or automatic CI activation occurred.
+G36–G38 are published to `socaya/bradian-db`'s `main` branch in
+[`f1695c4`](https://github.com/socaya/bradian-db/commit/f1695c4675dc3d73ccb32e0dddb88409e1c18b81).
+The checks above apply to that published source. Automatic CI remains manual-only;
+no deployment occurred.
 
 ## Remaining boundaries
 
