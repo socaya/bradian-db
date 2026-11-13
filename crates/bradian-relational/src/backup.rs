@@ -66,6 +66,14 @@ impl BackupReceipt {
     }
 }
 
+fn read_receipt(path:&Path)->StoreResult<BackupReceipt> {
+    let bytes=crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH>(path).map_err(|e|match e {
+        crate::metadata_io::FixedError::Io(e)=>StoreError::Io(e),
+        crate::metadata_io::FixedError::Length=>StoreError::Corruption("invalid backup descriptor header".into()),
+    })?;
+    BackupReceipt::decode(&bytes)
+}
+
 /// Reject potentially dangerous overlap and return a sibling staging path.
 /// Neither a destination nor an old incomplete staging directory is replaced.
 fn staging_path(destination: &Path, forbidden_root: Option<&Path>) -> StoreResult<PathBuf> {
@@ -160,7 +168,7 @@ fn verify_directory(
     expected_rows: Option<&BTreeMap<Vec<u8>, Vec<u8>>>,
     policies: StorageLimits,
 ) -> StoreResult<()> {
-    let stored = BackupReceipt::decode(&fs::read(path.join(META_FILE))?)?;
+    let stored = read_receipt(&path.join(META_FILE))?;
     if stored != receipt {
         return Err(StoreError::Corruption("backup descriptor differs from intended state".into()));
     }
@@ -218,7 +226,7 @@ pub fn restore_backup_with_policies(backup: &Path, destination: &Path, policies:
     if !backup.is_dir() {
         return Err(StoreError::Corruption("backup source is not a directory".into()));
     }
-    let receipt = BackupReceipt::decode(&fs::read(backup.join(META_FILE))?)?;
+    let receipt = read_receipt(&backup.join(META_FILE))?;
     let staged = staging_path(destination, Some(backup))?;
     // Do not restore into the backup itself or overlap its parent tree.
     if fs::canonicalize(backup)?.starts_with(&staged) {

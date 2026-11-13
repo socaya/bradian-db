@@ -339,11 +339,17 @@ impl HistorySqlEngine {
     pub fn backup_to(
         &self, destination: impl AsRef<Path>,
     ) -> crate::history_backup::HistoryBackupResult<crate::history_backup::HistoryBackupReport> {
+        self.backup_to_with_metadata_limits(destination,crate::runtime_limits::MetadataLimits::default())
+    }
+
+    pub fn backup_to_with_metadata_limits(
+        &self, destination: impl AsRef<Path>, metadata: crate::runtime_limits::MetadataLimits,
+    ) -> crate::history_backup::HistoryBackupResult<crate::history_backup::HistoryBackupReport> {
         if self.failed_ddl {
             return Err(crate::history_backup::HistoryBackupError::Invalid("schema activation requires recovery before backup".into()));
         }
         crate::history_backup::backup_history_database(
-            &self._root, destination.as_ref(), &self.catalog, &self.domain,
+            &self._root, destination.as_ref(), &self.catalog, &self.domain, metadata,
         )
     }
 

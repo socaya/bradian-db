@@ -87,6 +87,8 @@ All modes also use default [backing RowStore limits](ROW_STORE_LIMITS.md) during
 
 Default [checkpoint/build reservation limits](CHECKPOINT_BUILD_LIMITS.md) also apply. StorageLimits exposes composed policy to native callers; existing CLI flags do not configure it.
 
+Native checkpoint and archive helpers now use [metadata byte limits](METADATA_LIMITS.md). Explicit JSON archive policy is available through native backup/restore APIs.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

@@ -8,7 +8,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
-| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query/history/staging, backing/recovery maps and checkpoint/build reservations are bounded; metadata/I/O/cache workspace, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
+| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query/history/staging, backing/recovery maps, builds and serialized archive metadata are bounded; directory/I/O/cache/decoded metadata workspace, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
 | `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL is not remote SQL; legacy analytical commands retain their existing behavior |
 | `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
 | `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
@@ -43,12 +43,14 @@ IndexLimits separately admits retained checkpoint key/pointer entries for audit/
 
 IndexBuildLimits preflights conservative key/pointer and borrowed descriptor working state before checkpoint/rebuild file changes. StorageLimits composes row, recovery and build policy for native owners and backup/restore. Index bytes and all persistent formats remain unchanged; see [ADR 0047](../adr/0047-checkpoint-build-admission.md).
 
+Metadata I/O uses exact 40-byte binary records plus a trailing-byte probe and bounded JSON input/serialization. Canonical CRC calculation streams without a payload buffer; report serialization borrows source data. Archive formats and dependencies are unchanged; see [ADR 0048](../adr/0048-bounded-archive-metadata.md).
+
 ## Architecture decisions still requiring prototypes
 
 | Decision | Evidence required before adopting/fixing a format | Owning gate |
 |---|---|---|
 | Mutable pages/allocator and dirty buffer writes | WAL/page-LSN ordering, split/reuse crash matrix and failed sync/rename/disk-full tests | 1 |
-| Runtime quotas/cancellation | Query/history/staging, backing/recovery maps and checkpoint/build reservations are implemented; metadata/I/O/cache workspace, catalog/aggregate transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
+| Runtime quotas/cancellation | Query/history/staging, backing/recovery maps, builds and serialized archive metadata limits are implemented; directory/I/O/cache/decoded metadata workspace, catalog/aggregate transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
 | Secure local identity and SQL policy context | ACL/root-owner/path threat analysis, every data path checked, revocation and diagnostics tests | 1–2 |
 | Global transaction order/safe-time | Deterministic adversarial multi-participant schedules, clock uncertainty and coordinator recovery | 5 |
 | Cluster node identity and consensus | Authenticated enrollment/fencing, quorum-loss and partition experiments | 4 |

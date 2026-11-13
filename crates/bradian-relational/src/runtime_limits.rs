@@ -14,6 +14,8 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResourceError {
+    #[error("metadata manifest byte limit exceeded (limit {limit})")]
+    MetadataLimit { limit: usize },
     #[error("index build {resource} limit exceeded (limit {limit})")]
     IndexBuildLimit { resource: &'static str, limit: usize },
     #[error("index recovery {resource} limit exceeded (limit {limit})")]
@@ -178,3 +180,10 @@ impl Default for IndexBuildLimits {
 /// Process-local native storage policies; none changes persisted bytes.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StorageLimits { pub rows: RowStoreLimits, pub index: IndexLimits, pub build: IndexBuildLimits }
+
+/// Serialized JSON archive-manifest bytes, independently checked on read and write.
+#[derive(Clone, Copy, Debug)]
+pub struct MetadataLimits { pub max_manifest_bytes: usize }
+impl Default for MetadataLimits {
+    fn default() -> Self { Self { max_manifest_bytes: 1024 * 1024 } }
+}

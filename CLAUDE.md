@@ -44,6 +44,8 @@ Gate 1 index recovery is specified in [ADR 0046](docs/adr/0046-bounded-index-rec
 
 Gate 1 checkpoint/build admission is specified in [ADR 0047](docs/adr/0047-checkpoint-build-admission.md). Check the conservative key/pointer plus two borrowed-descriptor-per-key reservation before checkpoint quarantine or file writes and before rebuild temporary cleanup. Quota refusal must preserve WAL/manifest/delta and healthy-owner usability. Descriptors borrow input keys; carry StorageLimits through native ownership and backup/restore. No total RSS, allocator-failure or global-budget qualification is implied.
 
+Gate 1 metadata I/O is specified in [ADR 0048](docs/adr/0048-bounded-archive-metadata.md). Read fixed binary records into exact arrays plus one trailing-byte probe. Bound actual JSON reads and serialization before parse/publication; stream canonical CRCs and borrow reports without cloning table lists. Keep resource, corruption and I/O errors distinct. Read refusal precedes restore staging; write refusal preserves existing incomplete-stage/checkpoint semantics. Decoded catalog state, directory inputs and global memory remain open.
+
 Gate 1's single-table snapshot/scan extension is specified in [ADR 0042](docs/adr/0042-bounded-single-table-query-snapshots.md). SQL must bound BEGIN snapshots, scans and projection before cloning, including repeated-column amplification. Preserve full snapshot LSNs, corruption checks and old single-table full-abort semantics. Native administrative compatibility APIs stay explicit and are not SQL fallbacks. CLI limits now apply to all SQL modes; global resident-memory qualification is still open.
 
 ## 3. Architecture boundaries

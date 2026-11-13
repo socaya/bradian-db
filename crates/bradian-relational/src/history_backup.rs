@@ -6,12 +6,14 @@
 //! Archives preserve retained versions, tombstones and the retention floor.
 
 use crate::runtime_limits::HistoryLimits;
+use crate::runtime_limits::MetadataLimits;
+use crate::metadata_io;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crc32fast::{hash, Hasher};
+use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -135,24 +137,26 @@ fn archive_crc(root: &Path, receipt: HistoryComponentReceipt) -> HistoryBackupRe
     Ok(digest.finalize())
 }
 
-fn write_manifest(root: &Path, report: &HistoryBackupReport) -> HistoryBackupResult<()> {
-    let payload = Payload { format: FORMAT.into(), report: report.clone() };
-    let envelope = Envelope {
-        crc32: hash(&serde_json::to_vec(&payload)?), payload,
-    };
-    let mut f = OpenOptions::new().write(true).create_new(true)
-        .open(root.join(MANIFEST))?;
-    f.write_all(&serde_json::to_vec(&envelope)?)?;
-    f.sync_all()?;
-    sync_dir(root)?;
-    Ok(())
+#[derive(Serialize)]
+struct PayloadRef<'a> { format: &'static str, report: &'a HistoryBackupReport }
+#[derive(Serialize)]
+struct EnvelopeRef<'a> { payload: PayloadRef<'a>, crc32: u32 }
+fn write_manifest(root: &Path, report: &HistoryBackupReport, limits: MetadataLimits) -> Result<(),HistoryBackupError> {
+    let payload=PayloadRef { format:FORMAT,report };
+    let crc32=metadata_io::json_crc(&payload,limits)?;
+    let bytes=metadata_io::json_bytes(&EnvelopeRef { payload,crc32 },limits)?;
+    let mut file=OpenOptions::new().write(true).create_new(true).open(root.join(MANIFEST))?;
+    file.write_all(&bytes)?; file.sync_all()?; sync_dir(root)?; Ok(())
 }
 
-fn read_manifest(root: &Path) -> HistoryBackupResult<HistoryBackupReport> {
-    let envelope: Envelope = serde_json::from_slice(&fs::read(root.join(MANIFEST))?)
+fn read_manifest(root: &Path, limits: MetadataLimits) -> HistoryBackupResult<HistoryBackupReport> {
+    let bytes=metadata_io::read_json_bytes(&root.join(MANIFEST),limits).map_err(|error|match error {
+        StoreError::Io(error)=>HistoryBackupError::Io(error), other=>HistoryBackupError::Store(other),
+    })?;
+    let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|e| HistoryBackupError::Corruption(format!("invalid manifest: {e}")))?;
     if envelope.payload.format != FORMAT
-        || hash(&serde_json::to_vec(&envelope.payload)?) != envelope.crc32
+        || metadata_io::json_crc(&envelope.payload,limits)? != envelope.crc32
     {
         return Err(HistoryBackupError::Corruption("manifest format or CRC invalid".into()));
     }
@@ -211,6 +215,7 @@ pub(crate) fn backup_history_database(
     destination: &Path,
     catalog: &PersistentCatalog,
     history: &DurableTypedStore,
+    metadata: MetadataLimits,
 ) -> HistoryBackupResult<HistoryBackupReport> {
     if source.join("lifecycle").exists() || source.join("shared-domain").exists()
         || source.join("tables").exists()
@@ -232,7 +237,7 @@ pub(crate) fn backup_history_database(
         retention_floor: stats.retention_floor,
         retained_versions: stats.persisted_versions,
     };
-    write_manifest(&stage, &report)?;
+    write_manifest(&stage, &report, metadata)?;
     let verify = stage.join("verified-root");
     fs::create_dir(&verify)?;
     RowStore::restore_backup(stage.join(COMPONENTS[0]), verify.join(COMPONENTS[0]))?;
@@ -260,8 +265,14 @@ pub fn restore_history_database(
 pub fn restore_history_database_with_limits(
     backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: HistoryLimits,
 ) -> HistoryBackupResult<HistoryBackupReport> {
+    restore_history_database_with_policies(backup,destination,limits,MetadataLimits::default())
+}
+
+pub fn restore_history_database_with_policies(
+    backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: HistoryLimits, metadata: MetadataLimits,
+) -> HistoryBackupResult<HistoryBackupReport> {
     let backup = fs::canonicalize(backup.as_ref())?;
-    let report = read_manifest(&backup)?;
+    let report = read_manifest(&backup,metadata)?;
     for (component, receipt) in [
         (COMPONENTS[0], report.catalog), (COMPONENTS[1], report.history),
     ] {

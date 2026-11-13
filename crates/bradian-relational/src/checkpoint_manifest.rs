@@ -86,10 +86,11 @@ impl CheckpointManifest {
 /// manifest is never interpreted as a legacy database.
 pub fn load(root: &Path) -> Result<Option<CheckpointManifest>, ManifestError> {
     let path = root.join(CURRENT);
-    let bytes = match fs::read(path) {
+    let bytes = match crate::metadata_io::read_fixed::<LENGTH>(&path) {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(ManifestError::Io(err)),
+        Err(crate::metadata_io::FixedError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(crate::metadata_io::FixedError::Io(err)) => return Err(ManifestError::Io(err)),
+        Err(crate::metadata_io::FixedError::Length) => return Err(ManifestError::Corruption("wrong manifest length")),
     };
     Ok(Some(CheckpointManifest::decode(&bytes)?))
 }

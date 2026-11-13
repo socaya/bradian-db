@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+mod metadata_io;
 mod model;
 mod catalog;
 pub mod page;

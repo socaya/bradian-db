@@ -10,11 +10,13 @@
 //! No claim is made of a remote/distributed backup, MVCC snapshot, PITR,
 //! encrypted archives, or protection against noncooperating filesystem writers.
 
+use crate::runtime_limits::MetadataLimits;
+use crate::metadata_io;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crc32fast::{hash, Hasher};
+use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -130,29 +132,28 @@ fn canonical_new_destination(
     Ok((dest, staged))
 }
 
-fn write_manifest(root: &Path, report: &DatabaseBackupReport) -> DatabaseBackupResult<()> {
-    let payload = ManifestPayload { format: FORMAT.into(), report: report.clone() };
-    let payload_bytes = serde_json::to_vec(&payload)?;
-    let envelope = Envelope {
-        payload,
-        crc32: hash(&payload_bytes),
-    };
-    let mut file = OpenOptions::new().write(true).create_new(true)
-        .open(root.join(MANIFEST))?;
-    file.write_all(&serde_json::to_vec(&envelope)?)?;
-    file.sync_all()?;
-    sync_dir(root)?;
-    Ok(())
+#[derive(Serialize)]
+struct PayloadRef<'a> { format: &'static str, report: &'a DatabaseBackupReport }
+#[derive(Serialize)]
+struct EnvelopeRef<'a> { payload: PayloadRef<'a>, crc32: u32 }
+fn write_manifest(root: &Path, report: &DatabaseBackupReport, limits: MetadataLimits) -> Result<(),DatabaseBackupError> {
+    let payload=PayloadRef { format:FORMAT,report };
+    let crc32=metadata_io::json_crc(&payload,limits)?;
+    let bytes=metadata_io::json_bytes(&EnvelopeRef { payload,crc32 },limits)?;
+    let mut file=OpenOptions::new().write(true).create_new(true).open(root.join(MANIFEST))?;
+    file.write_all(&bytes)?; file.sync_all()?; sync_dir(root)?; Ok(())
 }
 
-fn read_manifest(root: &Path) -> DatabaseBackupResult<DatabaseBackupReport> {
-    let envelope: Envelope = serde_json::from_slice(&fs::read(root.join(MANIFEST))?)
+fn read_manifest(root: &Path, limits: MetadataLimits) -> DatabaseBackupResult<DatabaseBackupReport> {
+    let bytes=metadata_io::read_json_bytes(&root.join(MANIFEST),limits).map_err(|error|match error {
+        StoreError::Io(error)=>DatabaseBackupError::Io(error), other=>DatabaseBackupError::Storage(other),
+    })?;
+    let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|e| DatabaseBackupError::Corruption(format!("manifest JSON: {e}")))?;
     if envelope.payload.format != FORMAT {
         return Err(DatabaseBackupError::Corruption("unsupported database backup version".into()));
     }
-    let payload_bytes = serde_json::to_vec(&envelope.payload)?;
-    if hash(&payload_bytes) != envelope.crc32 {
+    if metadata_io::json_crc(&envelope.payload,limits)? != envelope.crc32 {
         return Err(DatabaseBackupError::Corruption("database backup manifest CRC mismatch".into()));
     }
     if envelope.payload.report.active_tables.windows(2).any(|w| w[0] >= w[1]) {
@@ -247,6 +248,7 @@ pub(crate) fn backup_database(
     domain: &MultiTableStore,
     lifecycle: &RowStore,
     statuses: &[TableLifecycleStatus],
+    metadata: MetadataLimits,
 ) -> DatabaseBackupResult<DatabaseBackupReport> {
     if statuses.iter().any(|status| status.state != TableLifecycleState::Active) {
         return Err(DatabaseBackupError::Invalid("unreconciled lifecycle state".into()));
@@ -270,7 +272,7 @@ pub(crate) fn backup_database(
         lifecycle: lifecycle_point,
         active_tables: statuses.iter().map(|s| s.table_id.0).collect(),
     };
-    write_manifest(&staged, &report)?;
+    write_manifest(&staged, &report, metadata)?;
     // Rebuild, replay and compare the actual relational catalog, physical
     // domain schema pins and lifecycle journal in the independently copied
     // backup before publishing it.
@@ -300,11 +302,17 @@ pub fn restore_database(
     backup: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> DatabaseBackupResult<DatabaseBackupReport> {
+    restore_database_with_metadata_limits(backup,destination,MetadataLimits::default())
+}
+
+pub fn restore_database_with_metadata_limits(
+    backup: impl AsRef<Path>, destination: impl AsRef<Path>, metadata: MetadataLimits,
+) -> DatabaseBackupResult<DatabaseBackupReport> {
     let backup = fs::canonicalize(backup.as_ref())?;
     if !backup.is_dir() {
         return Err(DatabaseBackupError::Invalid("backup is not a directory".into()));
     }
-    let report = read_manifest(&backup)?;
+    let report = read_manifest(&backup,metadata)?;
     for (component, expected) in [
         (COMPONENTS[0], report.catalog),
         (COMPONENTS[1], report.domain),

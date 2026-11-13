@@ -291,11 +291,17 @@ impl CatalogLifecycle {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<crate::database_backup::DatabaseBackupReport, crate::database_backup::DatabaseBackupError> {
+        self.backup_database_to_with_metadata_limits(destination,crate::runtime_limits::MetadataLimits::default())
+    }
+
+    pub fn backup_database_to_with_metadata_limits(
+        &self, destination: impl AsRef<Path>, metadata: crate::runtime_limits::MetadataLimits,
+    ) -> Result<crate::database_backup::DatabaseBackupReport,crate::database_backup::DatabaseBackupError> {
         let _guard = self.operation.lock();
         let statuses = self.reconcile_locked()?;
         crate::database_backup::backup_database(
             &self.root, destination.as_ref(), &self.catalog,
-            &self.domain, &self.journal, &statuses,
+            &self.domain, &self.journal, &statuses, metadata,
         )
     }
 
