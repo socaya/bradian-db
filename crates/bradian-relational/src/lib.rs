@@ -33,6 +33,7 @@ pub mod durable_mvcc;
 pub mod durable_typed;
 pub mod history_sql;
 mod sql_expression;
+mod select_window;
 pub mod history_migration;
 pub mod history_backup;
 pub mod lifecycle_history_migration;

@@ -546,8 +546,10 @@ impl<'a> HistorySqlSession<'a> {
                         let positions = columns.iter()
                             .map(|name| locate(&table, name))
                             .collect::<SqlResult<Vec<_>>>()?;
-                        let rows = if p.next_is_word("where") {
-                            let key = key_predicate(&mut p, &table)?;
+                        let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
+                        let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
+                        p.end()?;
+                        let rows = if let Some(key) = key {
                             match as_of {
                                 Some(lsn) => self.engine.domain.get_as_of(table.id, &key, lsn)?
                                     .into_iter().collect(),
@@ -559,7 +561,7 @@ impl<'a> HistorySqlSession<'a> {
                                 None => tx.scan(table.id)?,
                             }
                         };
-                        p.end()?;
+                        let rows = window.apply(rows, &table)?;
                         Ok(SqlResultSet::Rows {
                             columns,
                             rows: rows.into_iter().map(|row: Vec<_>|
