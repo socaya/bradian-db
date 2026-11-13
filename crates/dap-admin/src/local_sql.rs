@@ -1,12 +1,13 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use bradian_relational::history_sql::HistorySqlEngine;
-use bradian_relational::sql::{SqlEngine, SqlResultSet};
-use bradian_relational::typed_table::Value;
+use bradian_relational::sql::SqlEngine;
 use bradian_relational::runtime_limits::{ScanControl, ScanLimits, HistoryLimits, StagingLimits};
 use clap::Parser;
-use serde_json::{json, Value as Json};
+use crate::local_sql_output::{output,DEFAULT_OUTPUT_BYTES};
+#[cfg(test)]
+use {serde_json::Value as Json,bradian_relational::{typed_table::Value,sql::SqlResultSet}};
 
 const MAX_SCRIPT: usize = 1024 * 1024;
 const MAX_STATEMENT: usize = 64 * 1024;
@@ -39,6 +40,9 @@ pub(crate) struct SqlArgs {
     /// SQL examined key/version/projection-cell budget (default 1000000).
     #[arg(long)]
     max_scan_work: Option<usize>,
+    /// Encoded JSON output bytes per statement, including newline (default 16777216).
+    #[arg(long)]
+    max_output_bytes: Option<usize>,
     /// Retained logical history key limit (default 1000000).
     #[arg(long, requires = "history")]
     max_history_keys: Option<usize>,
@@ -127,39 +131,12 @@ fn private_root(_root: &Path) -> Result<()> {
     anyhow::bail!("native local SQL directory permissions are not yet qualified on this platform")
 }
 
-fn value(value: &Value) -> Json {
-    match value {
-        Value::Null => json!({"type":"null", "value":null}),
-        Value::Boolean(v) => json!({"type":"boolean", "value":v}),
-        Value::Int32(v) => json!({"type":"int32", "value":v}),
-        Value::Int64(v) => json!({"type":"int64", "value":v.to_string()}),
-        Value::Decimal(v) => json!({"type":"decimal", "unscaled":v.to_string()}),
-        Value::String(v) => json!({"type":"text", "value":v}),
-        Value::TimestampTz(v) => json!({"type":"timestamp_tz", "microseconds":v.to_string()}),
-        Value::Uuid(v) => {
-            let hex: String = v.iter().map(|byte|format!("{byte:02x}")).collect();
-            json!({"type":"uuid", "value":format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])})
-        },
-    }
-}
-
-fn output(writer: &mut impl Write, number: usize, result: SqlResultSet) -> Result<()> {
-    let result = match result {
-        SqlResultSet::Command { affected } => json!({"statement":number, "kind":"command", "affected":affected}),
-        SqlResultSet::Rows { columns, rows } => json!({"statement":number, "kind":"rows", "columns":columns,
-            "rows":rows.iter().map(|row|row.iter().map(value).collect::<Vec<_>>()).collect::<Vec<_>>()}),
-    };
-    serde_json::to_writer(&mut *writer, &result)?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
-    Ok(())
-}
-
 pub(crate) fn run(args: SqlArgs) -> Result<()> {
     let source = read_script(&args)?;
     let statements = statements(&source)?;
     if args.history { anyhow::ensure!(args.root.join("history-domain").is_dir(), "--history requires an existing migrated history-domain root"); }
     private_root(&args.root)?;
+    let output_limit=args.max_output_bytes.unwrap_or(DEFAULT_OUTPUT_BYTES);
     let mut writer = std::io::BufWriter::new(std::io::stdout().lock());
     let defaults = ScanLimits::default();
     let control = ScanControl::new(ScanLimits {
@@ -184,7 +161,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
                 // Keep CLI output errors outside engine error categories while
                 // returning through the scoped callback so pending work is dropped.
                 let result = result.map_err(|e| std::io::Error::other(format!("{e:#}")))?;
-                output(&mut writer, index + 1, result).map_err(|e|std::io::Error::other(format!("{e:#}")))?;
+                output(&mut writer, index + 1, result, output_limit).map_err(|e|std::io::Error::other(format!("{e:#}")))?;
             }
             if session.in_transaction() { return Err(std::io::Error::other("script ended with an uncommitted transaction; staged work rolled back").into()); }
             Ok(())
@@ -196,7 +173,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
                 for (index, statement) in statements.iter().enumerate() {
                     let result = session.execute(statement).with_context(||format!("statement {} failed", index + 1))
                         .map_err(|e|std::io::Error::other(format!("{e:#}")))?;
-                    output(&mut writer, index + 1, result).map_err(|e|std::io::Error::other(format!("{e:#}")))?;
+                    output(&mut writer, index + 1, result, output_limit).map_err(|e|std::io::Error::other(format!("{e:#}")))?;
                 }
                 if session.in_transaction() { return Err(std::io::Error::other("script ended with an uncommitted transaction; staged work rolled back").into()); }
                 Ok(())
@@ -204,7 +181,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
         } else {
             for (index, statement) in statements.iter().enumerate() {
                 let result = engine.execute_with_control(statement, &control).with_context(||format!("statement {} failed", index + 1))?;
-                output(&mut writer, index + 1, result)?;
+                output(&mut writer, index + 1, result, output_limit)?;
             }
         }
     }
@@ -215,7 +192,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn args() -> SqlArgs { SqlArgs { root: PathBuf::from("unused"), execute: None, file: None, table: None, history: false, max_scan_rows: None, max_scan_bytes: None, max_scan_work: None, max_history_keys: None, max_history_versions: None, max_history_bytes: None, max_staged_keys: None, max_staged_bytes: None } }
+    fn args() -> SqlArgs { SqlArgs { root: PathBuf::from("unused"), execute: None, file: None, table: None, history: false, max_scan_rows: None, max_scan_bytes: None, max_scan_work: None, max_output_bytes: None, max_history_keys: None, max_history_versions: None, max_history_bytes: None, max_staged_keys: None, max_staged_bytes: None } }
 
     #[test]
     fn splitting_preserves_quoted_semicolons_unicode_and_doubled_quotes() {
@@ -256,7 +233,7 @@ mod tests {
     fn json_output_keeps_wide_numeric_and_temporal_values_exact() {
         let mut bytes = Vec::new();
         output(&mut bytes, 1, SqlResultSet::Rows { columns: vec!["id".into(),"decimal".into(),"time".into(),"uuid".into()],
-            rows: vec![vec![Value::Int64(i64::MAX),Value::Decimal(10_i128.pow(38)-1),Value::TimestampTz(i64::MIN),Value::Uuid([255;16])]] }).unwrap();
+            rows: vec![vec![Value::Int64(i64::MAX),Value::Decimal(10_i128.pow(38)-1),Value::TimestampTz(i64::MIN),Value::Uuid([255;16])]] }, DEFAULT_OUTPUT_BYTES).unwrap();
         let json: Json = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["rows"][0][0]["value"], i64::MAX.to_string());
         assert_eq!(json["rows"][0][1]["unscaled"], (10_i128.pow(38)-1).to_string());

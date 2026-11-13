@@ -20,7 +20,7 @@ fn canonical_and_legacy_operator_executables_remain_available() {
         assert!(String::from_utf8(output.stdout).unwrap().starts_with("bradian-db "));
         let output = Command::new(path).args(["sql","--help"]).output().unwrap();
         assert!(output.status.success());
-        assert!(String::from_utf8(output.stdout).unwrap().contains("--history"));
+        let help=String::from_utf8(output.stdout).unwrap(); assert!(help.contains("--history")); assert!(help.contains("--max-output-bytes"));
     }
 }
 
@@ -43,6 +43,20 @@ mod unix {
         ok(run(root, "CREATE DATABASE test; CREATE SCHEMA test.public; CREATE TABLE test.public.items (id BIGINT NOT NULL, amount BIGINT NOT NULL, PRIMARY KEY(id)); INSERT INTO test.public.items(id,amount) VALUES(1,100)", &[]));
     }
     fn amount(root: &Path) -> String { ok(run(root,"SELECT amount FROM test.public.items WHERE id=1",&[]))[0]["rows"][0][0]["value"].as_str().unwrap().into() }
+
+    #[test]
+    fn output_budgets_apply_to_autocommit_and_scoped_modes_without_partial_lines() {
+        let _serial=PROCESS_TESTS.lock().unwrap(); let dir=tempfile::tempdir().unwrap(); let root=dir.path().join("db"); init(&root);
+        let query="SELECT amount FROM test.public.items WHERE id=1"; let baseline=run(&root,query,&[]); assert!(baseline.status.success()); let n=baseline.stdout.len();
+        let exact=n.to_string(); assert_eq!(run(&root,query,&["--max-output-bytes",&exact]).stdout,baseline.stdout);
+        let low=(n-1).to_string(); let failed=run(&root,query,&["--max-output-bytes",&low]); assert!(!failed.status.success()); assert!(failed.stdout.is_empty());
+        let failed=run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--table","test.public.items","--max-output-bytes",&low]);
+        assert!(!failed.status.success()); assert!(String::from_utf8(failed.stderr).unwrap().contains("output byte limit exceeded"));
+        let prior=String::from_utf8(failed.stdout).unwrap(); assert_eq!(prior.lines().count(),2); for line in prior.lines() { serde_json::from_str::<Value>(line).unwrap(); }
+        assert_eq!(amount(&root),"100");
+        let failed=run(&root,"UPDATE test.public.items SET amount=777 WHERE id=1",&["--max-output-bytes","0"]);
+        assert!(!failed.status.success()); assert!(failed.stdout.is_empty()); assert_eq!(amount(&root),"777"); // autocommit preceded output refusal
+    }
 
     #[test]
     fn native_create_insert_select_and_transaction_commit_survive_process_restart() {
@@ -223,5 +237,12 @@ mod unix {
         assert!(String::from_utf8(failed.stderr).unwrap().contains("retained history versions"));
         let rows=ok(run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-history-versions",&capacity]));
         assert_eq!(rows[1]["rows"][0][0]["value"],"106");
+        let baseline=run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history"]);
+        assert!(baseline.status.success()); let text=String::from_utf8(baseline.stdout).unwrap(); let n=text.lines().nth(1).unwrap().len()+1;
+        let exact=n.to_string(); ok(run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-output-bytes",&exact]));
+        let low=(n-1).to_string(); let failed=run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-output-bytes",&low]);
+        assert!(!failed.status.success()); assert!(String::from_utf8(failed.stderr).unwrap().contains("output byte limit exceeded"));
+        let prior=String::from_utf8(failed.stdout).unwrap(); assert_eq!(prior.lines().count(),2); for line in prior.lines() { serde_json::from_str::<Value>(line).unwrap(); }
+        let rows=ok(run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history"])); assert_eq!(rows[1]["rows"][0][0]["value"],"106");
     }
 }

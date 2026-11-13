@@ -6,6 +6,7 @@
 #![deny(unsafe_code)]
 
 mod local_sql;
+mod local_sql_output;
 
 use std::path::PathBuf;
 

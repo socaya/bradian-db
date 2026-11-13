@@ -9,7 +9,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
 | `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query/history/staging, backing/recovery maps, builds and serialized archive metadata are bounded; directory/I/O/cache/decoded metadata workspace, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
-| `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL is not remote SQL; legacy analytical commands retain their existing behavior |
+| `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL output borrows typed results and admits bounded JSON lines; not remote SQL or a budget for legacy analytical commands |
 | `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
 | `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
 | `dap-runtime`, `dap-planner`, `dap-views` | Analytical operators, planning and incremental data products | Full CBO/spill/permission/coherent HTAP requirements remain incomplete |
@@ -44,6 +44,8 @@ IndexLimits separately admits retained checkpoint key/pointer entries for audit/
 IndexBuildLimits preflights conservative key/pointer and borrowed descriptor working state before checkpoint/rebuild file changes. StorageLimits composes row, recovery and build policy for native owners and backup/restore. Index bytes and all persistent formats remain unchanged; see [ADR 0047](../adr/0047-checkpoint-build-admission.md).
 
 Metadata I/O uses exact 40-byte binary records plus a trailing-byte probe and bounded JSON input/serialization. Canonical CRC calculation streams without a payload buffer; report serialization borrows source data. Archive formats and dependencies are unchanged; see [ADR 0048](../adr/0048-bounded-archive-metadata.md).
+
+The SQL CLI now borrows typed results during serialization and admits each complete JSON line including newline under --max-output-bytes. Default budget is 16 MiB per statement in all modes; no second full JSON tree is constructed. Native JSON profile and dependencies are unchanged; see [ADR 0049](../adr/0049-bounded-sql-cli-output.md).
 
 ## Architecture decisions still requiring prototypes
 

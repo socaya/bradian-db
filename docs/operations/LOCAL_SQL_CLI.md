@@ -89,9 +89,13 @@ Default [checkpoint/build reservation limits](CHECKPOINT_BUILD_LIMITS.md) also a
 
 Native checkpoint and archive helpers now use [metadata byte limits](METADATA_LIMITS.md). Explicit JSON archive policy is available through native backup/restore APIs.
 
+## Output byte budget
+
+--max-output-bytes applies to every SQL mode, defaulting to 16777216 bytes per statement including the newline. The encoder borrows typed results and admits a complete line before emission; quota refusal emits no partial line and stops the script. It does not undo completed commits. See the [output policy](SQL_OUTPUT_LIMITS.md) for exact accounting and failure semantics.
+
 ## Output and failure contract
 
-One JSON line is emitted for each successfully executed statement. The statement
+Each emitted JSON line represents one successfully executed statement. Output encoding or I/O can fail after execution and prevent that statement's line. The statement
 number is one-based and ignores empty separators. Commands return kind=command and
 an affected count; queries return kind=rows, columns and typed values. Int64 values,
 decimal unscaled coefficients and timestamp microseconds are strings, preserving
