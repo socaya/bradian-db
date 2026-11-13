@@ -85,7 +85,7 @@ fn project_decoded(
     let source = epochs.schema(decoded.table_id, decoded.epoch)
         .map_err(|err| DomainError::Corruption(err.to_string()))?;
     if source == &definition.table { return Ok(decoded.values); }
-    let plan = crate::schema_evolution::plan_nullable_evolution(source, &definition.table)?;
+    let plan = crate::schema_evolution::plan_schema_projection(source, &definition.table)?;
     Ok(crate::schema_evolution::project_row(&plan, &decoded.values)?)
 }
 
@@ -692,7 +692,7 @@ impl DurableTypedStore {
             return Err(DomainError::Corruption("legacy DDL metadata requires a separate conversion before ALTER".into()));
         }
         let old = self.tables.get(&proposed.id).ok_or(DomainError::UnknownTable(proposed.id.0))?;
-        schema_activation::validate_nullable_evolution(&old.table, &proposed)?;
+        schema_activation::validate_evolution(&old.table, &proposed)?;
         let expected = catalog.snapshot().tables().map(|t| (t.id, t.clone())).collect();
         self.verify_catalog(&expected)?;
         // Reserve space for G11's event/receipt wrappers around the same definition.
@@ -702,7 +702,7 @@ impl DurableTypedStore {
         let pending = PendingActivation {
             intent_lsn: self.last_lsn().checked_add(1)
                 .ok_or_else(|| DomainError::Corruption("history sequence exhausted".into()))?,
-            intent: ActivationIntent { version: 1,
+            intent: ActivationIntent { version: if old.table.column_defaults == proposed.column_defaults { 1 } else { 2 },
                 previous_epoch: self.schema_epochs[&proposed.id],
                 catalog_before_lsn: catalog.last_lsn(), proposed },
         };
@@ -763,7 +763,9 @@ impl DurableTypedStore {
         }
         if actual == base {
             let old = &self.tables[&proposed.id].table;
-            let lsn = if crate::schema_evolution::plan_nullable_additions(old, proposed).is_ok() {
+            let lsn = if old.column_defaults != proposed.column_defaults {
+                catalog.propose_defaulted_revision(proposed.id, proposed.clone())
+            } else if crate::schema_evolution::plan_nullable_additions(old, proposed).is_ok() {
                 catalog.propose_table_revision(proposed.id, proposed.clone())
             } else { catalog.propose_nullable_revision(proposed.id, proposed.clone()) }.map_err(map_catalog)?;
             if lsn != base + 1 { return Err(DomainError::Corruption("catalog proposal LSN differs".into())); }
@@ -777,7 +779,7 @@ impl DurableTypedStore {
             }
         }
         hook(ActivationStage::CatalogActivated)?;
-        let record = ActivationCommit { version: 1, intent_lsn: pending.intent_lsn, catalog_lsn: final_lsn };
+        let record = ActivationCommit { version: pending.intent.version, intent_lsn: pending.intent_lsn, catalog_lsn: final_lsn };
         let mut tx = self.store.begin();
         tx.insert(&schema_activation::activation_key(pending.intent_lsn),
             &serde_json::to_vec(&record)?).map_err(map_mvcc)?;
@@ -1041,7 +1043,15 @@ mod activation_tests {
     }
 
     fn interrupted_revision(stage: ActivationStage, relaxation: bool) -> (TempDir, Table) {
+        interrupted_kind(stage, relaxation, false)
+    }
+
+    fn interrupted_kind(stage: ActivationStage, relaxation: bool, defaulted: bool) -> (TempDir, Table) {
         let (dir, mut proposed) = fixture();
+        if defaulted {
+            proposed.columns.last_mut().unwrap().nullable = false;
+            proposed.column_defaults.insert("note".into(), Value::String("kept".into()));
+        }
         if relaxation {
             proposed.columns.pop();
             proposed.columns[1].nullable = true;
@@ -1318,6 +1328,79 @@ mod activation_tests {
                 drop(engine);
                 assert_eq!(HistorySqlEngine::open(dir.path()).unwrap().last_lsn(), lsn);
             }
+        }
+    }
+
+    #[test]
+    fn defaults_recover_at_all_boundaries_and_sixteen_torn_frames() {
+        for stage in [ActivationStage::IntentSynced, ActivationStage::CatalogProposed,
+            ActivationStage::CatalogActivated, ActivationStage::HistoryActivated] {
+            for cut in [None, Some(0_usize), Some(1), Some(17), Some(usize::MAX)] {
+                let (dir, proposed) = interrupted_kind(stage, false, true);
+                if let Some(cut) = cut {
+                    let component = if matches!(stage, ActivationStage::CatalogProposed | ActivationStage::CatalogActivated) {
+                        "catalog"
+                    } else { "history-domain" };
+                    let path = dir.path().join(component).join("rows.wal");
+                    let bytes = std::fs::read(&path).unwrap();
+                    let offset = last_frame_offset(&bytes);
+                    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+                    file.set_len((offset + cut.min(bytes.len() - offset - 1)) as u64).unwrap();
+                    file.sync_all().unwrap();
+                }
+                let engine = HistorySqlEngine::open(dir.path()).unwrap();
+                let applied = cut.is_none() || stage != ActivationStage::IntentSynced;
+                let schema = engine.schema_as_of("test.public.items", engine.last_lsn()).unwrap().0;
+                assert_eq!(schema.columns.len(), if applied { 3 } else { 2 });
+                assert!(engine.schema_as_of("test.public.items", 4).unwrap().0.column_defaults.is_empty());
+                if applied {
+                    assert_eq!(schema, proposed);
+                    engine.with_session(|s| {
+                        s.execute("BEGIN")?;
+                        assert!(matches!(s.execute("SELECT note FROM test.public.items WHERE id=1")?,
+                            SqlResultSet::Rows { rows, .. } if rows == vec![vec![Value::String("kept".into())]]));
+                        s.execute("INSERT INTO test.public.items(id,amount) VALUES(2,20)")?;
+                        s.execute("COMMIT")?;
+                        s.execute("BEGIN")?;
+                        assert!(matches!(s.execute("SELECT note FROM test.public.items WHERE id=2")?,
+                            SqlResultSet::Rows { rows, .. } if rows == vec![vec![Value::String("kept".into())]]));
+                        Ok(())
+                    }).unwrap();
+                }
+                let lsn = engine.last_lsn();
+                drop(engine);
+                assert_eq!(HistorySqlEngine::open(dir.path()).unwrap().last_lsn(), lsn);
+            }
+        }
+    }
+
+    #[test]
+    fn default_intent_and_commit_versions_cannot_be_downgraded() {
+        for commit in [false, true] {
+            let (dir, mut proposed) = fixture();
+            proposed.columns.last_mut().unwrap().nullable = false;
+            proposed.column_defaults.insert("note".into(), Value::String("kept".into()));
+            let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+            let definitions = catalog.snapshot().tables().map(|t| (t.id, t.clone())).collect();
+            let domain = DurableTypedStore::open(dir.path().join("history-domain"), &definitions).unwrap();
+            let mut plan = domain.plan_schema_activation(&catalog, proposed).unwrap();
+            assert_eq!(plan.intent.version, 2);
+            if !commit { plan.intent.version = 1; }
+            drop(domain);
+            drop(catalog);
+            let raw = DurableMvccStore::open(dir.path().join("history-domain")).unwrap();
+            let mut tx = raw.begin();
+            tx.insert(&schema_activation::intent_key(plan.intent_lsn), &serde_json::to_vec(&plan.intent).unwrap()).unwrap();
+            tx.commit().unwrap();
+            if commit {
+                let mut tx = raw.begin();
+                let record = ActivationCommit { version: 1, intent_lsn: plan.intent_lsn, catalog_lsn: 6 };
+                tx.insert(&schema_activation::activation_key(plan.intent_lsn), &serde_json::to_vec(&record).unwrap()).unwrap();
+                tx.commit().unwrap();
+            }
+            drop(raw);
+            assert!(HistorySqlEngine::open(dir.path()).is_err());
+            assert_eq!(PersistentCatalog::open(dir.path().join("catalog")).unwrap().last_lsn(), 4);
         }
     }
 

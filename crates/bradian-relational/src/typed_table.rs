@@ -232,6 +232,11 @@ pub(crate) fn validate_table(table: &Table) -> TableResult<Vec<usize>> {
             return Err(TableError::Schema("duplicate column name".into()));
         }
     }
+    for (name, value) in &table.column_defaults {
+        let column = table.columns.iter().find(|column| &column.name == name)
+            .ok_or_else(|| TableError::Schema(format!("default references unknown column {name}")))?;
+        validate_value(column, value).map_err(|err| TableError::Schema(format!("invalid default: {err}")))?;
+    }
     let mut positions = Vec::new();
     let mut selected = BTreeSet::new();
     for pk in &table.primary_key.columns {

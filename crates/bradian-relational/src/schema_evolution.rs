@@ -1,4 +1,4 @@
-//! G27/G39 nullable-schema validation and durable historical row projection.
+//! G27/G39/G40 schema validation and durable historical row projection.
 //!
 //! Planning here has no catalog or WAL side effects. G36's exclusive owner
 //! coordinates publication and recovery of validated schema transitions.
@@ -7,7 +7,8 @@ use crate::{Column, Table};
 use crate::typed_table::{validate_table, TableError, Value};
 
 /// A compatible projection preserving existing positions, types and keys.
-/// G27 appends nullable columns; G39 may also relax non-key NOT NULL columns.
+/// G27 appends nullable columns; G39 relaxes non-key NOT NULL columns;
+/// G40 adds immutable typed defaults for newly appended columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdditiveSchemaPlan {
     pub previous: Table,
@@ -39,6 +40,35 @@ pub fn plan_nullable_additions(
 pub fn plan_nullable_evolution(
     previous: &Table, proposed: &Table,
 ) -> Result<AdditiveSchemaPlan, TableError> {
+    if previous.column_defaults != proposed.column_defaults {
+        return Err(TableError::Schema("nullable evolution cannot alter defaults".into()));
+    }
+    let plan = plan_schema_projection(previous, proposed)?;
+    if plan.added_columns.iter().any(|column| !column.nullable) {
+        return Err(TableError::Schema("new required columns need a validated constant default".into()));
+    }
+    Ok(plan)
+}
+
+/// ADD COLUMN defaults are immutable constants; existing columns cannot change.
+pub fn plan_default_additions(
+    previous: &Table, proposed: &Table,
+) -> Result<AdditiveSchemaPlan, TableError> {
+    let plan = plan_schema_projection(previous, proposed)?;
+    if proposed.columns.len() <= previous.columns.len()
+        || !proposed.columns.starts_with(&previous.columns)
+        || proposed.column_defaults == previous.column_defaults
+    {
+        return Err(TableError::Schema("defaulted evolution must add columns without changing existing definitions".into()));
+    }
+    Ok(plan)
+}
+
+/// Read projection across nullable relaxation and immutable defaulted additions.
+/// A schema transition coordinator must additionally validate its operation kind.
+pub fn plan_schema_projection(
+    previous: &Table, proposed: &Table,
+) -> Result<AdditiveSchemaPlan, TableError> {
     validate_table(previous)?;
     validate_table(proposed)?;
     if previous.id != proposed.id || previous.schema != proposed.schema
@@ -51,13 +81,16 @@ pub fn plan_nullable_evolution(
         return Err(TableError::Schema("schema evolution requires a permitted change and cannot drop columns".into()));
     }
     for (old, new) in previous.columns.iter().zip(&proposed.columns) {
+        if previous.column_defaults.get(&old.name) != proposed.column_defaults.get(&new.name) {
+            return Err(TableError::Schema("existing column defaults are immutable".into()));
+        }
         if old.name != new.name || old.data_type != new.data_type || (old.nullable && !new.nullable) {
             return Err(TableError::Schema("only NOT NULL relaxation preserves existing column definitions".into()));
         }
     }
     let added_columns = proposed.columns[previous.columns.len()..].to_vec();
-    if added_columns.iter().any(|column| !column.nullable) {
-        return Err(TableError::Schema("new columns require nullable definitions; backfills are unsupported".into()));
+    if added_columns.iter().any(|column| !column.nullable && !proposed.column_defaults.contains_key(&column.name)) {
+        return Err(TableError::Schema("new required columns need a validated constant default".into()));
     }
     Ok(AdditiveSchemaPlan { previous: previous.clone(), proposed: proposed.clone(), added_columns })
 }
@@ -79,7 +112,9 @@ pub fn project_row(
     crate::typed_table::encode_row(&plan.previous, old_row)?;
     let mut projected = Vec::with_capacity(plan.proposed.columns.len());
     projected.extend_from_slice(old_row);
-    projected.extend((0..plan.added_columns.len()).map(|_| Value::Null));
+    projected.extend(plan.added_columns.iter().map(|column|
+        plan.proposed.column_defaults.get(&column.name).cloned().unwrap_or(Value::Null)));
+    crate::typed_table::encode_row(&plan.proposed, &projected)?;
     Ok(projected)
 }
 
@@ -96,7 +131,7 @@ mod tests {
                 Column { name: "amount".into(), data_type: DataType::Int64, nullable: false },
             ],
             primary_key: PrimaryKey { columns: vec!["id".into()] },
-            unique_keys: vec![], foreign_keys: vec![],
+            unique_keys: vec![], foreign_keys: vec![], column_defaults: Default::default(),
         }
     }
 
@@ -171,4 +206,28 @@ mod tests {
         assert!(project_row(&plan, &[Value::Int64(1), Value::Null]).is_err());
         assert!(plan_nullable_additions(&old, &latest).is_err());
     }
+    #[test]
+    fn defaults_are_immutable_and_old_planners_remain_strict() {
+        let old = table();
+        let mut next = old.clone();
+        next.columns.push(Column { name: "note".into(), data_type: DataType::Text, nullable: false });
+        next.column_defaults.insert("note".into(), Value::String("birth".into()));
+        let plan = plan_default_additions(&old, &next).unwrap();
+        assert_eq!(project_row(&plan, &[Value::Int64(1), Value::Int64(50)]).unwrap(),
+            vec![Value::Int64(1), Value::Int64(50), Value::String("birth".into())]);
+        assert!(project_row(&plan, &[Value::Int64(1), Value::Null]).is_err());
+        assert!(plan_nullable_additions(&old, &next).is_err());
+        assert!(plan_nullable_evolution(&old, &next).is_err());
+        for value in [None, Some(Value::String("changed".into())), Some(Value::Null)] {
+            let mut changed = next.clone();
+            changed.columns.push(Column { name: "extra".into(), data_type: DataType::Text, nullable: true });
+            changed.column_defaults.remove("note");
+            if let Some(value) = value { changed.column_defaults.insert("note".into(), value); }
+            assert!(plan_schema_projection(&next, &changed).is_err());
+        }
+        let mut invalid = next.clone();
+        invalid.column_defaults.insert("missing".into(), Value::Null);
+        assert!(plan_default_additions(&old, &invalid).is_err());
+    }
+
 }

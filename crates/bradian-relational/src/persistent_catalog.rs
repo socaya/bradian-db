@@ -59,6 +59,7 @@ enum Command {
     DropDatabase { database: DatabaseId },
     ProposeTableRevision { table: TableId, proposed: Table },
     ProposeNullableRevision { table: TableId, proposed: Table },
+    ProposeDefaultedRevision { table: TableId, proposed: Table },
     ActivateTableRevision { revision: CatalogTableRevision },
     CancelTableRevision { revision: CatalogTableRevision },
 }
@@ -117,13 +118,15 @@ impl Event {
                 revisions.remove(&proposed.id);
                 None
             }
-            Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } => {
+            Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } | Command::ProposeDefaultedRevision { table, proposed } => {
                 let original = catalog.table(*table).ok_or_else(||
                     PersistentCatalogError::Corruption("revision refers to missing table".into())
                 )?;
                 if matches!(&self.command, Command::ProposeTableRevision { .. }) {
                     crate::schema_evolution::plan_nullable_additions(original, proposed)
-                } else { crate::schema_evolution::plan_nullable_evolution(original, proposed) }
+                } else if matches!(&self.command, Command::ProposeNullableRevision { .. }) {
+                    crate::schema_evolution::plan_nullable_evolution(original, proposed)
+                } else { crate::schema_evolution::plan_default_additions(original, proposed) }
                     .map_err(|e| PersistentCatalogError::Corruption(e.to_string()))?;
                 // Reuse the authoritative catalog validators without publishing.
                 catalog.clone().activate_nullable_revision(proposed)?;
@@ -303,6 +306,12 @@ impl PersistentCatalog {
         &self, table: TableId, proposed: Table,
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::ProposeNullableRevision { table, proposed })?.1)
+    }
+
+    pub(crate) fn propose_defaulted_revision(
+        &self, table: TableId, proposed: Table,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::ProposeDefaultedRevision { table, proposed })?.1)
     }
 
     /// Activate catalog metadata only. Existing typed row domains require coordination.

@@ -102,7 +102,7 @@ fn invalid_or_unsupported_ddl_never_advances_either_wal_or_poison_reads() {
     let before = db.last_lsn();
     for sql in [
         "ALTER TABLE bank.public.accounts ADD required TEXT NOT NULL",
-        "ALTER TABLE bank.public.accounts ADD memo TEXT DEFAULT 'x'",
+        "ALTER TABLE bank.public.accounts ADD memo TEXT DEFAULT upper('x')",
         "ALTER TABLE bank.public.accounts ADD id BIGINT",
         "ALTER TABLE bank.public.accounts DROP balance",
         "ALTER TABLE bank.public.accounts RENAME balance TO money",

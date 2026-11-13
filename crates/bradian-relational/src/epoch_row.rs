@@ -132,7 +132,7 @@ mod tests {
                 Column { name: "amount".into(), data_type: DataType::Int64, nullable: false },
             ],
             primary_key: PrimaryKey { columns: vec!["id".into()] },
-            unique_keys: vec![], foreign_keys: vec![],
+            unique_keys: vec![], foreign_keys: vec![], column_defaults: Default::default(),
         }
     }
 

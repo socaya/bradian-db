@@ -118,8 +118,10 @@ fn invalid(message: &str) -> DomainError {
     DomainError::Corruption(format!("schema activation: {message}"))
 }
 
-pub(crate) fn validate_nullable_evolution(old: &Table, proposed: &Table) -> Result<(), DomainError> {
-    crate::schema_evolution::plan_nullable_evolution(old, proposed)?;
+pub(crate) fn validate_evolution(old: &Table, proposed: &Table) -> Result<(), DomainError> {
+    if old.column_defaults == proposed.column_defaults {
+        crate::schema_evolution::plan_nullable_evolution(old, proposed)?;
+    } else { crate::schema_evolution::plan_default_additions(old, proposed)?; }
     crate::catalog::validate_revision_columns(proposed)
         .map_err(|err| invalid(&err.to_string()))?;
     Ok(())
@@ -166,21 +168,24 @@ impl SchemaChanges {
         for (lsn, event) in events {
             match event {
                 Event::Intent(intent) => {
-                    if pending.is_some() || intent.version != 1 || intent.catalog_before_lsn == 0
+                    if pending.is_some() || !matches!(intent.version, 1 | 2) || intent.catalog_before_lsn == 0
                         || catalog_horizon.is_some_and(|prior| prior != intent.catalog_before_lsn)
                     { return Err(invalid("invalid or overlapping intent chronology")); }
                     let schemas = timeline.get(&intent.proposed.id)
                         .ok_or_else(|| invalid("intent references an unregistered table"))?;
                     let (epoch, old) = schemas.last_key_value().expect("registered schema timeline");
                     if *epoch != intent.previous_epoch { return Err(invalid("stale previous schema epoch")); }
-                    validate_nullable_evolution(old, &intent.proposed)?;
+                    if (intent.version == 2) != (old.column_defaults != intent.proposed.column_defaults) {
+                        return Err(invalid("intent version does not match default semantics"));
+                    }
+                    validate_evolution(old, &intent.proposed)?;
                     let candidate = PendingActivation { intent_lsn: lsn, intent };
                     candidate.catalog_lsn()?;
                     pending = Some(candidate);
                 }
                 Event::Active(commit) => {
                     let intent = pending.take().ok_or_else(|| invalid("activation without intent"))?;
-                    if commit.version != 1 || commit.intent_lsn != intent.intent_lsn
+                    if commit.version != intent.intent.version || commit.intent_lsn != intent.intent_lsn
                         || intent.intent_lsn.checked_add(1) != Some(lsn)
                         || commit.catalog_lsn != intent.catalog_lsn()?
                     { return Err(invalid("activation chronology or catalog horizon mismatch")); }

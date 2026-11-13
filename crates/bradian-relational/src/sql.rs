@@ -118,6 +118,7 @@ fn lex(source: &str) -> SqlResult<Vec<Token>> {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Literal {
+    Default,
     Null,
     Bool(bool),
     Number(String),
@@ -211,6 +212,11 @@ impl Parser {
             }
             _ => Err(SqlError::Syntax("expected a literal value".into())),
         }
+    }
+
+    /// DEFAULT is available only in the historical INSERT profile.
+    pub(crate) fn insert_literal(&mut self) -> SqlResult<Literal> {
+        if self.consume_word("default") { Ok(Literal::Default) } else { self.literal() }
     }
 
     /// Parse a nonnegative integer WAL position without lossy casts.

@@ -60,7 +60,7 @@ fn names(columns: &[String], existing: &BTreeSet<String>) -> Result<Vec<String>,
     Ok(canonical)
 }
 
-fn validate_type(data_type: &DataType) -> Result<(), CatalogError> {
+pub(crate) fn validate_type(data_type: &DataType) -> Result<(), CatalogError> {
     match data_type {
         DataType::Decimal { precision, scale } if *precision == 0 || *precision > 38 || scale > precision =>
             Err(CatalogError::InvalidDefinition("decimal precision must be 1..=38 and scale <= precision".into())),
@@ -168,7 +168,7 @@ impl Catalog {
         self.tables.insert(id, Table {
             id, schema, name: table_name, columns,
             primary_key: PrimaryKey { columns: pk },
-            unique_keys, foreign_keys: Vec::new(),
+            unique_keys, foreign_keys: Vec::new(), column_defaults: BTreeMap::new(),
         });
         Ok(id)
     }
@@ -223,7 +223,7 @@ impl Catalog {
     pub(crate) fn activate_nullable_revision(&mut self, proposed: &Table) -> Result<(), CatalogError> {
         let current = self.table(proposed.id)
             .ok_or_else(|| CatalogError::NotFound(format!("table {}", proposed.id.0)))?;
-        crate::schema_evolution::plan_nullable_evolution(current, proposed)
+        crate::schema_evolution::plan_schema_projection(current, proposed)
             .map_err(|err| CatalogError::InvalidDefinition(err.to_string()))?;
         validate_revision_columns(proposed)?;
         self.tables.insert(proposed.id, proposed.clone());

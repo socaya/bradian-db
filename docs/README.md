@@ -47,10 +47,12 @@ This directory contains the engineering specifications, architectural decisions,
 
 32. **[Nullable relaxation ADR](adr/0034-nullability-relaxation-and-insert-null.md)** — checked DROP NOT NULL, implicit INSERT NULL and additions-only API compatibility.
 
+33. **[Immutable defaults ADR](adr/0035-immutable-constant-column-defaults.md)** — typed ADD COLUMN defaults and versioned recovery.
+
 ## Executed verification
 
-[G39 verification report, 13 November 2026](implementation/BRADIAN_G39_VERIFICATION_2026_11_13.md):
-600 Rust tests passed, including 345 relational tests. Workspace check, strict Clippy
+[G40 verification report, 13 November 2026](implementation/BRADIAN_G40_VERIFICATION_2026_11_13.md):
+611 Rust tests passed, including 356 relational tests. Workspace check, strict Clippy
 and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
 statements that Cargo was unavailable; operational and cross-platform qualification
 remain separate work.
@@ -98,6 +100,7 @@ remain separate work.
 | [BRD-G37](gates/BRD-G37-legacy-ddl-retirement.md) | Explicit retirement of inactive G28–G31 metadata before G36 upgrade | Linux retirement, restore and partial-frame tests passed |
 | [BRD-G38](gates/BRD-G38-consistent-history-backup-metadata.md) | Archive statistics bound to the copied history snapshot | Concurrent-write backup/restore tests passed |
 | [BRD-G39](gates/BRD-G39-nullability-relaxation.md) | Recoverable non-key DROP NOT NULL and implicit nullable INSERT values | Linux SQL and four-boundary recovery tests passed |
+| [BRD-G40](gates/BRD-G40-immutable-column-defaults.md) | Immutable typed column defaults, historical projection and INSERT DEFAULT | SQL, compatibility and four-boundary recovery tests passed |
 | Future gates | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 [Implementation gap register](implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining work and required evidence.

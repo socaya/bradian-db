@@ -87,4 +87,20 @@ pub struct Table {
     pub primary_key: PrimaryKey,
     pub unique_keys: Vec<UniqueKey>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// Epoch-bound constants. Omitting empty maps preserves legacy schema bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub column_defaults: std::collections::BTreeMap<String, crate::typed_table::Value>,
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_empty_default_schema_keeps_exact_canonical_bytes() {
+        let legacy = r#"{"id":8,"schema":2,"name":"entries","columns":[{"name":"id","data_type":"Int64","nullable":false}],"primary_key":{"columns":["id"]},"unique_keys":[],"foreign_keys":[]}"#;
+        let table: Table = serde_json::from_str(legacy).unwrap();
+        assert!(table.column_defaults.is_empty());
+        assert_eq!(serde_json::to_vec(&table).unwrap(), legacy.as_bytes());
+    }
 }

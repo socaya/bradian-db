@@ -10,7 +10,7 @@ use crate::{Column, Table};
 use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
-    coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
+    coerce, key_predicate, locate, qualified, Literal, Parser, SqlError, SqlResult, SqlResultSet,
 };
 use crate::durable_typed::{DurableTypedStore, DurableTypedTransaction};
 
@@ -106,6 +106,19 @@ impl HistorySqlEngine {
         self.activate_schema(proposed, &mut |_| Ok(()))
     }
 
+    /// Append a column with an immutable typed default; old rows project that value.
+    pub fn add_column_with_default(
+        &mut self, qualified_table: &str, column: Column, default: crate::typed_table::Value,
+    ) -> SqlResult<SchemaActivationReceipt> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let mut proposed = self.resolve(&parts)?;
+        proposed.column_defaults.insert(column.name.clone(), default);
+        proposed.columns.push(column);
+        self.activate_schema(proposed, &mut |_| Ok(()))
+    }
+
     /// Relax an existing non-key NOT NULL column through the same durable protocol.
     pub fn drop_not_null(
         &mut self, qualified_table: &str, column_name: &str,
@@ -147,9 +160,33 @@ impl HistorySqlEngine {
             p.consume_word("column");
             let name = p.word()?;
             let data_type = p.data_type()?;
-            p.consume_word("null");
+            crate::catalog::validate_type(&data_type).map_err(|err| SqlError::Type(err.to_string()))?;
+            let mut nullable = true;
+            let mut null_clause = false;
+            let mut default = None;
+            loop {
+                if p.consume_word("default") {
+                    if default.is_some() { return Err(SqlError::Syntax("duplicate DEFAULT clause".into())); }
+                    default = Some(p.literal()?);
+                } else if p.consume_word("not") {
+                    if null_clause { return Err(SqlError::Syntax("duplicate nullability clause".into())); }
+                    p.expect("null")?;
+                    null_clause = true;
+                    nullable = false;
+                } else if p.consume_word("null") {
+                    if null_clause { return Err(SqlError::Syntax("duplicate nullability clause".into())); }
+                    null_clause = true;
+                } else { break; }
+            }
             p.end()?;
-            self.add_nullable_column(&parts.join("."), Column { name, data_type, nullable: true })
+            let column = Column { name, data_type, nullable };
+            match default {
+                Some(literal) => {
+                    let value = coerce(&literal, &column)?;
+                    self.add_column_with_default(&parts.join("."), column, value)
+                },
+                None => self.add_nullable_column(&parts.join("."), column),
+            }
         } else {
             p.expect("alter")?;
             p.consume_word("column");
@@ -378,24 +415,27 @@ impl<'a> HistorySqlSession<'a> {
                 p.expect("as")?;
                 p.expect("of")?;
                 let lsn = p.number_u64()?;
+                let defaults = if p.consume_word("with") { p.expect("defaults")?; true } else { false };
                 p.end()?;
                 let (schema, registered) = self.engine.domain.schema_as_of(table.id, lsn)?;
-                let rows = schema.columns.into_iter().map(|column| vec![
-                    crate::typed_table::Value::String(column.name),
-                    crate::typed_table::Value::String(
-                        serde_json::to_string(&column.data_type)
-                            .expect("validated catalog data type is serializable")
-                    ),
-                    crate::typed_table::Value::Boolean(column.nullable),
-                    crate::typed_table::Value::String(registered.to_string()),
-                ]).collect();
-                Ok(SqlResultSet::Rows {
-                    columns: vec![
-                        "column_name".into(), "data_type".into(),
-                        "nullable".into(), "schema_registered_lsn".into(),
-                    ],
-                    rows,
-                })
+                let rows = schema.columns.iter().map(|column| {
+                    let mut row = vec![
+                        crate::typed_table::Value::String(column.name.clone()),
+                        crate::typed_table::Value::String(serde_json::to_string(&column.data_type)
+                            .expect("validated catalog data type is serializable")),
+                        crate::typed_table::Value::Boolean(column.nullable),
+                        crate::typed_table::Value::String(registered.to_string()),
+                    ];
+                    if defaults {
+                        row.push(crate::typed_table::Value::Boolean(schema.column_defaults.contains_key(&column.name)));
+                        row.push(schema.column_defaults.get(&column.name).cloned().unwrap_or(crate::typed_table::Value::Null));
+                    }
+                    row
+                }).collect();
+                let mut columns = vec!["column_name".into(), "data_type".into(),
+                    "nullable".into(), "schema_registered_lsn".into()];
+                if defaults { columns.extend(["has_default".into(), "column_default".into()]); }
+                Ok(SqlResultSet::Rows { columns, rows })
             }
             "insert" | "select" | "update" | "delete" => {
                 // Resolve and parse before applying any change. On any error,
@@ -408,7 +448,7 @@ impl<'a> HistorySqlSession<'a> {
                         let table = self.engine.resolve(&p.name()?)?;
                         let names = p.list(|parser| parser.word())?;
                         p.expect("values")?;
-                        let values = p.list(|parser| parser.literal())?;
+                        let values = p.list(|parser| parser.insert_literal())?;
                         p.end()?;
                         if names.len() != values.len() {
                             return Err(SqlError::Syntax("INSERT column and value counts differ".into()));
@@ -422,9 +462,12 @@ impl<'a> HistorySqlSession<'a> {
                         }
                         let row = table.columns.iter().map(|column| {
                             match fields.remove(&column.name) {
-                                Some(lit) => coerce(&lit, column),
-                                None if column.nullable => Ok(crate::typed_table::Value::Null),
-                                None => Err(SqlError::Type(format!("missing NOT NULL column {}", column.name))),
+                                Some(lit) if !matches!(lit, Literal::Default) => coerce(&lit, column),
+                                _ => match table.column_defaults.get(&column.name) {
+                                    Some(value) => Ok(value.clone()),
+                                    None if column.nullable => Ok(crate::typed_table::Value::Null),
+                                    None => Err(SqlError::Type(format!("missing NOT NULL column {}", column.name))),
+                                },
                             }
                         }).collect::<SqlResult<Vec<_>>>()?;
                         tx.insert(table.id, &row)?;
