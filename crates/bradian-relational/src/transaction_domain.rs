@@ -45,6 +45,8 @@ pub enum DomainError {
     UnknownTable(u64),
     #[error("registered table {0} has an incompatible schema")]
     SchemaMismatch(u64),
+    #[error("invalid savepoint operation: {0}")]
+    Savepoint(String),
     #[error("transaction conflict: concurrent write changed domain state")]
     Conflict,
 }

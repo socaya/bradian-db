@@ -8,7 +8,7 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog revision decisions, opt-in schema-epoch rows, exclusive nullable-column additions, immutable constant defaults and NOT NULL relaxation with recoverable catalog/history coordination, and verified retirement of inactive schema intents. General SQL conformance, concurrent online DDL, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_G40_VERIFICATION_2026_11_13.md): **611 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
+> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions with bounded historical savepoints, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog revision decisions, opt-in schema-epoch rows, exclusive nullable-column additions, immutable constant defaults and NOT NULL relaxation with recoverable catalog/history coordination, and verified retirement of inactive schema intents. General SQL conformance, concurrent online DDL, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_G41_VERIFICATION_2026_11_13.md): **623 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
 
 ## Product architecture
 
@@ -144,9 +144,11 @@ The approved Bradian horizontal logo is available in [navy blue](docs/media/Brad
 
 ## Executed verification
 
-The [G39 verification report](docs/implementation/BRADIAN_G40_VERIFICATION_2026_11_13.md)
-records 611 passing Rust tests plus workspace compilation, strict Clippy and Studio
-checks. [G40](docs/gates/BRD-G40-immutable-column-defaults.md) adds typed constant
+The [G41 verification report](docs/implementation/BRADIAN_G41_VERIFICATION_2026_11_13.md)
+records 623 passing Rust tests plus workspace compilation, strict Clippy and Studio
+checks. [G41](docs/gates/BRD-G41-history-savepoints.md) adds bounded transaction
+savepoints, explicit statement-error recovery and preserved conflict observations.
+[G40](docs/gates/BRD-G40-immutable-column-defaults.md) adds typed constant
 defaults, including required added columns, historical projection and INSERT DEFAULT.
 The exclusive schema coordinator preserves original rows and schema epochs. The
 [gap register](docs/implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining

@@ -12,7 +12,7 @@ schema pins remain unchanged. Other SQL engines keep their earlier contracts.
 ALTER TABLE bank.public.accounts ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
 INSERT INTO bank.public.accounts (id, balance) VALUES (3, 300);
 INSERT INTO bank.public.accounts (id, balance, status) VALUES (4, 400, DEFAULT);
-DESCRIBE bank.public.accounts AS OF 6 WITH DEFAULTS;
+DESCRIBE TABLE bank.public.accounts AS OF 6 WITH DEFAULTS;
 ```
 
 Use `execute_ddl` on a mutable HistorySqlEngine after enabling G35 epoch writes.

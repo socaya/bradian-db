@@ -28,6 +28,7 @@ const MAX_USER_KEY: usize = 498; // 4 prefix + 2 length + 8 LSN <= RowStore max 
 const MAX_USER_VALUE: usize = 3545; // 1 version flag + inline payload <= G3 row limit
 const MAX_WRITE_KEYS: usize = 256;
 const GC_BATCH: usize = 256;
+const MAX_SAVEPOINTS: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum DurableMvccError {
@@ -49,6 +50,8 @@ pub enum DurableMvccError {
     SnapshotUnavailable { requested: u64, floor: u64, latest: u64 },
     #[error("cannot advance retention past an active pinned snapshot")]
     PinnedSnapshot,
+    #[error("invalid savepoint operation: {0}")]
+    Savepoint(String),
     #[error("transaction or WAL sequence capacity exhausted")]
     CapacityExhausted,
 }
@@ -294,7 +297,7 @@ impl DurableMvccStore {
         let start = state.latest;
         *state.pins.entry(start).or_default() += 1;
         DurableMvccTransaction {
-            owner: self, start, pending: BTreeMap::new(), scanned: false, released: false,
+            owner: self, start, pending: BTreeMap::new(), savepoints: Vec::new(), scanned: false, released: false,
         }
     }
 
@@ -368,16 +371,59 @@ pub struct DurableMvccStats {
     pub known_keys: usize,
 }
 
+struct Savepoint {
+    name: String,
+    pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+}
+
 pub struct DurableMvccTransaction<'a> {
     owner: &'a DurableMvccStore,
     start: u64,
     pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    savepoints: Vec<Savepoint>,
     scanned: bool,
     released: bool,
 }
 
 impl DurableMvccTransaction<'_> {
     pub fn start_lsn(&self) -> u64 { self.start }
+
+    pub fn savepoint_count(&self) -> usize { self.savepoints.len() }
+
+    /// Capture bounded staged mutations without changing the snapshot or WAL.
+    pub fn savepoint(&mut self, name: &str) -> DurableMvccResult<()> {
+        let mut chars = name.bytes();
+        if name.len() > 63 || !chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            return Err(DurableMvccError::Savepoint("name must be an ASCII identifier of 1..=63 bytes".into()));
+        }
+        if self.savepoints.len() >= MAX_SAVEPOINTS || self.pending.len() > MAX_WRITE_KEYS {
+            return Err(DurableMvccError::Savepoint("bounded marker or staged-key capacity exceeded".into()));
+        }
+        self.savepoints.push(Savepoint { name: name.into(), pending: self.pending.clone() });
+        Ok(())
+    }
+
+    fn savepoint_position(&self, name: &str) -> DurableMvccResult<usize> {
+        self.savepoints.iter().rposition(|point| point.name == name)
+            .ok_or_else(|| DurableMvccError::Savepoint("name does not exist".into()))
+    }
+
+    /// Restore staged writes, keeping the target marker and all conflict observations.
+    pub fn rollback_to(&mut self, name: &str) -> DurableMvccResult<()> {
+        let position = self.savepoint_position(name)?;
+        self.pending = self.savepoints[position].pending.clone();
+        self.savepoints.truncate(position + 1);
+        Ok(())
+    }
+
+    /// Forget the target marker and its descendants while retaining staged writes.
+    pub fn release_savepoint(&mut self, name: &str) -> DurableMvccResult<()> {
+        let position = self.savepoint_position(name)?;
+        self.savepoints.truncate(position);
+        Ok(())
+    }
+
 
     pub fn get(&self, key: &[u8]) -> DurableMvccResult<Option<Vec<u8>>> {
         validate_user(key, None)?;

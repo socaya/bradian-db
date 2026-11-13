@@ -49,10 +49,12 @@ This directory contains the engineering specifications, architectural decisions,
 
 33. **[Immutable defaults ADR](adr/0035-immutable-constant-column-defaults.md)** — typed ADD COLUMN defaults and versioned recovery.
 
+34. **[Transaction savepoints ADR](adr/0036-bounded-history-transaction-savepoints.md)** — bounded staged checkpoints with preserved snapshot and conflict checks.
+
 ## Executed verification
 
-[G40 verification report, 13 November 2026](implementation/BRADIAN_G40_VERIFICATION_2026_11_13.md):
-611 Rust tests passed, including 356 relational tests. Workspace check, strict Clippy
+[G41 verification report, 13 November 2026](implementation/BRADIAN_G41_VERIFICATION_2026_11_13.md):
+623 Rust tests passed, including 368 relational tests. Workspace check, strict Clippy
 and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
 statements that Cargo was unavailable; operational and cross-platform qualification
 remain separate work.
@@ -101,6 +103,7 @@ remain separate work.
 | [BRD-G38](gates/BRD-G38-consistent-history-backup-metadata.md) | Archive statistics bound to the copied history snapshot | Concurrent-write backup/restore tests passed |
 | [BRD-G39](gates/BRD-G39-nullability-relaxation.md) | Recoverable non-key DROP NOT NULL and implicit nullable INSERT values | Linux SQL and four-boundary recovery tests passed |
 | [BRD-G40](gates/BRD-G40-immutable-column-defaults.md) | Immutable typed column defaults, historical projection and INSERT DEFAULT | SQL, compatibility and four-boundary recovery tests passed |
+| [BRD-G41](gates/BRD-G41-history-savepoints.md) | Bounded native/history SQL savepoints and failed-statement recovery | Native, SQL, concurrency and process-exit tests passed |
 | Future gates | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 [Implementation gap register](implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining work and required evidence.

@@ -350,6 +350,7 @@ impl HistorySqlEngine {
         let mut session = HistorySqlSession {
             engine: self,
             active: None,
+            failed_statement: false,
             last_commit_lsn: None,
         };
         callback(&mut session)
@@ -361,6 +362,7 @@ pub struct HistorySqlSession<'a> {
     engine: &'a HistorySqlEngine,
     active: Option<DurableTypedTransaction<'a>>,
     last_commit_lsn: Option<u64>,
+    failed_statement: bool,
 }
 
 impl<'a> HistorySqlSession<'a> {
@@ -370,17 +372,27 @@ impl<'a> HistorySqlSession<'a> {
         self.active.as_ref().map(DurableTypedTransaction::start_lsn)
     }
 
-    /// A failed statement aborts the current transaction; subsequent COMMIT
-    /// cannot accidentally publish earlier staged writes.
+    /// Errors abort the transaction unless a savepoint permits explicit recovery.
+    /// A failed transaction cannot commit before rollback-to or full rollback.
     pub fn execute(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
         let result = self.execute_inner(sql);
-        if result.is_err() { self.active = None; }
+        if result.is_err() {
+            if self.active.as_ref().is_some_and(|tx| tx.savepoint_count() > 0) {
+                self.failed_statement = true;
+            } else {
+                self.active = None;
+                self.failed_statement = false;
+            }
+        }
         result
     }
 
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
         let mut p = Parser::new(sql)?;
         let command = p.word()?;
+        if self.failed_statement && command != "rollback" {
+            return Err(SqlError::Unsupported("transaction requires ROLLBACK TO a savepoint or ROLLBACK after a statement error".into()));
+        }
         match command.as_str() {
             "begin" => {
                 p.consume_word("transaction");
@@ -390,6 +402,7 @@ impl<'a> HistorySqlSession<'a> {
                 }
                 let tx: DurableTypedTransaction<'a> = self.engine.domain.begin();
                 self.active = Some(tx);
+                self.failed_statement = false;
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "commit" => {
@@ -400,11 +413,31 @@ impl<'a> HistorySqlSession<'a> {
                 self.last_commit_lsn = Some(lsn);
                 Ok(SqlResultSet::Command { affected: 0 })
             }
+            "savepoint" | "release" => {
+                if command == "release" { p.consume_word("savepoint"); }
+                let name = p.word()?;
+                p.end()?;
+                let tx = self.active.as_mut().ok_or_else(||
+                    SqlError::Unsupported("savepoint operation requires BEGIN".into()))?;
+                if command == "savepoint" { tx.savepoint(&name)?; }
+                else { tx.release_savepoint(&name)?; }
+                Ok(SqlResultSet::Command { affected: 0 })
+            }
             "rollback" => {
+                if p.consume_word("to") {
+                    p.consume_word("savepoint");
+                    let name = p.word()?;
+                    p.end()?;
+                    self.active.as_mut().ok_or_else(||
+                        SqlError::Unsupported("ROLLBACK TO without BEGIN".into()))?.rollback_to(&name)?;
+                    self.failed_statement = false;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
                 p.end()?;
                 let tx = self.active.take().ok_or_else(||
                     SqlError::Unsupported("ROLLBACK without BEGIN".into()))?;
                 tx.rollback();
+                self.failed_statement = false;
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "describe" => {
@@ -439,7 +472,7 @@ impl<'a> HistorySqlSession<'a> {
             }
             "insert" | "select" | "update" | "delete" => {
                 // Resolve and parse before applying any change. On any error,
-                // execute() drops the pending transaction entirely.
+                // execute() aborts or requires explicit savepoint recovery.
                 let tx = self.active.as_mut().ok_or_else(||
                     SqlError::Unsupported("BEGIN required before transactional DML".into()))?;
                 match command.as_str() {

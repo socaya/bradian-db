@@ -887,6 +887,7 @@ fn map_mvcc(err: DurableMvccError) -> DomainError {
         DurableMvccError::Store(err) => DomainError::Storage(err),
         DurableMvccError::DuplicateKey => DomainError::Table(TableError::DuplicateKey),
         DurableMvccError::NotFound => DomainError::Table(TableError::NotFound),
+        DurableMvccError::Savepoint(message) => DomainError::Savepoint(message),
         DurableMvccError::Conflict | DurableMvccError::ScanConflict => DomainError::Conflict,
         other => DomainError::Corruption(other.to_string()),
     }
@@ -900,6 +901,17 @@ pub struct DurableTypedTransaction<'a> {
 
 impl DurableTypedTransaction<'_> {
     pub fn start_lsn(&self) -> u64 { self.inner.start_lsn() }
+    pub fn savepoint_count(&self) -> usize { self.inner.savepoint_count() }
+    pub fn savepoint(&mut self, name: &str) -> Result<(), DomainError> {
+        self.inner.savepoint(name).map_err(map_mvcc)
+    }
+    pub fn rollback_to(&mut self, name: &str) -> Result<(), DomainError> {
+        self.inner.rollback_to(name).map_err(map_mvcc)
+    }
+    pub fn release_savepoint(&mut self, name: &str) -> Result<(), DomainError> {
+        self.inner.release_savepoint(name).map_err(map_mvcc)
+    }
+
 
     fn definition(&self, id: TableId) -> Result<&Definition, DomainError> {
         self.owner.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))

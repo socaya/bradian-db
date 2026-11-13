@@ -3,7 +3,7 @@
 Updated 13 November 2026. Scope and evidence refer to the checked implementation,
 not blanket completion of the master SRS. Automatic CI remains manual-only.
 
-## Closed through G40
+## Closed through G41
 
 | Gap | Implemented behavior | Evidence |
 |---|---|---|
@@ -17,8 +17,8 @@ not blanket completion of the master SRS. Automatic CI remains manual-only.
 | Restore did not enforce the DDL catalog horizon | Full G30/G36 horizon validation before publication | History backup verifier and schema restore tests |
 | Non-key NOT NULL relaxation unavailable | Checked DROP NOT NULL through G36 recovery, with earlier schema/value preservation | [G39](../gates/BRD-G39-nullability-relaxation.md) |
 | Every INSERT field required after nullable additions | Omitted nullable fields receive NULL; missing required fields still abort the SQL batch | G39 insertion and rollback tests |
-
 | Constant defaults unavailable for added columns | Immutable typed defaults, required additions, old-row projection and INSERT DEFAULT | [G40](../gates/BRD-G40-immutable-column-defaults.md), recovery and compatibility tests |
+| Transaction cannot recover part of staged work | Bounded SAVEPOINT, ROLLBACK TO and RELEASE with failed-state recovery and preserved conflict checks | [G41](../gates/BRD-G41-history-savepoints.md), native, SQL and process-exit tests |
 
 ## Remaining implementation and qualification
 
@@ -26,7 +26,7 @@ not blanket completion of the master SRS. Automatic CI remains manual-only.
 |---|---|---|
 | P0 | Broader schema evolution | Default expressions and SET/DROP DEFAULT, SET NOT NULL/backfill, DROP/RENAME/type changes, dependency planning and recovery tests |
 | P0 | Concurrent online DDL | Schema leases/reader fencing and explicit old-writer commit semantics; current ALTER requires exclusive mutable ownership |
-| P0 | SQL conformance and transaction semantics | Joins, expressions, secondary/foreign-key enforcement, savepoints and serializable schedule tests; current MVCC can admit write skew |
+| P0 | SQL conformance and transaction semantics | Joins, expressions, secondary/foreign-key enforcement and serializable schedule tests; current MVCC can admit write skew |
 | P0 | Enterprise access and transport | Individual sessions, SQL authorization, revocation, tenant isolation and TLS/mTLS; current bootstrap gate is loopback-only |
 | P0 | Operational recovery qualification | Real power-loss, disk-full, torn-device writes, Windows/macOS tests and long-running restore rehearsals |
 | P1 | Mutable physical storage | WAL-protected dirty pages and buffer management; existing on-disk B+tree checkpoints remain immutable |
@@ -35,6 +35,6 @@ not blanket completion of the master SRS. Automatic CI remains manual-only.
 | P1 | Client and Studio integration | Service/wire protocol for relational sessions, drivers and a secured administration workflow; Rust APIs are not a public SQL server |
 | P1 | Recovery/metadata growth | Schema history compaction with reference proofs, remote/PITR/incremental archives and workload benchmarks |
 
-[Current executed verification](BRADIAN_G40_VERIFICATION_2026_11_13.md) records the test
+[Current executed verification](BRADIAN_G41_VERIFICATION_2026_11_13.md) records the test
 scope and limits. These open requirements must not be presented as production-ready
 features or silently enabled through fallback storage engines.
