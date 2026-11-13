@@ -41,10 +41,14 @@ This directory contains the engineering specifications, architectural decisions,
 27. **[Catalog revision decisions ADR](adr/0029-catalog-revision-decisions.md)** — proposal-bound activation/cancellation within the catalog WAL.
 28. **[Live schema epoch row encoding ADR](adr/0030-live-schema-epoch-row-encoding.md)** — explicit capability transition and mixed BRRW/BRVE SQL reads/writes.
 
+29. **[Recoverable additive historical DDL ADR](adr/0031-recoverable-additive-historical-ddl.md)** — exact-state catalog/history activation and immutable schema timelines.
+30. **[Legacy DDL intent retirement ADR](adr/0032-legacy-ddl-intent-retirement.md)** — explicit retirement with a bound catalog horizon and verified archival metadata.
+31. **[Atomic history backup statistics ADR](adr/0033-atomic-history-backup-statistics.md)** — archive receipts and statistics from one mutation lock.
+
 ## Executed verification
 
 [13 November 2026 verification report](implementation/BRADIAN_VERIFICATION_2026_11_13.md):
-562 Rust tests passed, including 307 relational tests. Workspace check, strict Clippy
+588 Rust tests passed, including 333 relational tests. Workspace check, strict Clippy
 and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
 statements that Cargo was unavailable; operational and cross-platform qualification
 remain separate work.
@@ -88,7 +92,12 @@ remain separate work.
 | [BRD-G33](gates/BRD-G33-inactive-catalog-schema-revisions.md) | Replay-validated inactive catalog schema revisions and safe duplicate refusal | Linux regression suite passed; operational qualification outstanding |
 | [BRD-G34](gates/BRD-G34-catalog-revision-decisions.md) | Catalog-only additive activation/cancellation with exact proposal LSN binding | Linux regression suite and partial-write recovery tests passed |
 | [BRD-G35](gates/BRD-G35-live-schema-epoch-rows.md) | Opt-in epoch-tagged SQL writes, mixed row decoding and recovery | Linux integration and recovery suite passed |
-| Future gates | Coordinated historical schema activation, serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
+| [BRD-G36](gates/BRD-G36-recoverable-historical-alter.md) | Exclusive nullable-column ALTER, multi-epoch reads and cross-WAL recovery | Linux SQL and four-boundary recovery tests passed |
+| [BRD-G37](gates/BRD-G37-legacy-ddl-retirement.md) | Explicit retirement of inactive G28–G31 metadata before G36 upgrade | Linux retirement, restore and partial-frame tests passed |
+| [BRD-G38](gates/BRD-G38-consistent-history-backup-metadata.md) | Archive statistics bound to the copied history snapshot | Concurrent-write backup/restore tests passed |
+| Future gates | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
+
+[Implementation gap register](implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining work and required evidence.
 
 ## Formal specification and assets
 

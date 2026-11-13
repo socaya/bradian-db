@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::Table;
+use crate::{Column, Table};
+use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
     coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
@@ -14,12 +15,13 @@ use crate::sql::{
 use crate::durable_typed::{DurableTypedStore, DurableTypedTransaction};
 
 /// SQL-enabled shared transaction domain. The durable catalog and the domain
-/// own separate locks and WALs: existing metadata is resolved but not changed
-/// by a domain transaction. DDL is intentionally unavailable in this API.
+/// own separate locks and WALs. Row sessions never change metadata; exclusive
+/// G36 DDL coordinates catalog/history recovery outside row transactions.
 pub struct HistorySqlEngine {
     catalog: PersistentCatalog,
     domain: DurableTypedStore,
     _root: PathBuf,
+    failed_ddl: bool,
 }
 
 impl HistorySqlEngine {
@@ -51,15 +53,13 @@ impl HistorySqlEngine {
             ));
         }
         let catalog = PersistentCatalog::open(root.join("catalog"))?;
-        let definitions = catalog.snapshot().tables()
-            .map(|table| (table.id, table.clone()))
-            .collect::<BTreeMap<_,_>>();
-        let domain = DurableTypedStore::open(root.join("history-domain"), &definitions)?;
+        let domain = DurableTypedStore::open_coordinated(root.join("history-domain"), &catalog)?;
         domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
-        Ok(Self { catalog, domain, _root: root.to_owned() })
+        Ok(Self { catalog, domain, _root: root.to_owned(), failed_ddl: false })
     }
 
     fn resolve(&self, parts: &[String]) -> SqlResult<Table> {
+        self.require_ready()?;
         qualified(parts, 3)?;
         let snapshot = self.catalog.snapshot();
         let database = snapshot.databases().find(|db| db.name == parts[0])
@@ -78,6 +78,64 @@ impl HistorySqlEngine {
         Ok(table.clone())
     }
 
+    fn require_ready(&self) -> SqlResult<()> {
+        if self.failed_ddl {
+            return Err(SqlError::Unsupported("schema activation was interrupted; reopen for recovery".into()));
+        }
+        Ok(())
+    }
+
+    /// Explicitly retire inactive G28-G31 work without applying any proposal.
+    pub fn retire_legacy_schema_intents(&mut self) -> SqlResult<crate::schema_activation::LegacyDdlRetirementReceipt> {
+        self.require_ready()?;
+        Ok(self.domain.retire_legacy_schema_intents(&self.catalog)?)
+    }
+
+    pub fn legacy_schema_intents_retired(&self) -> bool { self.domain.legacy_schema_intents_retired() }
+
+    /// Exclusive, recoverable nullable-column DDL. Row sessions cannot overlap
+    /// a mutable engine borrow. Returns the durable history/schema receipt.
+    pub fn add_nullable_column(
+        &mut self, qualified_table: &str, column: Column,
+    ) -> SqlResult<SchemaActivationReceipt> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let mut proposed = self.resolve(&parts)?;
+        proposed.columns.push(column);
+        self.activate_schema(proposed, &mut |_| Ok(()))
+    }
+
+    pub(crate) fn activate_schema(
+        &mut self, proposed: Table,
+        hook: &mut impl FnMut(crate::schema_activation::ActivationStage) -> Result<(), crate::transaction_domain::DomainError>,
+    ) -> SqlResult<SchemaActivationReceipt> {
+        self.require_ready()?;
+        let intent = self.domain.plan_schema_activation(&self.catalog, proposed)?;
+        self.failed_ddl = true;
+        let result = self.domain.publish_schema_activation(&self.catalog, intent, hook);
+        if result.is_ok() { self.failed_ddl = false; }
+        Ok(result?)
+    }
+
+    /// ALTER TABLE db.schema.table ADD [COLUMN] name type [NULL].
+    /// Unsupported clauses fail before any durable metadata is written.
+    pub fn execute_ddl(&mut self, sql: &str) -> SqlResult<SchemaActivationReceipt> {
+        self.require_ready()?;
+        let mut p = Parser::new(sql)?;
+        p.expect("alter")?;
+        p.expect("table")?;
+        let parts = p.name()?;
+        qualified(&parts, 3)?;
+        p.expect("add")?;
+        p.consume_word("column");
+        let name = p.word()?;
+        let data_type = p.data_type()?;
+        p.consume_word("null");
+        p.end()?;
+        self.add_nullable_column(&parts.join("."), Column { name, data_type, nullable: true })
+    }
+
     /// Only independently provisioned durable schema pins may be used.
     pub fn registered_table_ids(&self) -> Vec<crate::TableId> {
         self.domain.active_tables()
@@ -91,8 +149,8 @@ impl HistorySqlEngine {
     pub fn last_lsn(&self) -> u64 { self.domain.last_lsn() }
     pub fn retention_floor(&self) -> u64 { self.domain.retention_floor() }
 
-    /// G26: immutable, validated schema registration epochs for this history
-    /// database. Schema changes after registration remain unsupported.
+    /// Original and activated immutable schema epochs, recovered from history.
+    /// A new epoch does not rewrite older schema definitions.
     pub fn schema_epochs(&self) -> Vec<(crate::TableId, u64)> {
         self.domain.schema_epochs()
     }
@@ -195,6 +253,7 @@ impl HistorySqlEngine {
     /// Opt in to G35 BRVE writes in subsequently started transactions.
     /// Existing data and schemas are not rewritten; this is not ALTER TABLE.
     pub fn enable_epoch_row_writes(&self) -> SqlResult<u64> {
+        self.require_ready()?;
         Ok(self.domain.enable_epoch_row_writes()?)
     }
 
@@ -202,13 +261,16 @@ impl HistorySqlEngine {
         Ok(self.domain.epoch_row_writes_enabled()?)
     }
 
-    pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
+    pub fn checkpoint(&self) -> SqlResult<u64> { self.require_ready()?; Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks
     /// remain owned by this engine. G19 legacy archives are not compatible.
     pub fn backup_to(
         &self, destination: impl AsRef<Path>,
     ) -> crate::history_backup::HistoryBackupResult<crate::history_backup::HistoryBackupReport> {
+        if self.failed_ddl {
+            return Err(crate::history_backup::HistoryBackupError::Invalid("schema activation requires recovery before backup".into()));
+        }
         crate::history_backup::backup_history_database(
             &self._root, destination.as_ref(), &self.catalog, &self.domain,
         )
@@ -221,6 +283,7 @@ impl HistorySqlEngine {
         &self,
         callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
     ) -> SqlResult<R> {
+        self.require_ready()?;
         let mut session = HistorySqlSession {
             engine: self,
             active: None,
@@ -347,11 +410,6 @@ impl<'a> HistorySqlSession<'a> {
                         };
                         p.expect("from")?;
                         let table = self.engine.resolve(&p.name()?)?;
-                        let columns = requested.unwrap_or_else(||
-                            table.columns.iter().map(|c|c.name.clone()).collect());
-                        let positions = columns.iter()
-                            .map(|name| locate(&table, name))
-                            .collect::<SqlResult<Vec<_>>>()?;
                         // Historical SELECT is read-only: it may run inside
                         // a normal BEGIN session but cannot stage mutations at
                         // a past LSN. Queries below the retention floor fail.
@@ -359,6 +417,15 @@ impl<'a> HistorySqlSession<'a> {
                             p.expect("of")?;
                             Some(p.number_u64()?)
                         } else { None };
+                        let table = match as_of {
+                            Some(lsn) => self.engine.domain.schema_as_of(table.id, lsn)?.0,
+                            None => table,
+                        };
+                        let columns = requested.unwrap_or_else(||
+                            table.columns.iter().map(|c|c.name.clone()).collect());
+                        let positions = columns.iter()
+                            .map(|name| locate(&table, name))
+                            .collect::<SqlResult<Vec<_>>>()?;
                         let rows = if p.next_is_word("where") {
                             let key = key_predicate(&mut p, &table)?;
                             match as_of {

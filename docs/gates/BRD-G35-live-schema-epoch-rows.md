@@ -72,3 +72,10 @@ ALTER TABLE, map records between active schema revisions, or coordinate two WALs
 Existing exact catalog/schema pins and G30 horizon fences remain mandatory.
 Cross-platform power-loss, device failure and production qualification remain open.
 Automatic CI remains manual-only.
+
+## Follow-up
+
+[G36](BRD-G36-recoverable-historical-alter.md) adds exclusive additive schema activation
+and historical schema-aware SQL. [G37](BRD-G37-legacy-ddl-retirement.md) provides the
+explicit upgrade path for inactive legacy intents. The immutable-only boundary
+above describes G35 at its introduction.

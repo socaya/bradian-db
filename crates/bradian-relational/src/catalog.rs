@@ -70,6 +70,16 @@ fn validate_type(data_type: &DataType) -> Result<(), CatalogError> {
     }
 }
 
+pub(crate) fn validate_revision_columns(table: &Table) -> Result<(), CatalogError> {
+    for column in &table.columns {
+        if identifier(&column.name)? != column.name {
+            return Err(CatalogError::InvalidIdentifier(column.name.clone()));
+        }
+        validate_type(&column.data_type)?;
+    }
+    Ok(())
+}
+
 impl Catalog {
     pub fn new() -> Self {
         Self { next_id: 1, ..Self::default() }
@@ -215,12 +225,7 @@ impl Catalog {
             .ok_or_else(|| CatalogError::NotFound(format!("table {}", proposed.id.0)))?;
         crate::schema_evolution::plan_nullable_additions(current, proposed)
             .map_err(|err| CatalogError::InvalidDefinition(err.to_string()))?;
-        for column in &proposed.columns {
-            if identifier(&column.name)? != column.name {
-                return Err(CatalogError::InvalidIdentifier(column.name.clone()));
-            }
-            validate_type(&column.data_type)?;
-        }
+        validate_revision_columns(proposed)?;
         self.tables.insert(proposed.id, proposed.clone());
         Ok(())
     }

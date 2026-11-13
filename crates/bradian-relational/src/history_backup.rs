@@ -181,6 +181,7 @@ fn verify_root(root: &Path, expected: &HistoryBackupReport) -> HistoryBackupResu
     let catalog = PersistentCatalog::open(root.join("catalog"))?;
     let definitions = catalog_tables(&catalog);
     let domain = DurableTypedStore::open(root.join("history-domain"), &definitions)?;
+    domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
     let stats = domain.stats();
     if catalog.last_lsn() != expected.catalog.last_lsn ||
         catalog.journal_row_count() != expected.catalog.rows ||
@@ -202,7 +203,8 @@ fn receipt_matches(actual: BackupReceipt, expected: HistoryComponentReceipt) -> 
 }
 
 /// Source holders must maintain both independent file locks throughout this call.
-/// No online DDL is permitted; G23 catalog definitions are immutable.
+/// Schema DDL requires mutable engine access and cannot overlap backup. G22
+/// receipt statistics describe the archived snapshot even as row writers resume.
 pub(crate) fn backup_history_database(
     source: &Path,
     destination: &Path,
@@ -218,11 +220,10 @@ pub(crate) fn backup_history_database(
     fs::create_dir(&stage)?;
     let mut catalog_point = HistoryComponentReceipt::from(
         catalog.backup_catalog_to(stage.join(COMPONENTS[0]))?);
-    let mut history_point = HistoryComponentReceipt::from(
-        history.backup_to(stage.join(COMPONENTS[1]))?);
+    let (history_receipt, stats) = history.backup_with_stats(stage.join(COMPONENTS[1]))?;
+    let mut history_point = HistoryComponentReceipt::from(history_receipt);
     catalog_point.archive_crc32 = archive_crc(&stage.join(COMPONENTS[0]), catalog_point)?;
     history_point.archive_crc32 = archive_crc(&stage.join(COMPONENTS[1]), history_point)?;
-    let stats = history.stats();
     let report = HistoryBackupReport {
         catalog: catalog_point,
         history: history_point,

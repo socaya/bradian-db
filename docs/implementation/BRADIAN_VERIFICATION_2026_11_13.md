@@ -2,68 +2,88 @@
 
 ## Result
 
-**562 passed, 0 failed, 0 ignored** across the Rust workspace with all declared
-features enabled. This includes **307 relational tests**. The workspace check,
-strict Clippy across all targets/features and Studio typecheck/build passed.
-These are executed Linux checks, not production or cross-platform certification.
+**588 passed, 0 failed, 0 ignored** across all Rust workspace features, including
+**333 relational tests**. Workspace compilation, strict Clippy across all targets
+and features, and Studio typecheck/build passed. This supersedes the earlier G35
+report for this date; earlier gate counts remain historical evidence.
 
-Baseline: `23d4f1798960debf6f9e17e06adc2ed829cc307d` (G34). This increment adds twelve
-G35 integration tests and preserves the earlier tests. Two process-exit recovery
-tests run in isolated integration binaries; shared fixture helpers remain ordinary
-test support code.
+Baseline: `f50bc77c5051f70f5829b7f992c472e89539338c` (published G35). G36–G38 add
+26 tests: eight schema SQL integrations, ten recovery/integrity unit tests, six
+legacy retirement integrations and two archive consistency integrations.
 
-Environment: Linux x86_64, rustc 1.100.0 stable, Cargo 1.100.0, Node 24.22.1 and npm
-11.9.0. Rust dependencies use the committed Cargo.lock with `--locked`. Studio uses
-the committed package-lock.json through `npm ci`. Automatic CI remains manual-only.
+Environment: Linux x86_64, Rust/Cargo 1.100.0 stable, Node 24.22.1, npm 11.9.0.
+Rust dependencies use the committed Cargo.lock with `--locked`. Studio dependencies
+use the committed package-lock.json. Automatic CI remains manual-only.
 
 | Executed command | Result |
 |---|---|
 | `cargo check --workspace --all-features --locked` | Passed |
-| `cargo test --workspace --all-features --locked --no-fail-fast` | 562 passed; 63 target summaries; no failures or ignored tests |
+| `cargo test --workspace --all-features --locked --no-fail-fast` | 588 passed; no failed or ignored tests |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `npm ci --no-audit --no-fund` in `apps/dap-ui` | Passed |
 | `npm run typecheck` in `apps/dap-ui` | Passed |
 | `npm run build` in `apps/dap-ui` | Passed; 99 modules transformed |
-| `git diff --check` | Passed |
+| `git diff --cached --check` | Passed before publication |
 
-Cargo emits existing unused manifest dependency/field advisories. No compiler or
-Clippy diagnostic caused a failure in the final run.
+Cargo emits existing unused manifest dependency/field advisories. There are no
+failing compiler or Clippy diagnostics. The Rust run includes the complete earlier
+catalog, SQL, MVCC, migration, storage, recovery, analytical, security primitive,
+adapter and HTTP suites.
 
-## Implemented increment
+## G36 — Actual nullable-column ALTER
 
-[G35](../gates/BRD-G35-live-schema-epoch-rows.md) integrates the G32 row codec with
-G23's typed historical SQL. A one-time, explicit capability decision enables BRVE
-writes for subsequently begun transactions. Schema definitions, original row bytes
-and historical LSNs stay unchanged. Mixed BRRW/BRVE rows decode in point reads,
-scans, INSERT/UPDATE/DELETE paths, and AS OF. New envelopes bind to the exact table
-ID and immutable schema-registration epoch.
+The historical engine can execute ALTER TABLE ... ADD [COLUMN] ... [NULL] through
+exclusive mutable ownership. A durable intent precedes catalog proposal/activation,
+then a history activation commit becomes the new schema epoch. Reopening rolls
+forward only exact interrupted states. Original pins and row bytes remain intact.
+Legacy and epoch-tagged rows project through immutable schema timelines, and AS OF
+binds SELECT columns to the schema that existed at the requested LSN.
 
-Tests exercise transition status and duplicate prevention; unchanged catalog and
-legacy bytes; mixed-format multi-table writes and tombstones; historical point and
-scan reads; restart/checkpoint; concurrent opt-in; transactions spanning activation;
-G24 backup/restore with inactive G28–G31 DDL records; exact inline capacity and SQL
-rollback; retention and below-floor refusal; eight malformed retained-envelope
-cases; three invalid activation orderings; four corrupt metadata cases; five torn
-activation-frame truncation/retry cases; and process exit without destructors.
+Tests cover repeated revisions, multi-epoch CRUD, untouched legacy NULL projection,
+invalid syntax/definitions without WAL changes, historical SELECT */DESCRIBE,
+backup/restore, retention and independent catalog divergence. Recovery tests inject
+interruptions at all four durable boundaries and truncate sixteen partial WAL tails.
+They verify idempotent roll-forward, live-owner fencing, standalone adapter refusal,
+no repair on divergent stores, forged intents/activation/retirement records,
+immutable record deletion/rewrites and complete-WAL CRC corruption refusal.
 
-## Test-harness correction
+## G37 — Explicit legacy intent upgrade
 
-An initial full run reported intermittent `Storage(Busy)` in otherwise independent
-fixtures, while the focused suite passed. A crash subprocess can temporarily inherit
-file descriptors held by other threads until exec closes them. The G34 and G35
-process-exit tests now run in dedicated integration binaries, so spawning cannot
-inherit unrelated fixture locks. The final full parallel workspace run passed.
-No production lock checking was weakened, and no tests were ignored or forced to
-run serially to obtain a passing result.
+Inactive G28–G31 work may be explicitly retired without applying a proposal or
+changing the catalog. The receipt binds its exact catalog horizon, full ordered
+metadata digest and record count. Old records remain archival, legacy mutation APIs
+are fenced, and G36 takes over the horizon through its checked schema chain.
 
-## Remaining work
+Six integrations cover readiness/cancellation states, empty/duplicate refusal,
+unchanged data/catalog, fresh ALTER after retirement, restored/pruned roots,
+metadata tampering, five torn retirement-frame retries and catalog divergence.
 
-The active schema remains immutable in the history domain. G34 catalog revisions
-cannot yet be activated against that domain. Coordinated catalog/history recovery,
-SQL ALTER TABLE and mixed active schema revisions remain open. Full serializable
-SQL, production HTAP/distributed SQL and complete enterprise security also remain
-outside this increment.
+## G38 — Archive metadata consistency
 
-This run does not include browser interaction tests, physical power-loss or disk-full
-fault injection, Windows/macOS qualification, long-duration soak tests or production
-workload benchmarks. The passing suite establishes the exercised behavior above.
+The G24 manifest now uses receipt statistics captured under the same MVCC mutation
+lock as the archived bytes. Concurrent writes after capture cannot change that
+manifest. Tests demonstrate stable archive statistics after source mutation and
+three independently restored backups alongside continuous epoch-tagged SQL writes.
+Restore verification also checks the catalog/history DDL horizon before publication.
+
+DDL compatibility and retirement inspect only prefix-bounded metadata, avoiding
+full row-history copies in those operations. Full retained payload validation
+remains mandatory on reopen.
+
+## Publication status
+
+G35 is published as the baseline commit above. The G36–G38 implementation and
+verification in this report are complete locally; publication of this batch to
+the public repository is pending explicit approval after automatic review blocked
+the upload. No deployment or automatic CI activation occurred.
+
+## Remaining boundaries
+
+See the [implementation gap register](BRADIAN_IMPLEMENTATION_GAPS.md). This batch
+closes the local schema activation, historical decoding, legacy upgrade and archive
+receipt gaps. It does not provide general SQL conformance, concurrent online DDL,
+NOT NULL/default backfills, serializable isolation, production HTAP/distributed SQL,
+complete enterprise identity/TLS or relational service/driver/Studio integration.
+
+Fault injection used local WAL files and deterministic error hooks after durable
+steps. The run does not certify physical device power loss, disk-full faults,
+Windows/macOS recovery, long-duration workloads or browser interaction flows.

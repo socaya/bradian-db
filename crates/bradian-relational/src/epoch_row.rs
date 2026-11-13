@@ -34,8 +34,8 @@ pub struct DecodedEpochRow {
 }
 
 /// Explicit registry: epoch IDs are validated schema-registration WAL positions,
-/// never inferred from payload bytes. Future schema activation must supply its
-/// own coordinated immutable schema epochs.
+/// never inferred from payload bytes. G36 supplies activation commit positions
+/// for coordinated additive schema revisions.
 #[derive(Default)]
 pub struct EpochSchemas {
     tables: BTreeMap<(TableId, u64), Table>,

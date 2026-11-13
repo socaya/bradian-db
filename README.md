@@ -8,14 +8,14 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog-only additive schema revision decisions and opt-in live schema-epoch row encoding. General SQL, coordinated historical ALTER TABLE, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_13.md): **562 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
+> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog revision decisions, opt-in schema-epoch rows, exclusive nullable-column ALTER with recoverable catalog/history coordination, and verified retirement of inactive schema intents. General SQL conformance, concurrent online DDL, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_13.md): **588 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
 
 ## Product architecture
 
 | Bradian subsystem | Responsibility | Present implementation |
 |---|---|---|
 | **Bradian Core** | Common types, runtime, catalogs, resource governance, portability | Foundational Rust libraries |
-| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Typed WAL rows, checkpoint B+tree, bounded SQL transactions, durable historical MVCC, verified offline migration and catalog revision decisions; coordinated historical DDL remains incomplete |
+| **Bradian Transaction Engine (OLTP)** | Row storage, SQL writes, constraints, B+tree indexing, ACID/MVCC, WAL and recovery | Typed WAL rows, checkpoint B+tree, bounded SQL transactions, durable historical MVCC, verified offline migration and recoverable nullable-column DDL and historical schema epochs; general SQL/concurrent DDL remain incomplete |
 | **Bradian Analytics Engine (OLAP)** | Proprietary columnar storage, vectorized execution, aggregation, optimized queries | Analytical engine foundation |
 | **Bradian Hybrid Engine (HTAP)** | Commit-consistent row/column snapshots and combined query planning | Architecture target; not implemented |
 | **Bradian Cluster Fabric** | Secure membership, consensus, native routing, sharding and rebalancing | Analytical federation primitives; not a distributed SQL cluster |
@@ -145,11 +145,13 @@ The approved Bradian horizontal logo is available in [navy blue](docs/media/Brad
 ## Executed verification
 
 The [13 November 2026 verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_13.md)
-records the workspace run and its limits. [G35](docs/gates/BRD-G35-live-schema-epoch-rows.md)
-connects the G32 codec to live/historical SQL through an explicit capability transition.
-New transactions then write epoch-tagged rows; existing legacy rows and historical
-LSNs remain readable. [G34](docs/gates/BRD-G34-catalog-revision-decisions.md) remains a
-catalog-only API; coordinated historical ALTER TABLE is still incomplete.
+records 588 passing Rust tests plus workspace compilation, strict Clippy and Studio
+checks. [G36](docs/gates/BRD-G36-recoverable-historical-alter.md) implements exclusive
+nullable-column ALTER and historical schema decoding. [G37](docs/gates/BRD-G37-legacy-ddl-retirement.md)
+provides the explicit upgrade path for old inactive intents.
+[G38](docs/gates/BRD-G38-consistent-history-backup-metadata.md) binds archive statistics
+to the captured snapshot. The [gap register](docs/implementation/BRADIAN_IMPLEMENTATION_GAPS.md)
+separates these delivered increments from remaining product requirements.
 
 ## Delivery principles
 

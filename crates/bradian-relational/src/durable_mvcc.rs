@@ -68,6 +68,15 @@ struct State {
     pins: BTreeMap<u64, usize>,
 }
 
+fn state_stats(state: &State) -> DurableMvccStats {
+    DurableMvccStats {
+        latest_lsn: state.latest, retention_floor: state.floor,
+        active_snapshots: state.pins.values().sum(),
+        persisted_versions: state.versions.values().map(Vec::len).sum(),
+        known_keys: state.versions.len(),
+    }
+}
+
 pub struct DurableMvccStore {
     rows: RowStore,
     state: Mutex<State>,
@@ -189,11 +198,19 @@ impl DurableMvccStore {
     /// floor, commit-tagged rows and tombstones. It does not transfer active
     /// in-process transaction pins into the restored process.
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> DurableMvccResult<BackupReceipt> {
+        Ok(self.backup_with_stats(destination)?.0)
+    }
+
+    /// Capture archive bytes and their describing statistics under one mutation lock.
+    pub fn backup_with_stats(
+        &self, destination: impl AsRef<Path>,
+    ) -> DurableMvccResult<(BackupReceipt, DurableMvccStats)> {
         let state = self.state.lock();
         if state.latest != self.rows.last_lsn() {
             return Err(DurableMvccError::Corruption("WAL changed outside durable MVCC".into()));
         }
-        Ok(self.rows.backup_to(destination)?)
+        let receipt = self.rows.backup_to(destination)?;
+        Ok((receipt, state_stats(&state)))
     }
 
     /// Restore only into an absent directory, with full G10 verification.
@@ -214,6 +231,24 @@ impl DurableMvccStore {
         state.versions.iter().flat_map(|(key, chain)| {
             chain.iter().map(|v| (key.clone(), v.lsn, v.value.clone()))
         }).collect()
+    }
+
+    /// Prefix-bounded metadata inspection avoids copying unrelated row histories.
+    /// Prefixes used by the caller must be disjoint; output keeps journal order.
+    pub(crate) fn retained_versions_for_prefixes(
+        &self, prefixes: &[&[u8]],
+    ) -> Vec<(Vec<u8>, u64, Option<Vec<u8>>)> {
+        let state = self.state.lock();
+        let mut result = Vec::new();
+        for prefix in prefixes {
+            for (key, chain) in state.versions.range(prefix.to_vec()..) {
+                if !key.starts_with(prefix) { break; }
+                result.extend(chain.iter().map(|version|
+                    (key.clone(), version.lsn, version.value.clone())));
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        result
     }
 
     pub fn latest_lsn(&self) -> u64 { self.state.lock().latest }
@@ -265,13 +300,7 @@ impl DurableMvccStore {
 
     pub fn stats(&self) -> DurableMvccStats {
         let state = self.state.lock();
-        DurableMvccStats {
-            latest_lsn: state.latest,
-            retention_floor: state.floor,
-            active_snapshots: state.pins.values().sum(),
-            persisted_versions: state.versions.values().map(Vec::len).sum(),
-            known_keys: state.versions.len(),
-        }
+        state_stats(&state)
     }
 
     fn unpin(&self, lsn: u64) {

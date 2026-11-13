@@ -2,9 +2,22 @@
 
 **Baseline:** `docs/Bradian_Master_Architecture_SRS_v1.1.md`. **Reviewed source:** the original Rust DAP analytical workspace. This document reports implementation status, not a completed DBMS.
 
-## Updated implementation status (12 November 2026)
+## Updated implementation status (13 November 2026)
 
-The Bradian relational crate now includes a WAL-backed generic relational metadata catalog and bounded native SQL executor and local single-table atomic transactions and scoped SQL BEGIN/COMMIT/ROLLBACK sessions and a separately provisioned shared-WAL multi-table atomic row transaction domain with an explicitly registered multi-table SQL execution frontend and verified offline legacy SQL-to-shared-domain migration and WAL-backed catalog/domain provisioning reconciliation and coordinated three-component database-wide backup/restore and opt-in WAL-backed in-memory MVCC row-version snapshots and typed concurrent SQL sessions over verified shared-domain tables plus a separate durable WAL-atomic historical MVCC version format with typed historical SQL AS OF and verified offline G16 migration, a versioned physical page codec and a real **single-process WAL-backed row store** with inserts, replacements, deletes, atomic multi-key WAL batches, ordered scans, page checkpoints, immutable disk B+tree point/range lookup, bounded read-only page cache, WAL-backed mutable logical index overlay, missing-index reconstruction from verified checkpoint pages, CRC-protected authoritative checkpoint generation publication, verified local snapshot-plus-WAL backup/restore and restart recovery. A mutable ordered delta merges WAL-committed changes with the immutable disk index without introducing in-place dirty pages. The physical page cache is generation-scoped, retains checksum-verified pages and is invalidated on checkpoint replacement. The B+tree is derived from completed checkpoints and does not implement mutable page updates or buffer management. See [ADR 0008](../adr/0008-native-row-wal-checkpoint.md) and [G3](../gates/BRD-G3-wal-row-store.md). The row store remains a bounded independent subsystem; it does **not** provide complete relational SQL, distributed transactions, MVCC, on-disk B+trees, multi-process file locking or enterprise recovery qualification. Automatic CI remains disabled by owner request.
+The implemented relational engine provides a persistent catalog, typed WAL rows,
+immutable B+tree checkpoints, read-only caching, atomic batches and bounded SQL
+transactions. Opt-in durable MVCC adds historical SQL, schema epoch row envelopes,
+verified migrations and backup/restore. G36 now provides exclusive nullable-column
+ALTER with an intent-driven catalog/history recovery protocol, immutable schema
+history and schema-aware AS OF. G37 explicitly retires inactive legacy DDL work;
+G38 captures backup receipts/statistics atomically as SQL writers advance.
+
+These are bounded local implementations. They do not establish general SQL
+conformance, serializable isolation, concurrent online DDL, mutable physical page
+management, production HTAP/distributed SQL or complete enterprise security.
+See the [gap register](BRADIAN_IMPLEMENTATION_GAPS.md), current gates and
+[executed verification](BRADIAN_VERIFICATION_2026_11_13.md). Automatic CI remains
+manual-only by owner request.
 
 ## Executed verification and catalog revisions (12 November 2026)
 
@@ -26,6 +39,15 @@ remain immutable. This is a prerequisite for historical schema activation,
 not an implementation of coordinated catalog/history ALTER. The
 [13 November verification report](BRADIAN_VERIFICATION_2026_11_13.md) records the
 new regression and recovery evidence.
+
+## Schema activation, upgrade and backup gaps closed (13 November 2026)
+
+G36–G38 close the previously recorded activation, mixed-schema decoding, AS OF
+binding, interrupted transition recovery, legacy intent upgrade and archive-statistic
+race gaps. The final executed result is 588 passing Rust tests, including 333
+relational tests, plus strict Clippy, workspace compilation and Studio checks.
+Earlier dated notes below describe the implementation at their original gate;
+current capability boundaries are maintained in the gap register.
 
 ## Original audit baseline
 

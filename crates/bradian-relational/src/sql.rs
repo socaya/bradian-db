@@ -234,7 +234,7 @@ impl Parser {
         }
     }
 
-    fn data_type(&mut self) -> SqlResult<DataType> {
+    pub(crate) fn data_type(&mut self) -> SqlResult<DataType> {
         let name = self.word()?;
         match name.as_str() {
             "int" | "integer" | "int4" => Ok(DataType::Int32),
