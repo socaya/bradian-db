@@ -42,6 +42,8 @@ Gate 1 backing maps are specified in [ADR 0045](docs/adr/0045-backing-row-map-ad
 
 Gate 1 index recovery is specified in [ADR 0046](docs/adr/0046-bounded-index-recovery-entries.md). Admit retained checkpoint keys/pointers before copying, validate values without a cloned value map, and reconcile leaves incrementally while preserving global order/chain/count and point-pointer checks. Carry selected native policy through missing-index open, backup and restore; quota refusal must precede temporary cleanup/publication and WAL-tail repair. Builder/checkpoint/global working-memory controls remain open.
 
+Gate 1 checkpoint/build admission is specified in [ADR 0047](docs/adr/0047-checkpoint-build-admission.md). Check the conservative key/pointer plus two borrowed-descriptor-per-key reservation before checkpoint quarantine or file writes and before rebuild temporary cleanup. Quota refusal must preserve WAL/manifest/delta and healthy-owner usability. Descriptors borrow input keys; carry StorageLimits through native ownership and backup/restore. No total RSS, allocator-failure or global-budget qualification is implied.
+
 Gate 1's single-table snapshot/scan extension is specified in [ADR 0042](docs/adr/0042-bounded-single-table-query-snapshots.md). SQL must bound BEGIN snapshots, scans and projection before cloning, including repeated-column amplification. Preserve full snapshot LSNs, corruption checks and old single-table full-abort semantics. Native administrative compatibility APIs stay explicit and are not SQL fallbacks. CLI limits now apply to all SQL modes; global resident-memory qualification is still open.
 
 ## 3. Architecture boundaries

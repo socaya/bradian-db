@@ -54,14 +54,14 @@ this does not sign off unresolved architecture decisions or production security.
 | G1-CLI | Implemented | Canonical bradian-db and legacy dap-admin executables, local SQL scripts, explicit transaction/history modes and process tests |
 | G1-LOCAL-ACCESS | Partial | SQL CLI private Unix root checks; library paths, ACL/hostile-filesystem and complete local identity policy remain unqualified |
 | G1-INSTALL | Partial | Linux development install is exercised; portable release installers/signing/upgrades remain open |
-| G1-MEMORY | Partial | Query/history/staging, backing maps and retained index recovery entries are controlled; metadata/builder/checkpoint/backup workspace, catalogs, aggregate transactions/pins, alternate engines, formatted output and global budgets remain open |
+| G1-MEMORY | Partial | Query/history/staging, backing/recovery maps and checkpoint/build pointer-descriptor reservations are controlled; metadata/I/O/cache/backup workspace, catalogs, aggregate transactions/pins, alternate engines, formatted output and global budgets remain open |
 | G1-FAULTS | Partial | Existing torn-frame/CRC/process-exit tests; disk-full, failed sync/rename and physical-device qualification remain open |
 | G1-REFERENCE | Partial | Checked SQL/decimal result corpora; external reference SQL and full documented isolation qualification remain open |
 | G1-PORTABILITY | Open | Windows/macOS installation, lock lifecycle and recovery runs |
 
 Gate 1 stays active until its exit conditions have evidence. The next implementation
 work must address G1-MEMORY, G1-LOCAL-ACCESS and G1-FAULTS before new Gate 2 features.
-The [index recovery verification](BRADIAN_GATE1_INDEX_RECOVERY_LIMITS_VERIFICATION_2026_11_13.md) records the latest runtime slice. The [backing RowStore verification](BRADIAN_GATE1_ROW_STORE_LIMITS_VERIFICATION_2026_11_13.md) retains its previous evidence. The [transaction staging verification](BRADIAN_GATE1_STAGING_LIMITS_VERIFICATION_2026_11_13.md) retains its previous evidence. The [retained-history admission verification](BRADIAN_GATE1_HISTORY_ADMISSION_VERIFICATION_2026_11_13.md) retains its previous evidence. The [single-table limit verification](BRADIAN_GATE1_SINGLE_TABLE_LIMITS_VERIFICATION_2026_11_13.md) retains its prior evidence.
+The [checkpoint/build verification](BRADIAN_GATE1_CHECKPOINT_LIMITS_VERIFICATION_2026_11_13.md) records the latest runtime slice. The [index recovery verification](BRADIAN_GATE1_INDEX_RECOVERY_LIMITS_VERIFICATION_2026_11_13.md) retains its previous evidence. The [backing RowStore verification](BRADIAN_GATE1_ROW_STORE_LIMITS_VERIFICATION_2026_11_13.md) retains its previous evidence. The [transaction staging verification](BRADIAN_GATE1_STAGING_LIMITS_VERIFICATION_2026_11_13.md) retains its previous evidence. The [retained-history admission verification](BRADIAN_GATE1_HISTORY_ADMISSION_VERIFICATION_2026_11_13.md) retains its previous evidence. The [single-table limit verification](BRADIAN_GATE1_SINGLE_TABLE_LIMITS_VERIFICATION_2026_11_13.md) retains its prior evidence.
 The [history scan verification](BRADIAN_GATE1_SCAN_LIMITS_VERIFICATION_2026_11_13.md) retains its earlier evidence.
 The [Gate 1 local CLI verification](BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md)
 records what was actually run. No existing analytical, schema or SQL work is deleted

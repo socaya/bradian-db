@@ -41,6 +41,8 @@ Existing-index opens retain their normal manifest checks; a full audit is explic
 Higher SQL/history APIs and the CLI continue to use default index recovery policy;
 query/history/staging flags do not configure it.
 
+[Checkpoint/build admission](CHECKPOINT_BUILD_LIMITS.md) now independently covers pointer construction and a conservative borrowed-descriptor allowance. StorageLimits composes all three native storage policies; open_with_policies and restore_backup_with_policies accept that composition. Earlier entry-only APIs retain default build policy.
+
 ## Refusal, verification and backup
 
 A quota error during entry collection precedes temporary-file cleanup and index

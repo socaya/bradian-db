@@ -12,7 +12,7 @@
 //! This is a local-filesystem durability facility, not encrypted backup,
 //! remote object-storage snapshotting, incremental PITR, or a cluster backup.
 
-use crate::runtime_limits::{RowStoreLimits, IndexLimits};
+use crate::runtime_limits::{RowStoreLimits, IndexLimits, StorageLimits};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
@@ -125,7 +125,7 @@ pub(crate) fn create_backup(
     destination: &Path,
     receipt: BackupReceipt,
     expected_rows: &BTreeMap<Vec<u8>, Vec<u8>>,
-    limits: RowStoreLimits, index_limits: IndexLimits,
+    policies: StorageLimits,
 ) -> StoreResult<BackupReceipt> {
     let manifest = checkpoint_manifest::load(root)?
         .ok_or_else(|| StoreError::Corruption("backup requires a committed checkpoint manifest".into()))?;
@@ -146,7 +146,7 @@ pub(crate) fn create_backup(
     sync_directory(&staged)?;
     // Validate the copied database independently: page CRCs, WAL sequencing,
     // index row pointers, and the exact acknowledged row state and LSN.
-    verify_directory(&staged, receipt, Some(expected_rows), limits, index_limits)?;
+    verify_directory(&staged, receipt, Some(expected_rows), policies)?;
     fs::rename(&staged, destination)?;
     let parent = destination.parent().filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
@@ -158,7 +158,7 @@ fn verify_directory(
     path: &Path,
     receipt: BackupReceipt,
     expected_rows: Option<&BTreeMap<Vec<u8>, Vec<u8>>>,
-    limits: RowStoreLimits, index_limits: IndexLimits,
+    policies: StorageLimits,
 ) -> StoreResult<()> {
     let stored = BackupReceipt::decode(&fs::read(path.join(META_FILE))?)?;
     if stored != receipt {
@@ -173,7 +173,7 @@ fn verify_directory(
     // A published backup must be exact: never silently repair its copied WAL.
     let wal_path = path.join("rows.wal");
     let original_wal_len = fs::metadata(&wal_path)?.len();
-    let recovered = RowStore::open_with_recovery_limits(path, limits, index_limits)?;
+    let recovered = RowStore::open_with_policies(path, policies)?;
     if fs::metadata(&wal_path)?.len() != original_wal_len {
         return Err(StoreError::Corruption(
             "backup WAL required tail repair during validation".into(),
@@ -211,6 +211,10 @@ pub fn restore_backup_with_limits(backup: &Path, destination: &Path, limits: Row
 }
 
 pub fn restore_backup_with_recovery_limits(backup: &Path, destination: &Path, limits: RowStoreLimits, index_limits: IndexLimits) -> StoreResult<BackupReceipt> {
+    restore_backup_with_policies(backup, destination, StorageLimits { rows:limits,index:index_limits,..StorageLimits::default() })
+}
+
+pub fn restore_backup_with_policies(backup: &Path, destination: &Path, policies: StorageLimits) -> StoreResult<BackupReceipt> {
     if !backup.is_dir() {
         return Err(StoreError::Corruption("backup source is not a directory".into()));
     }
@@ -226,7 +230,7 @@ pub fn restore_backup_with_recovery_limits(backup: &Path, destination: &Path, li
     }
     copy_sync(&backup.join(META_FILE), &staged.join(META_FILE))?;
     sync_directory(&staged)?;
-    verify_directory(&staged, receipt, None, limits, index_limits)?;
+    verify_directory(&staged, receipt, None, policies)?;
     fs::rename(&staged, destination)?;
     let parent = destination.parent().filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));

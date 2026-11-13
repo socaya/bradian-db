@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::btree::{DiskBTree, LeafEntries, RowPointer};
 use crate::page::{Page, PageKind, PAGE_SIZE};
-use crate::runtime_limits::{IndexLimits, ResourceError};
+use crate::runtime_limits::{IndexLimits, IndexBuildLimits, ResourceError};
 use crate::row_store::{StoreError, StoreResult};
 
 type VerifiedSnapshot = (LeafEntries, u64);
@@ -159,16 +159,17 @@ pub fn verify_with_limits(root: &Path, lsn: u64, limits: IndexLimits) -> StoreRe
 /// Rebuild an *absent* index, using only the published snapshot as authority.
 /// A corrupt existing index must be addressed by an explicit repair procedure;
 /// silently overwriting it would conceal an integrity failure.
-pub(crate) fn rebuild_missing_with_limits(root: &Path, lsn: u64, limits: IndexLimits) -> StoreResult<IndexRecovery> {
+pub(crate) fn rebuild_missing_with_limits(root: &Path, lsn: u64, limits: IndexLimits, build_limits: IndexBuildLimits) -> StoreResult<IndexRecovery> {
     if index_path(root, lsn).exists() {
         return verify_with_limits(root, lsn, limits);
     }
     let (entries, pages) = scan_snapshot(root, lsn, limits)?;
+    crate::btree::admit_build_keys(entries.iter().map(|(key,_)|key.len()),build_limits)?;
     let tmp = root.join(format!("index-{lsn}.rebuild.tmp"));
     if tmp.exists() {
         fs::remove_file(&tmp)?;
     }
-    DiskBTree::build(&tmp, lsn, &entries)?;
+    DiskBTree::build_with_limits(&tmp, lsn, &entries, build_limits)?;
     // Validate the new file before publication.
     {
         let mut generated = DiskBTree::open(&tmp, lsn)?;

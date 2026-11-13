@@ -85,6 +85,8 @@ All modes also use default [backing RowStore limits](ROW_STORE_LIMITS.md) during
 
 [Index recovery entry limits](INDEX_RECOVERY_LIMITS.md) also apply by default. Explicit recovery policy is currently a native API.
 
+Default [checkpoint/build reservation limits](CHECKPOINT_BUILD_LIMITS.md) also apply. StorageLimits exposes composed policy to native callers; existing CLI flags do not configure it.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

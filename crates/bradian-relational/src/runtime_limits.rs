@@ -14,6 +14,8 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResourceError {
+    #[error("index build {resource} limit exceeded (limit {limit})")]
+    IndexBuildLimit { resource: &'static str, limit: usize },
     #[error("index recovery {resource} limit exceeded (limit {limit})")]
     IndexLimit { resource: &'static str, limit: usize },
     #[error("row store {resource} limit exceeded (limit {limit})")]
@@ -166,3 +168,13 @@ pub struct IndexLimits { pub max_entries: usize, pub max_bytes: usize }
 impl Default for IndexLimits {
     fn default() -> Self { Self { max_entries: 2000000, max_bytes: 256 * 1024 * 1024 } }
 }
+
+/// Conservative checkpoint pointer-vector plus index descriptor reservation.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexBuildLimits { pub max_entries: usize, pub max_bytes: usize }
+impl Default for IndexBuildLimits {
+    fn default() -> Self { Self { max_entries: 2000000, max_bytes: 512 * 1024 * 1024 } }
+}
+/// Process-local native storage policies; none changes persisted bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StorageLimits { pub rows: RowStoreLimits, pub index: IndexLimits, pub build: IndexBuildLimits }

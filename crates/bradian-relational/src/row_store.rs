@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use crc32fast::Hasher;
 use thiserror::Error;
 
-use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage, IndexLimits};
+use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage, IndexLimits, IndexBuildLimits, StorageLimits};
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
@@ -108,6 +108,7 @@ pub struct RowStore {
     root: PathBuf,
     limits: RowStoreLimits,
     index_limits: IndexLimits,
+    build_limits: IndexBuildLimits,
     inner: Mutex<Inner>,
     // Drop after the WAL handle so the exclusive ownership remains in force
     // throughout teardown. The kernel releases the lock automatically.
@@ -124,6 +125,11 @@ impl RowStore {
     }
 
     pub fn open_with_recovery_limits(root: impl AsRef<Path>, limits: RowStoreLimits, index_limits: IndexLimits) -> StoreResult<Self> {
+        Self::open_with_policies(root, StorageLimits { rows:limits, index:index_limits, ..StorageLimits::default() })
+    }
+
+    pub fn open_with_policies(root: impl AsRef<Path>, policies: StorageLimits) -> StoreResult<Self> {
+        let StorageLimits { rows:limits, index:index_limits, build:build_limits } = policies;
         let root = root.as_ref();
         fs::create_dir_all(root)?;
         let lock = OpenOptions::new()
@@ -153,7 +159,7 @@ impl RowStore {
         // publication. Rebuild only an absent index from verified pages.
         if snapshot_path(root, checkpoint_lsn).exists() {
             if !index_recovery::index_path(root, checkpoint_lsn).exists() {
-                index_recovery::rebuild_missing_with_limits(root, checkpoint_lsn, index_limits)?;
+                index_recovery::rebuild_missing_with_limits(root, checkpoint_lsn, index_limits, build_limits)?;
             }
             if let Some(manifest) = checkpoint_manifest::load(root)? {
                 checkpoint_manifest::check_index(root, manifest)?;
@@ -170,6 +176,7 @@ impl RowStore {
             root: root.to_owned(),
             limits,
             index_limits,
+            build_limits,
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
@@ -187,6 +194,7 @@ impl RowStore {
 
     pub fn resource_usage(&self) -> RowStoreUsage { self.inner.lock().usage }
     pub fn resource_limits(&self) -> RowStoreLimits { self.limits }
+    pub fn storage_limits(&self) -> StorageLimits { StorageLimits { rows:self.limits,index:self.index_limits,build:self.build_limits } }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.inner.lock().rows.get(key).cloned()
@@ -277,7 +285,7 @@ impl RowStore {
             last_lsn: inner.lsn,
             rows: inner.rows.len() as u64,
         };
-        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows, self.limits, self.index_limits)
+        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows, self.storage_limits())
     }
 
     /// Restore a verified physical database backup into an absent directory.
@@ -298,7 +306,13 @@ impl RowStore {
     pub fn restore_backup_with_recovery_limits(
         backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: RowStoreLimits, index_limits: IndexLimits,
     ) -> StoreResult<BackupReceipt> {
-        backup::restore_backup_with_recovery_limits(backup.as_ref(), destination.as_ref(), limits, index_limits)
+        Self::restore_backup_with_policies(backup, destination, StorageLimits { rows:limits,index:index_limits,..StorageLimits::default() })
+    }
+
+    pub fn restore_backup_with_policies(
+        backup: impl AsRef<Path>, destination: impl AsRef<Path>, policies: StorageLimits,
+    ) -> StoreResult<BackupReceipt> {
+        backup::restore_backup_with_policies(backup.as_ref(), destination.as_ref(), policies)
     }
 
     /// Sync exactly one replace/insert operation before publishing it.
@@ -528,7 +542,7 @@ impl RowStore {
         }
         inner.index = None;
         inner.snapshot_pages = None;
-        index_recovery::rebuild_missing_with_limits(&self.root, inner.checkpoint_lsn, limits)
+        index_recovery::rebuild_missing_with_limits(&self.root, inner.checkpoint_lsn, limits, self.build_limits)
     }
 
     /// Publish a complete checkpoint and then truncate the WAL.
@@ -537,6 +551,10 @@ impl RowStore {
     /// renamed snapshot is authoritative even if a crash precedes WAL truncation:
     /// replay ignores records at or below its committed checkpoint LSN.
     pub fn checkpoint(&self) -> StoreResult<u64> {
+        self.checkpoint_with_limits(self.build_limits)
+    }
+
+    pub fn checkpoint_with_limits(&self, limits: IndexBuildLimits) -> StoreResult<u64> {
         let mut inner = self.inner.lock();
         if inner.poisoned {
             return Err(StoreError::Poisoned);
@@ -569,6 +587,9 @@ impl RowStore {
                 }
             }
         }
+        // Admission is read-only and precedes quarantine, temporary-file writes,
+        // publication and WAL truncation. Refusal must not poison this owner.
+        crate::btree::admit_build_keys(inner.rows.keys().map(Vec::len),limits)?;
         let lsn = inner.lsn;
         // The manifest is the publication boundary. A prior crashed attempt
         // may have left snapshot/index filenames for this same WAL LSN, but
@@ -600,7 +621,7 @@ impl RowStore {
             if index_final.exists() {
                 return Err(StoreError::Corruption("checkpoint index identity already exists".into()));
             }
-            DiskBTree::build(&index_tmp, lsn, &pointers)?;
+            DiskBTree::build_with_limits(&index_tmp, lsn, &pointers, limits)?;
             fs::rename(&index_tmp, &index_final)?;
             sync_directory(&self.root)?;
             let page_size = PAGE_SIZE as u64;
@@ -985,8 +1006,8 @@ fn write_snapshot(
     meta.extend_from_slice(&page_count.to_le_bytes());
     file.write_all(&Page::new(0, lsn, PageKind::Metadata, meta)?.encode()?)?;
 
-    // Second pass streams one physical page at a time. Peak transient memory
-    // is bounded by one physical page plus the caller's existing row map.
+    // Second pass streams physical row pages and retains admitted key/pointer
+    // entries for index construction. Admission happened before any file write.
     let mut buffer = Vec::with_capacity(MAX_PAYLOAD_SIZE);
     let mut pointers = Vec::with_capacity(rows.len());
     let mut page_id = 1_u64;

@@ -16,6 +16,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use crate::runtime_limits::{IndexBuildLimits, ResourceError};
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 
@@ -38,6 +39,8 @@ pub struct RowPointer {
 #[derive(Debug, Error)]
 pub enum IndexError {
     #[error(transparent)]
+    Resource(#[from] ResourceError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Page(#[from] PageError),
@@ -52,9 +55,9 @@ pub enum IndexError {
 pub type IndexResult<T> = Result<T, IndexError>;
 
 #[derive(Debug)]
-struct NodeDescriptor {
+struct NodeDescriptor<'a> {
     id: u64,
-    first: Vec<u8>,
+    first: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -65,10 +68,30 @@ pub struct DiskBTree {
     entries: u64,
 }
 
+/// Reserve the owned key/pointer inputs plus a conservative two-descriptor-per-key
+/// allowance. Parent and child descriptor levels coexist; their keys borrow inputs.
+pub(crate) fn admit_build_keys(keys: impl IntoIterator<Item=usize>, limits: IndexBuildLimits) -> Result<usize, ResourceError> {
+    let mut count = 0_usize;
+    let mut bytes = 0_usize;
+    for key_len in keys {
+        count = count.checked_add(1).filter(|n|*n<=limits.max_entries)
+            .ok_or(ResourceError::IndexBuildLimit { resource:"entries",limit:limits.max_entries })?;
+        let entry = key_len.checked_add(std::mem::size_of::<(Vec<u8>,RowPointer)>() + 2 * std::mem::size_of::<NodeDescriptor<'_>>())
+            .ok_or(ResourceError::IndexBuildLimit { resource:"bytes",limit:limits.max_bytes })?;
+        bytes = bytes.checked_add(entry).filter(|n|*n<=limits.max_bytes)
+            .ok_or(ResourceError::IndexBuildLimit { resource:"bytes",limit:limits.max_bytes })?;
+    }
+    Ok(bytes)
+}
+
 impl DiskBTree {
     /// Build a complete immutable page tree at a new, unpublished path.
     /// Callers must synchronize and atomically rename the file before use.
     pub fn build(path: &Path, lsn: u64, entries: &[(Vec<u8>, RowPointer)]) -> IndexResult<()> {
+        Self::build_with_limits(path, lsn, entries, IndexBuildLimits::default())
+    }
+
+    pub fn build_with_limits(path: &Path, lsn: u64, entries: &[(Vec<u8>, RowPointer)], limits: IndexBuildLimits) -> IndexResult<()> {
         if path.exists() {
             return Err(IndexError::Invalid("index build target already exists"));
         }
@@ -81,6 +104,7 @@ impl DiskBTree {
                 return Err(IndexError::Invalid("keys must be strictly increasing"));
             }
         }
+        admit_build_keys(entries.iter().map(|(key,_)|key.len()),limits)?;
         let mut file = OpenOptions::new().create_new(true).write(true).read(true).open(path)?;
         file.write_all(&[0_u8; PAGE_SIZE])?; // metadata is finalized last
         let mut descriptors = Vec::<NodeDescriptor>::new();
@@ -88,7 +112,7 @@ impl DiskBTree {
         if !entries.is_empty() {
             let mut start = 0;
             while start < entries.len() {
-                let first = entries[start].0.clone();
+                let first = entries[start].0.as_slice();
                 let mut payload = vec![LEAF, 0, 0];
                 payload.extend_from_slice(&0_u64.to_le_bytes()); // next leaf
                 let mut count = 0_u16;
@@ -121,7 +145,7 @@ impl DiskBTree {
                 let mut parents = Vec::<NodeDescriptor>::new();
                 let mut start = 0;
                 while start < descriptors.len() {
-                    let first = descriptors[start].first.clone();
+                    let first = descriptors[start].first;
                     let first_child = descriptors[start].id;
                     let mut payload = vec![INTERNAL, 0, 0];
                     payload.extend_from_slice(&first_child.to_le_bytes());
@@ -135,7 +159,7 @@ impl DiskBTree {
                         }
                         payload.extend_from_slice(&(descriptor.first.len() as u16).to_le_bytes());
                         payload.extend_from_slice(&descriptor.id.to_le_bytes());
-                        payload.extend_from_slice(&descriptor.first);
+                        payload.extend_from_slice(descriptor.first);
                         count += 1;
                         start += 1;
                     }
@@ -354,4 +378,16 @@ fn read_internal(payload: &[u8], key: &[u8]) -> IndexResult<u64> {
     }
     if pos != payload.len() { return Err(IndexError::Corruption("trailing branch payload")); }
     Ok(target)
+}
+
+#[cfg(test)]
+mod build_limit_tests {
+    use super::*;
+    #[test]
+    fn build_reservation_arithmetic_refuses_overflow() {
+        let limits=IndexBuildLimits { max_entries:usize::MAX,max_bytes:usize::MAX };
+        assert!(matches!(admit_build_keys([usize::MAX],limits),Err(ResourceError::IndexBuildLimit { resource:"bytes",.. })));
+        let headers=std::mem::size_of::<(Vec<u8>,RowPointer)>()+2*std::mem::size_of::<NodeDescriptor<'_>>();
+        assert!(matches!(admit_build_keys([usize::MAX-headers,1],limits),Err(ResourceError::IndexBuildLimit { resource:"bytes",.. })));
+    }
 }
