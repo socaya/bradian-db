@@ -880,6 +880,10 @@ impl DurableTypedStore {
     pub fn begin(&self) -> DurableTypedTransaction<'_> {
         DurableTypedTransaction { owner: self, inner: self.store.begin() }
     }
+
+    pub fn begin_with_read_validation(&self) -> DurableTypedTransaction<'_> {
+        DurableTypedTransaction { owner: self, inner: self.store.begin_with_read_validation() }
+    }
 }
 
 fn map_mvcc(err: DurableMvccError) -> DomainError {
@@ -888,7 +892,7 @@ fn map_mvcc(err: DurableMvccError) -> DomainError {
         DurableMvccError::DuplicateKey => DomainError::Table(TableError::DuplicateKey),
         DurableMvccError::NotFound => DomainError::Table(TableError::NotFound),
         DurableMvccError::Savepoint(message) => DomainError::Savepoint(message),
-        DurableMvccError::Conflict | DurableMvccError::ScanConflict => DomainError::Conflict,
+        DurableMvccError::Conflict | DurableMvccError::ReadConflict | DurableMvccError::ScanConflict => DomainError::Conflict,
         other => DomainError::Corruption(other.to_string()),
     }
 }
@@ -901,6 +905,7 @@ pub struct DurableTypedTransaction<'a> {
 
 impl DurableTypedTransaction<'_> {
     pub fn start_lsn(&self) -> u64 { self.inner.start_lsn() }
+    pub fn read_validation_enabled(&self) -> bool { self.inner.read_validation_enabled() }
     pub fn savepoint_count(&self) -> usize { self.inner.savepoint_count() }
     pub fn savepoint(&mut self, name: &str) -> Result<(), DomainError> {
         self.inner.savepoint(name).map_err(map_mvcc)

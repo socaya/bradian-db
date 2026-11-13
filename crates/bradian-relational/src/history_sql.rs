@@ -368,6 +368,9 @@ pub struct HistorySqlSession<'a> {
 impl<'a> HistorySqlSession<'a> {
     pub fn in_transaction(&self) -> bool { self.active.is_some() }
     pub fn last_commit_lsn(&self) -> Option<u64> { self.last_commit_lsn }
+    pub fn read_validation_enabled(&self) -> bool {
+        self.active.as_ref().is_some_and(DurableTypedTransaction::read_validation_enabled)
+    }
     pub fn snapshot_lsn(&self) -> Option<u64> {
         self.active.as_ref().map(DurableTypedTransaction::start_lsn)
     }
@@ -396,11 +399,18 @@ impl<'a> HistorySqlSession<'a> {
         match command.as_str() {
             "begin" => {
                 p.consume_word("transaction");
+                let validate_reads = if p.consume_word("with") {
+                    p.expect("read")?;
+                    p.expect("validation")?;
+                    true
+                } else { false };
                 p.end()?;
                 if self.active.is_some() {
                     return Err(SqlError::Unsupported("nested BEGIN is unsupported".into()));
                 }
-                let tx: DurableTypedTransaction<'a> = self.engine.domain.begin();
+                let tx: DurableTypedTransaction<'a> = if validate_reads {
+                    self.engine.domain.begin_with_read_validation()
+                } else { self.engine.domain.begin() };
                 self.active = Some(tx);
                 self.failed_statement = false;
                 Ok(SqlResultSet::Command { affected: 0 })
@@ -441,6 +451,9 @@ impl<'a> HistorySqlSession<'a> {
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "describe" => {
+                if self.read_validation_enabled() {
+                    return Err(SqlError::Unsupported("historical DESCRIBE requires a separate snapshot session".into()));
+                }
                 // Read-only G26 inspection is available with or without BEGIN.
                 // It does not stage metadata changes or start an MVCC writer.
                 p.expect("table")?;
@@ -521,6 +534,9 @@ impl<'a> HistorySqlSession<'a> {
                             p.expect("of")?;
                             Some(p.number_u64()?)
                         } else { None };
+                        if as_of.is_some() && tx.read_validation_enabled() {
+                            return Err(SqlError::Unsupported("AS OF requires a separate snapshot session when read validation is enabled".into()));
+                        }
                         let table = match as_of {
                             Some(lsn) => self.engine.domain.schema_as_of(table.id, lsn)?.0,
                             None => table,

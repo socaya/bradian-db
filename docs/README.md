@@ -51,10 +51,12 @@ This directory contains the engineering specifications, architectural decisions,
 
 34. **[Transaction savepoints ADR](adr/0036-bounded-history-transaction-savepoints.md)** — bounded staged checkpoints with preserved snapshot and conflict checks.
 
+35. **[Transaction read-validation ADR](adr/0037-bounded-transaction-read-validation.md)** — explicit bounded observations checked atomically with commit.
+
 ## Executed verification
 
-[G41 verification report, 13 November 2026](implementation/BRADIAN_G41_VERIFICATION_2026_11_13.md):
-623 Rust tests passed, including 368 relational tests. Workspace check, strict Clippy
+[G42 verification report, 13 November 2026](implementation/BRADIAN_G42_VERIFICATION_2026_11_13.md):
+636 Rust tests passed, including 381 relational tests. Workspace check, strict Clippy
 and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
 statements that Cargo was unavailable; operational and cross-platform qualification
 remain separate work.
@@ -104,6 +106,7 @@ remain separate work.
 | [BRD-G39](gates/BRD-G39-nullability-relaxation.md) | Recoverable non-key DROP NOT NULL and implicit nullable INSERT values | Linux SQL and four-boundary recovery tests passed |
 | [BRD-G40](gates/BRD-G40-immutable-column-defaults.md) | Immutable typed column defaults, historical projection and INSERT DEFAULT | SQL, compatibility and four-boundary recovery tests passed |
 | [BRD-G41](gates/BRD-G41-history-savepoints.md) | Bounded native/history SQL savepoints and failed-statement recovery | Native, SQL, concurrency and process-exit tests passed |
+| [BRD-G42](gates/BRD-G42-transaction-read-validation.md) | Opt-in bounded native/history SQL read validation | Concurrent write-skew, schedule, capacity and SQL tests passed |
 | Future gates | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 [Implementation gap register](implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining work and required evidence.

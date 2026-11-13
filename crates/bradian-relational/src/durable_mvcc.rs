@@ -11,7 +11,7 @@
 //! advancement can delete old historical versions only after a durable floor
 //! marker is synced; readers below the floor are explicitly rejected.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use parking_lot::Mutex;
@@ -29,6 +29,7 @@ const MAX_USER_VALUE: usize = 3545; // 1 version flag + inline payload <= G3 row
 const MAX_WRITE_KEYS: usize = 256;
 const GC_BATCH: usize = 256;
 const MAX_SAVEPOINTS: usize = 16;
+const MAX_READ_KEYS: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum DurableMvccError {
@@ -44,7 +45,9 @@ pub enum DurableMvccError {
     NotFound,
     #[error("newer committed version conflicts with the transaction's snapshot")]
     Conflict,
-    #[error("a full scan observed an outdated global sequence")]
+    #[error("newer committed version conflicts with a transaction point read")]
+    ReadConflict,
+    #[error("a full-domain observation has an outdated global sequence")]
     ScanConflict,
     #[error("snapshot LSN {requested} is outside the retained range {floor}..={latest}")]
     SnapshotUnavailable { requested: u64, floor: u64, latest: u64 },
@@ -293,11 +296,21 @@ impl DurableMvccStore {
     }
 
     pub fn begin(&self) -> DurableMvccTransaction<'_> {
+        self.begin_mode(false)
+    }
+
+    /// Validate observed point reads and scans atomically with commit publication.
+    pub fn begin_with_read_validation(&self) -> DurableMvccTransaction<'_> {
+        self.begin_mode(true)
+    }
+
+    fn begin_mode(&self, validate_reads: bool) -> DurableMvccTransaction<'_> {
         let mut state = self.state.lock();
         let start = state.latest;
         *state.pins.entry(start).or_default() += 1;
         DurableMvccTransaction {
             owner: self, start, pending: BTreeMap::new(), savepoints: Vec::new(), scanned: false, released: false,
+            validate_reads, observations: Mutex::new(ReadObservations::default()),
         }
     }
 
@@ -371,6 +384,12 @@ pub struct DurableMvccStats {
     pub known_keys: usize,
 }
 
+#[derive(Default)]
+struct ReadObservations {
+    keys: BTreeSet<Vec<u8>>,
+    whole_domain: bool,
+}
+
 struct Savepoint {
     name: String,
     pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
@@ -383,10 +402,23 @@ pub struct DurableMvccTransaction<'a> {
     savepoints: Vec<Savepoint>,
     scanned: bool,
     released: bool,
+    validate_reads: bool,
+    observations: Mutex<ReadObservations>,
 }
 
 impl DurableMvccTransaction<'_> {
     pub fn start_lsn(&self) -> u64 { self.start }
+    pub fn read_validation_enabled(&self) -> bool { self.validate_reads }
+
+    fn observe_key(&self, key: &[u8]) {
+        if !self.validate_reads { return; }
+        let mut reads = self.observations.lock();
+        if reads.whole_domain || reads.keys.contains(key) { return; }
+        if reads.keys.len() == MAX_READ_KEYS {
+            reads.whole_domain = true;
+            reads.keys.clear();
+        } else { reads.keys.insert(key.to_vec()); }
+    }
 
     pub fn savepoint_count(&self) -> usize { self.savepoints.len() }
 
@@ -427,6 +459,7 @@ impl DurableMvccTransaction<'_> {
 
     pub fn get(&self, key: &[u8]) -> DurableMvccResult<Option<Vec<u8>>> {
         validate_user(key, None)?;
+        self.observe_key(key);
         if let Some(value) = self.pending.get(key) { return Ok(value.clone()); }
         let state = self.owner.state.lock();
         Ok(state.versions.get(key).and_then(|chain| visible(chain, self.start)))
@@ -472,12 +505,23 @@ impl DurableMvccTransaction<'_> {
     pub fn rollback(self) {}
 
     pub fn commit(mut self) -> DurableMvccResult<u64> {
-        if self.pending.is_empty() { return Ok(self.start); }
+        if self.pending.is_empty() && !self.validate_reads { return Ok(self.start); }
         if self.pending.len() > MAX_WRITE_KEYS { return Err(DurableMvccError::CapacityExhausted); }
         let mut state = self.owner.state.lock();
         if self.scanned && state.latest != self.start {
             return Err(DurableMvccError::ScanConflict);
         }
+        if self.validate_reads {
+            let reads = self.observations.lock();
+            if reads.whole_domain && state.latest != self.start {
+                return Err(DurableMvccError::ScanConflict);
+            }
+            if reads.keys.iter().any(|key| state.versions.get(key).and_then(|vs| vs.last())
+                .is_some_and(|v| v.lsn > self.start)) {
+                return Err(DurableMvccError::ReadConflict);
+            }
+        }
+        if self.pending.is_empty() { return Ok(self.start); }
         for key in self.pending.keys() {
             if state.versions.get(key).and_then(|vs| vs.last())
                 .is_some_and(|v| v.lsn > self.start)
