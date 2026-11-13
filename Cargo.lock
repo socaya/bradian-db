@@ -601,6 +601,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bradian-relational",
  "clap",
  "dap-catalog",
  "dap-core",
@@ -609,6 +610,7 @@ dependencies = [
  "humantime",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

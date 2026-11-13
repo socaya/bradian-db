@@ -7,12 +7,18 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Operator CLI + diagnostics"
+default-run = "dap-admin"
 
 [[bin]]
 name = "dap-admin"
 path = "src/main.rs"
 
+[[bin]]
+name = "bradian-db"
+path = "src/bin/bradian-db.rs"
+
 [dependencies]
+bradian-relational = { path = "../bradian-relational" }
 dap-core    = { workspace = true }
 dap-catalog = { workspace = true, features = ["http"] }
 dap-storage = { workspace = true }
@@ -26,3 +32,6 @@ tracing     = { workspace = true }
 tracing-subscriber = { workspace = true }
 humantime   = { workspace = true }
 axum        = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

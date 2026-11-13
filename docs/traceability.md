@@ -1,5 +1,7 @@
 # Bradian v1.1 scope notice
 
+The current Bradian master matrix is [here](implementation/BRADIAN_MASTER_TRACEABILITY.md); the fixed [roadmap](implementation/BRADIAN_MASTER_ROADMAP.md) governs gate order.
+
 The status table below describes **legacy DAP analytics requirements only**. Its DONE rows do not mean that Bradian v1.1 relational OLTP, ACID/MVCC, broad SQL DDL/DML, unified HTAP, distributed transactions, automatic sharding, full RBAC or native TLS have shipped. See [v1.1 code audit](implementation/BRADIAN_V1_1_AUDIT.md). Bootstrap authentication is not a substitute for production database security.
 
 ---

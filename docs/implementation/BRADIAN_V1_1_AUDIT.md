@@ -2,6 +2,19 @@
 
 **Baseline:** `docs/Bradian_Master_Architecture_SRS_v1.1.md`. **Reviewed source:** the original Rust DAP analytical workspace. This document reports implementation status, not a completed DBMS.
 
+## Current roadmap reconciliation (13 November 2026)
+
+Use the [fixed master Gate 0–9 sequence](BRADIAN_MASTER_ROADMAP.md),
+[master requirement matrix](BRADIAN_MASTER_TRACEABILITY.md),
+[source/compatibility inventory](BRADIAN_SOURCE_INVENTORY.md) and
+[threat model](../security/BRADIAN_THREAT_MODEL.md). The numbered BRD-G records below
+are historical implementation slices. They are not master gate acceptance.
+The canonical local SQL command addresses a Gate 1 task; Gate 1 remains open for
+runtime, identity and failure/platform qualification. Current test/installer evidence
+is in [Gate 1 local CLI verification](BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md).
+All dated sections below retain their original scope rather than asserting current
+absence of features subsequently implemented.
+
 ## Updated implementation status (13 November 2026)
 
 The implemented relational engine provides a persistent catalog, typed WAL rows,

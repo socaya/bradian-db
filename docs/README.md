@@ -57,17 +57,24 @@ This directory contains the engineering specifications, architectural decisions,
 
 37. **[Ordered query windows ADR](adr/0039-ordered-history-query-windows.md)** — typed sorting, NULL placement and deterministic bounded pagination.
 
+## Fixed master gate sequence
+
+Use the [Gate 0–9 roadmap](implementation/BRADIAN_MASTER_ROADMAP.md),
+[60-requirement matrix](implementation/BRADIAN_MASTER_TRACEABILITY.md),
+[source/format inventory](implementation/BRADIAN_SOURCE_INVENTORY.md) and
+[threat model](security/BRADIAN_THREAT_MODEL.md). Gate 1 remains active; the records
+below are historical implementation evidence and do not represent 44 accepted gates.
+The [native SQL command](operations/LOCAL_SQL_CLI.md) addresses its runnable CLI task.
+
 ## Executed verification
 
-[G44 verification report, 13 November 2026](implementation/BRADIAN_G44_VERIFICATION_2026_11_13.md):
-658 Rust tests passed, including 403 relational tests. Workspace check, strict Clippy
-and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
-statements that Cargo was unavailable; operational and cross-platform qualification
-remain separate work.
+[Gate 1 local CLI verification, 13 November 2026](implementation/BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md)
+records current executed checks. The prior [implementation-record verification](implementation/BRADIAN_G44_VERIFICATION_2026_11_13.md)
+retains its dated evidence. Operational/platform qualification remains separate work.
 
-## Current milestone records
+## Historical implementation records (not master gate acceptance)
 
-| Gate | Engineering scope | Current maturity |
+| Record | Engineering scope | State recorded at implementation |
 |---|---|---|
 | [BRD-G1](gates/BRD-G1-relational-catalog.md) | Relational catalog, typed column definitions, PK/FK metadata | In-memory schema management, no row data |
 | [BRD-G2](gates/BRD-G2-page-format.md) | Versioned physical page representation and corruption detection | Page codec only; not yet durable storage |
@@ -113,7 +120,7 @@ remain separate work.
 | [BRD-G42](gates/BRD-G42-transaction-read-validation.md) | Opt-in bounded native/history SQL read validation | Concurrent write-skew, schedule, capacity and SQL tests passed |
 | [BRD-G43](gates/BRD-G43-checked-update-expressions.md) | Checked historical UPDATE expressions and DEFAULT | Numeric corpus, rollback, parser-budget and restore tests passed |
 | [BRD-G44](gates/BRD-G44-ordered-query-windows.md) | Historical ORDER BY and bounded LIMIT/OFFSET | Typed ordering, paging, input-budget and conflict tests passed |
-| Future gates | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
+| Remaining roadmap work | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 [Implementation gap register](implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining work and required evidence.
 
