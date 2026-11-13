@@ -10,6 +10,10 @@
 
 This directory contains the engineering specifications, architectural decisions, security design, and implementation evidence for Bradian Database Systems, the planned proprietary OLTP/OLAP/HTAP database. The architecture is **a target design**, not a statement that all its capabilities have been implemented.
 
+## Compression engine specification
+
+- **[Bradian Adaptive Compression Engine (BACE) — Comprehensive Requirements & SRS v1.0](BACE_Comprehensive_Requirements_SRS_v1.0.md)** — proposed platform-wide adaptive compression requirements for OLTP, OLAP, HTAP, indexes, WAL/MVCC, replication, federation, backup and temporary storage, including performance gates, data integrity, migration and validation. This is a target specification, not an implementation-completion claim.
+
 ## Read first
 
 1. **[Master Architecture & SRS v1.1](Bradian_Master_Architecture_SRS_v1.1.md)** — normative component architecture, relational SQL, ACID/MVCC design, columnar analytics, HTAP consistency, cluster fabric, horizontal scaling, federation, security, disaster recovery, Bradian Studio, implementation guidance and acceptance gates.
