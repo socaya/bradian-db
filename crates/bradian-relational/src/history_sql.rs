@@ -582,9 +582,7 @@ impl<'a> HistorySqlSession<'a> {
                         control.check()?;
                         Ok(SqlResultSet::Rows {
                             columns,
-                            rows: rows.into_iter().map(|row: Vec<_>|
-                                positions.iter().map(|pos|row[*pos].clone()).collect()
-                            ).collect(),
+                            rows: crate::typed_table::project_rows_with_control(rows, &positions, &control)?,
                         })
                     }
                     "update" => {

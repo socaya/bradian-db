@@ -85,3 +85,18 @@ fn budgeted_scan_still_detects_concurrent_write_after_savepoint_recovery() {
     }).unwrap();
     assert_eq!(db.mvcc_stats().active_snapshots,0);
 }
+
+#[test]
+fn historical_projection_amplification_is_rejected_before_copy_and_staged_work_is_aborted() {
+    let (_dir,root)=migrated(); let mut db=HistorySqlEngine::open(&root).unwrap();
+    db.enable_epoch_row_writes().unwrap();
+    db.execute_ddl(&format!("ALTER TABLE bank.public.accounts ADD note TEXT DEFAULT '{}'","x".repeat(1000))).unwrap();
+    let columns=vec!["note";100].join(",");
+    db.with_session_control(control(2,8000,10000),|s| {
+        s.execute("BEGIN WITH READ VALIDATION")?; s.execute("UPDATE bank.public.audit SET balance=999 WHERE id=9")?;
+        assert!(matches!(s.execute(&format!("SELECT {columns} FROM bank.public.accounts WHERE id=1")),Err(SqlError::Resource(ResourceError::Limit { resource:"bytes",.. }))));
+        assert!(!s.in_transaction()); assert!(s.execute("COMMIT").is_err()); Ok(())
+    }).unwrap();
+    assert_eq!(query(&db,"SELECT balance FROM bank.public.audit WHERE id=9"),vec![vec![Value::Int64(90)]]);
+    assert_eq!(db.mvcc_stats().active_snapshots,0);
+}

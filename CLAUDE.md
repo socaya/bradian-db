@@ -34,6 +34,8 @@ G44 [ADR 0039](docs/adr/0039-ordered-history-query-windows.md) binds order/windo
 
 Gate 1 scan controls are specified in [ADR 0041](docs/adr/0041-bounded-historical-query-scans.md). Historical SQL must use controlled table-prefix scans, charge buffers/work, and preserve scan observations on errors/rollback. Ordered queries cap input before cloning. Resource errors are not corruption. Unlimited administrative/native compatibility methods are excluded from SQL; resident maps and legacy paths remain unqualified, so do not claim total-process memory bounds.
 
+Gate 1's single-table snapshot/scan extension is specified in [ADR 0042](docs/adr/0042-bounded-single-table-query-snapshots.md). SQL must bound BEGIN snapshots, scans and projection before cloning, including repeated-column amplification. Preserve full snapshot LSNs, corruption checks and old single-table full-abort semantics. Native administrative compatibility APIs stay explicit and are not SQL fallbacks. CLI limits now apply to all SQL modes; global resident-memory qualification is still open.
+
 ## 3. Architecture boundaries
 
 - **Core and relational catalog:** Generic database/schema/table IDs, column types, constraints, dependency analysis and versioned catalog evolution.

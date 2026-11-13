@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{Column, DataType, Table};
+use crate::runtime_limits::{ScanControl, ResourceError};
 use crate::row_store::{RowMutation, RowStore, StoreError};
 
 const ROW_MAGIC: &[u8; 4] = b"BRRW";
@@ -43,6 +44,8 @@ pub enum Value {
 #[derive(Debug, Error)]
 pub enum TableError {
     #[error(transparent)]
+    Resource(#[from] ResourceError),
+    #[error(transparent)]
     Storage(#[from] StoreError),
     #[error("invalid or unsupported table definition: {0}")]
     Schema(String),
@@ -59,6 +62,30 @@ pub enum TableError {
 }
 
 pub type TableResult<T> = Result<T, TableError>;
+
+pub(crate) fn decoded_row_bytes(row: &Vec<Value>) -> usize {
+    std::mem::size_of::<Vec<Value>>().saturating_add(row.capacity().saturating_mul(std::mem::size_of::<Value>()))
+        .saturating_add(row.iter().map(|value| match value { Value::String(text) => text.capacity(), _ => 0 }).fold(0_usize, usize::saturating_add))
+}
+
+/// Bound output amplification before cloning projected values, including duplicates.
+pub(crate) fn project_rows_with_control(
+    rows: Vec<Vec<Value>>, positions: &[usize], control: &ScanControl,
+) -> Result<Vec<Vec<Value>>, ResourceError> {
+    let mut meter = control.meter()?;
+    let mut result = Vec::new();
+    for row in rows {
+        let mut bytes = std::mem::size_of::<Vec<Value>>().saturating_add(positions.len().saturating_mul(std::mem::size_of::<Value>()));
+        for position in positions {
+            meter.step()?;
+            if let Value::String(text) = &row[*position] { bytes = bytes.saturating_add(text.len()); }
+        }
+        meter.row(bytes)?;
+        result.push(positions.iter().map(|position|row[*position].clone()).collect());
+    }
+    control.check()?;
+    Ok(result)
+}
 
 /// One persistent table mapped to an independently locked RowStore directory.
 /// Table IDs must remain stable across process restarts; the pinned schema
@@ -94,7 +121,12 @@ impl TableStore {
     /// snapshot. No locks are held across application work, and rollback
     /// never writes to disk. Commit uses one synchronized BRWL batch.
     pub fn begin_transaction(&self) -> TableResult<TableTransaction<'_>> {
-        let (base_lsn, records) = self.storage.snapshot_with_lsn();
+        self.begin_transaction_with_control(&ScanControl::legacy_unlimited())
+    }
+
+    pub fn begin_transaction_with_control(&self, control: &ScanControl) -> TableResult<TableTransaction<'_>> {
+        let mut meter = control.meter()?;
+        let (base_lsn, records) = self.storage.snapshot_with_control(Some(META_KEY), control)?;
         let mut snapshot = BTreeMap::new();
         for (key, bytes) in records {
             if key.as_slice() == META_KEY { continue; }
@@ -105,8 +137,10 @@ impl TableStore {
             if self.key_from_row(&row)? != key {
                 return Err(TableError::Corruption("stored key does not match row primary key".into()));
             }
+            meter.row(decoded_row_bytes(&row).saturating_add(key.capacity()).saturating_add(std::mem::size_of::<Vec<u8>>()))?;
             snapshot.insert(key, row);
         }
+        control.check()?;
         Ok(TableTransaction {
             table: self,
             base_lsn,
@@ -190,8 +224,14 @@ impl TableStore {
     }
 
     pub fn scan(&self) -> TableResult<Vec<Vec<Value>>> {
+        self.scan_with_control(&ScanControl::legacy_unlimited())
+    }
+
+    pub fn scan_with_control(&self, control: &ScanControl) -> TableResult<Vec<Vec<Value>>> {
+        let mut meter = control.meter()?;
+        let (_, records) = self.storage.snapshot_with_control(Some(META_KEY), control)?;
         let mut result = Vec::new();
-        for (key, bytes) in self.storage.scan() {
+        for (key, bytes) in records {
             if key.as_slice() == META_KEY { continue; }
             if !key.starts_with(KEY_MAGIC) {
                 return Err(TableError::Corruption("unexpected key namespace in table storage".into()));
@@ -200,8 +240,10 @@ impl TableStore {
             if key != self.key_from_row(&row)? {
                 return Err(TableError::Corruption("stored primary key does not match row data".into()));
             }
+            meter.row(decoded_row_bytes(&row))?;
             result.push(row);
         }
+        control.check()?;
         Ok(result)
     }
 
@@ -442,6 +484,33 @@ impl TableTransaction<'_> {
             }
         }
         rows.into_values().collect()
+    }
+
+    /// Merge borrowed maps; do not clone the complete transaction snapshot.
+    pub fn scan_with_control(&self, control: &ScanControl) -> TableResult<Vec<Vec<Value>>> {
+        let mut meter = control.meter()?;
+        let mut snapshot = self.snapshot.iter().peekable();
+        let mut changes = self.changes.iter().peekable();
+        let mut rows = Vec::new();
+        while snapshot.peek().is_some() || changes.peek().is_some() {
+            meter.step()?;
+            let use_change = match (snapshot.peek(), changes.peek()) {
+                (Some((a, _)), Some((b, _))) => b <= a,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            let row = if use_change {
+                let (key, value) = changes.next().expect("staged key exists");
+                if snapshot.peek().is_some_and(|(other, _)| *other == key) { snapshot.next(); }
+                value.as_ref()
+            } else { Some(snapshot.next().expect("snapshot key exists").1) };
+            if let Some(row) = row {
+                meter.row(decoded_row_bytes(row))?;
+                rows.push(row.clone());
+            }
+        }
+        control.check()?;
+        Ok(rows)
     }
 
     pub fn insert(&mut self, row: &[Value]) -> TableResult<()> {

@@ -137,10 +137,23 @@ mod unix {
         assert!(!both.status.success());
         assert!(!run(&root,"BEGIN",&["--table","test.public.items","--history"]).status.success());
         assert!(!run(&root,"BEGIN",&["--history"]).status.success());
-        for flag in ["--max-scan-rows","--max-scan-bytes","--max-scan-work"] {
-            assert!(!run(&root,"BEGIN",&[flag,"1"]).status.success());
-        }
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn scan_flags_are_enforced_in_autocommit_and_single_table_modes() {
+        let _serial = PROCESS_TESTS.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path().join("db"); init(&root);
+        for flag in ["--max-scan-rows","--max-scan-bytes","--max-scan-work"] {
+            let failed = run(&root,"SELECT amount FROM test.public.items",&[flag,"0"]);
+            assert!(!failed.status.success());
+            assert!(String::from_utf8(failed.stderr).unwrap().contains("budget exceeded"));
+            let failed = run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1; COMMIT",&["--table","test.public.items",flag,"0"]);
+            assert!(!failed.status.success());
+            assert_eq!(amount(&root), "100");
+        }
+        ok(run(&root,"BEGIN; SELECT id FROM test.public.items; COMMIT", &["--table","test.public.items","--max-scan-rows","1","--max-scan-bytes","1000","--max-scan-work","2"]));
+        assert_eq!(amount(&root), "100");
     }
 
     #[test]

@@ -18,9 +18,10 @@ whole domain or staged map. AS OF uses retained versions at the requested LSN.
 
 ORDER BY/LIMIT/OFFSET queries lower the input-row ceiling to 10000 even if a higher
 scan budget is configured. LIMIT never cuts input before sorting. LIMIT 0 still
-reads/validates input and can fail a budget or preserve a scan conflict. Point reads
-are not scans; scan row/byte/work budgets do not restrict their single-row result.
-Point SELECT still checks cancellation at query boundaries.
+reads/validates input and can fail a budget or preserve a scan conflict. Point inputs
+are not scans, but result projection is now separately charged for returned rows,
+bytes and projected-cell work, including duplicate columns and point lookups.
+Point SELECT also checks cancellation at query boundaries.
 
 Byte accounting bounds encoded and decoded buffers separately, not their combined
 RSS or allocator/container slack. One inline row is decoded before its result-buffer charge;
@@ -34,9 +35,8 @@ keys/versions, not mutex wait time, all schema operations or filesystem I/O.
 bradian-db sql --root ./private-history --history --max-scan-rows 5000 --max-scan-bytes 8388608 --max-scan-work 100000 --execute "BEGIN; SELECT id FROM demo.public.items ORDER BY id LIMIT 20; COMMIT"
 ```
 
-The root must already be explicitly migrated and private. These flags require
---history. Other modes reject them rather than silently ignoring an unenforced
-limit. Defaults remain active when flags are absent. Limits reset for each query;
+The root must already be explicitly migrated and private. These flags now also apply to default and --table modes; see the
+[single-table policy](SINGLE_TABLE_QUERY_LIMITS.md) for their snapshot semantics. Defaults remain active when flags are absent. Limits reset for each query;
 they are not a cumulative session or server reservation. Configured zero budgets
 are valid and cause a scan to fail when it needs the corresponding resource.
 
@@ -64,6 +64,5 @@ conflict or scope drop.
 
 Existing unlimited native/administrative scan APIs keep their compatibility behavior
 so query-policy changes do not silently cap migration/backup verification. Historical
-SQL calls controlled methods directly and has no unbounded fallback. Earlier SQL
-engines, full store open, checkpoint, retention, backup, admission control and global
+SQL calls controlled methods directly and has no unbounded fallback. Other embedded engines, full store open, checkpoint, retention, backup, admission control and global
 resident-memory enforcement remain separate Gate 1 work.

@@ -30,14 +30,14 @@ pub(crate) struct SqlArgs {
     /// Use an explicitly migrated, existing historical SQL root.
     #[arg(long)]
     history: bool,
-    /// Historical scan input-row budget (default 100000; ordered queries at most 10000).
-    #[arg(long, requires = "history")]
+    /// SQL scan/snapshot input-row budget (default 100000; ordered queries at most 10000).
+    #[arg(long)]
     max_scan_rows: Option<usize>,
-    /// Historical encoded and decoded scan-buffer budget in bytes (default 16777216 each).
-    #[arg(long, requires = "history")]
+    /// SQL encoded/decoded/result buffer budget in bytes (default 16777216 each).
+    #[arg(long)]
     max_scan_bytes: Option<usize>,
-    /// Historical examined key/version budget (default 1000000).
-    #[arg(long, requires = "history")]
+    /// SQL examined key/version/projection-cell budget (default 1000000).
+    #[arg(long)]
     max_scan_work: Option<usize>,
 }
 
@@ -146,14 +146,14 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
     if args.history { anyhow::ensure!(args.root.join("history-domain").is_dir(), "--history requires an existing migrated history-domain root"); }
     private_root(&args.root)?;
     let mut writer = std::io::BufWriter::new(std::io::stdout().lock());
+    let defaults = ScanLimits::default();
+    let control = ScanControl::new(ScanLimits {
+        max_rows: args.max_scan_rows.unwrap_or(defaults.max_rows),
+        max_bytes: args.max_scan_bytes.unwrap_or(defaults.max_bytes),
+        max_work: args.max_scan_work.unwrap_or(defaults.max_work),
+    });
     if args.history {
         let engine = HistorySqlEngine::open(&args.root)?;
-        let defaults = ScanLimits::default();
-        let control = ScanControl::new(ScanLimits {
-            max_rows: args.max_scan_rows.unwrap_or(defaults.max_rows),
-            max_bytes: args.max_scan_bytes.unwrap_or(defaults.max_bytes),
-            max_work: args.max_scan_work.unwrap_or(defaults.max_work),
-        });
         engine.with_session_control(control, |session| {
             for (index, statement) in statements.iter().enumerate() {
                 let result = session.execute(statement).with_context(||format!("statement {} failed", index + 1));
@@ -168,7 +168,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
     } else {
         let engine = SqlEngine::open(&args.root)?;
         if let Some(table) = &args.table {
-            engine.with_sql_session(table, |session| {
+            engine.with_sql_session_control(table, control, |session| {
                 for (index, statement) in statements.iter().enumerate() {
                     let result = session.execute(statement).with_context(||format!("statement {} failed", index + 1))
                         .map_err(|e|std::io::Error::other(format!("{e:#}")))?;
@@ -179,7 +179,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
             })?;
         } else {
             for (index, statement) in statements.iter().enumerate() {
-                let result = engine.execute(statement).with_context(||format!("statement {} failed", index + 1))?;
+                let result = engine.execute_with_control(statement, &control).with_context(||format!("statement {} failed", index + 1))?;
                 output(&mut writer, index + 1, result)?;
             }
         }

@@ -14,7 +14,7 @@ use crate::schema_activation::{self, ActivationCommit, ActivationIntent, Activat
     PendingActivation, SchemaActivationReceipt, SchemaChanges, SchemaTimeline, LegacyDdlRetirement, LegacyDdlRetirementReceipt};
 use crate::durable_mvcc::{DurableMvccError, DurableMvccStats, DurableMvccStore, DurableMvccTransaction};
 use crate::typed_table::{
-    encode_key, encode_row, validate_table, TableError, Value,
+    encode_key, encode_row, validate_table, decoded_row_bytes, TableError, Value,
 };
 use crate::transaction_domain::DomainError;
 
@@ -115,11 +115,6 @@ fn row_prefix(id: TableId) -> Vec<u8> {
     prefix.push(1);
     prefix.extend_from_slice(&id.0.to_le_bytes());
     prefix
-}
-
-fn decoded_row_bytes(row: &Vec<Value>) -> usize {
-    std::mem::size_of::<Vec<Value>>().saturating_add(row.capacity().saturating_mul(std::mem::size_of::<Value>()))
-        .saturating_add(row.iter().map(|value| match value { Value::String(text) => text.capacity(), _ => 0 }).fold(0_usize, usize::saturating_add))
 }
 
 fn table_id_from_row_key(key: &[u8]) -> Result<TableId, DomainError> {

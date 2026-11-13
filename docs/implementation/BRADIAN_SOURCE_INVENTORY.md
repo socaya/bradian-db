@@ -8,7 +8,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
-| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Historical SQL query buffers are bounded; resident maps and legacy scans still materialize data; no full runtime quotas or production isolation qualification |
+| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Historical and single-table SQL buffers/projection are bounded; resident maps and alternate engines still materialize data; no full runtime quotas or production isolation qualification |
 | `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL is not remote SQL; legacy analytical commands retain their existing behavior |
 | `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
 | `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |

@@ -178,6 +178,27 @@ impl RowStore {
             .rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
+    /// Capture a bounded raw image and its LSN under one lock. Only the
+    /// explicitly named metadata record is excluded; all other keys survive
+    /// for the typed caller's integrity checks.
+    pub fn snapshot_with_control(
+        &self, exclude_key: Option<&[u8]>, control: &crate::runtime_limits::ScanControl,
+    ) -> Result<(u64, RowSnapshot), crate::runtime_limits::ResourceError> {
+        let mut meter = control.meter()?;
+        let inner = self.inner.lock();
+        control.check()?;
+        let mut rows = Vec::new();
+        for (key, value) in &inner.rows {
+            meter.step()?;
+            if exclude_key == Some(key.as_slice()) { continue; }
+            let bytes = key.len().saturating_add(value.len()).saturating_add(std::mem::size_of::<(Vec<u8>, Vec<u8>)>());
+            meter.row(bytes)?;
+            rows.push((key.clone(), value.clone()));
+        }
+        control.check()?;
+        Ok((inner.lsn, rows))
+    }
+
     /// Obtain one consistent row image and its committed WAL position under
     /// a single lock. Transaction validation must never read the LSN and
     /// snapshot in separate lock acquisitions.

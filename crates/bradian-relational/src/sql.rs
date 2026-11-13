@@ -10,6 +10,7 @@
 //! general expression evaluator, multi-row transaction engine, or SQL server.
 
 use std::collections::BTreeMap;
+use crate::runtime_limits::ScanControl;
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
@@ -461,6 +462,14 @@ impl SqlEngine {
         qualified_table: &str,
         callback: impl FnOnce(&mut SqlSession<'_>) -> SqlResult<R>,
     ) -> SqlResult<R> {
+        self.with_sql_session_control(qualified_table, ScanControl::default(), callback)
+    }
+
+    pub fn with_sql_session_control<R>(
+        &self, qualified_table: &str, control: ScanControl,
+        callback: impl FnOnce(&mut SqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        control.check()?;
         let _guard = self.operation.lock();
         let mut parser = Parser::new(qualified_table)?;
         let name = parser.name()?;
@@ -468,6 +477,7 @@ impl SqlEngine {
         let table = self.resolve(&name)?;
         let storage = self.table_store(&table)?;
         let mut session = SqlSession {
+            control,
             table: &table,
             name,
             storage: &storage,
@@ -478,6 +488,10 @@ impl SqlEngine {
     }
 
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
+        self.execute_with_control(sql, &ScanControl::default())
+    }
+
+    pub fn execute_with_control(&self, sql: &str, control: &ScanControl) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
         let mut p = Parser::new(sql)?;
         let action = p.word()?;
@@ -576,6 +590,7 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected: 1 })
             }
             "select" => {
+                control.check()?;
                 let selected = if p.consume_symbol('*') { Vec::new() } else {
                     let mut names = vec![p.word()?];
                     while p.consume_symbol(',') { names.push(p.word()?); }
@@ -592,16 +607,12 @@ impl SqlEngine {
                 }
                 let mut indices = Vec::new();
                 for column in &selected { indices.push(locate(&table, column)?); }
-                let store = self.table_store(&table)?;
-                let all = if p.consume_word("where") {
-                    p.pos -= 1;
-                    let pk = key_predicate(&mut p, &table)?;
-                    store.get(&pk)?.into_iter().collect::<Vec<_>>()
-                } else { store.scan()? };
+                let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
                 p.end()?;
-                let rows = all.into_iter().map(|row| {
-                    indices.iter().map(|index| row[*index].clone()).collect()
-                }).collect();
+                let store = self.table_store(&table)?;
+                let all = if let Some(key) = key { store.get(&key)?.into_iter().collect::<Vec<_>>() }
+                    else { store.scan_with_control(control)? };
+                let rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
                 Ok(SqlResultSet::Rows { columns: std::mem::take(&mut selected), rows })
             }
             "update" => {
@@ -652,6 +663,7 @@ impl SqlEngine {
 /// BEGIN creates a consistent G13 snapshot; DML is staged until COMMIT.
 /// Dropping a session with an open transaction discards its staged changes.
 pub struct SqlSession<'a> {
+    control: ScanControl,
     table: &'a Table,
     name: Vec<String>,
     storage: &'a TableStore,
@@ -683,7 +695,7 @@ impl<'a> SqlSession<'a> {
                 if self.transaction.is_some() {
                     return Err(SqlError::Unsupported("nested BEGIN is not supported".into()));
                 }
-                let transaction: TableTransaction<'a> = self.storage.begin_transaction()?;
+                let transaction: TableTransaction<'a> = self.storage.begin_transaction_with_control(&self.control)?;
                 self.transaction = Some(transaction);
                 Ok(SqlResultSet::Command { affected: 0 })
             }
@@ -734,6 +746,7 @@ impl<'a> SqlSession<'a> {
                         Ok(SqlResultSet::Command { affected: 1 })
                     }
                     "select" => {
+                        self.control.check()?;
                         let projected = if p.consume_symbol('*') {
                             self.table.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
                         } else {
@@ -747,19 +760,13 @@ impl<'a> SqlSession<'a> {
                         if p.name()? != self.name {
                             return Err(SqlError::Unsupported("cross-table transaction is unsupported".into()));
                         }
-                        let rows = if p.consume_word("where") {
-                            p.pos -= 1;
-                            let key = key_predicate(&mut p, self.table)?;
-                            tx.get(&key)?.into_iter().collect::<Vec<_>>()
-                        } else {
-                            tx.scan()
-                        };
+                        let key = if p.next_is_word("where") { Some(key_predicate(&mut p, self.table)?) } else { None };
                         p.end()?;
+                        let rows = if let Some(key) = key { tx.get(&key)?.into_iter().collect::<Vec<_>>() }
+                            else { tx.scan_with_control(&self.control)? };
                         Ok(SqlResultSet::Rows {
                             columns: projected,
-                            rows: rows.into_iter().map(|row| {
-                                positions.iter().map(|i| row[*i].clone()).collect()
-                            }).collect(),
+                            rows: crate::typed_table::project_rows_with_control(rows, &positions, &self.control)?,
                         })
                     }
                     "update" => {
