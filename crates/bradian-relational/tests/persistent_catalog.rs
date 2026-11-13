@@ -549,3 +549,20 @@ fn torn_revision_decision_retains_pending_state_and_can_be_retried() {
         }
     }
 }
+
+#[test]
+fn original_proposal_api_keeps_its_addition_only_contract() {
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path()).unwrap();
+    let database = catalog.create_database("compatibility").unwrap();
+    let schema = catalog.create_schema(database, "public").unwrap();
+    let mut specification = table("items");
+    specification.columns.push(Column { name: "amount".into(), data_type: DataType::Int64, nullable: false });
+    let id = catalog.create_table(schema, specification).unwrap();
+    let mut proposed = catalog.snapshot().table(id).unwrap().clone();
+    proposed.columns.last_mut().unwrap().nullable = true;
+    let before = catalog.last_lsn();
+    assert!(catalog.propose_table_revision(id, proposed).is_err());
+    assert_eq!(catalog.last_lsn(), before);
+    assert!(catalog.pending_table_revision(id).is_none());
+}

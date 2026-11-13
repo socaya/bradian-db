@@ -85,7 +85,7 @@ fn project_decoded(
     let source = epochs.schema(decoded.table_id, decoded.epoch)
         .map_err(|err| DomainError::Corruption(err.to_string()))?;
     if source == &definition.table { return Ok(decoded.values); }
-    let plan = crate::schema_evolution::plan_nullable_additions(source, &definition.table)?;
+    let plan = crate::schema_evolution::plan_nullable_evolution(source, &definition.table)?;
     Ok(crate::schema_evolution::project_row(&plan, &decoded.values)?)
 }
 
@@ -692,7 +692,7 @@ impl DurableTypedStore {
             return Err(DomainError::Corruption("legacy DDL metadata requires a separate conversion before ALTER".into()));
         }
         let old = self.tables.get(&proposed.id).ok_or(DomainError::UnknownTable(proposed.id.0))?;
-        schema_activation::validate_addition(&old.table, &proposed)?;
+        schema_activation::validate_nullable_evolution(&old.table, &proposed)?;
         let expected = catalog.snapshot().tables().map(|t| (t.id, t.clone())).collect();
         self.verify_catalog(&expected)?;
         // Reserve space for G11's event/receipt wrappers around the same definition.
@@ -762,7 +762,10 @@ impl DurableTypedStore {
             }
         }
         if actual == base {
-            let lsn = catalog.propose_table_revision(proposed.id, proposed.clone()).map_err(map_catalog)?;
+            let old = &self.tables[&proposed.id].table;
+            let lsn = if crate::schema_evolution::plan_nullable_additions(old, proposed).is_ok() {
+                catalog.propose_table_revision(proposed.id, proposed.clone())
+            } else { catalog.propose_nullable_revision(proposed.id, proposed.clone()) }.map_err(map_catalog)?;
             if lsn != base + 1 { return Err(DomainError::Corruption("catalog proposal LSN differs".into())); }
         }
         hook(ActivationStage::CatalogProposed)?;
@@ -1034,7 +1037,15 @@ mod activation_tests {
     }
 
     fn interrupted(stage: ActivationStage) -> (TempDir, Table) {
-        let (dir, proposed) = fixture();
+        interrupted_revision(stage, false)
+    }
+
+    fn interrupted_revision(stage: ActivationStage, relaxation: bool) -> (TempDir, Table) {
+        let (dir, mut proposed) = fixture();
+        if relaxation {
+            proposed.columns.pop();
+            proposed.columns[1].nullable = true;
+        }
         let mut engine = HistorySqlEngine::open(dir.path()).unwrap();
         assert!(engine.activate_schema(proposed.clone(), &mut |current| {
             if current == stage { Err(DomainError::Corruption("injected interruption".into())) }
@@ -1256,6 +1267,57 @@ mod activation_tests {
             drop(catalog);
             assert!(HistorySqlEngine::open(dir.path()).is_err(), "accepted {defect}");
             assert_eq!(PersistentCatalog::open(dir.path().join("catalog")).unwrap().last_lsn(), 4);
+        }
+    }
+
+    #[test]
+    fn nullability_relaxation_recovers_at_every_durable_boundary() {
+        for stage in [ActivationStage::IntentSynced, ActivationStage::CatalogProposed,
+            ActivationStage::CatalogActivated, ActivationStage::HistoryActivated]
+        {
+            let (dir, proposed) = interrupted_revision(stage, true);
+            let engine = HistorySqlEngine::open(dir.path()).unwrap();
+            assert_eq!(engine.schema_as_of("test.public.items", engine.last_lsn()).unwrap().0, proposed);
+            assert!(!engine.schema_as_of("test.public.items", 4).unwrap().0.columns[1].nullable);
+            engine.with_session(|s| {
+                s.execute("BEGIN")?;
+                s.execute("UPDATE test.public.items SET amount=NULL WHERE id=1")?;
+                s.execute("COMMIT")?;
+                s.execute("BEGIN")?;
+                assert!(matches!(s.execute("SELECT amount FROM test.public.items AS OF 4 WHERE id=1")?,
+                    SqlResultSet::Rows { rows, .. } if rows == vec![vec![Value::Int64(10)]]));
+                Ok(())
+            }).unwrap();
+            let lsn = engine.last_lsn();
+            drop(engine);
+            assert_eq!(HistorySqlEngine::open(dir.path()).unwrap().last_lsn(), lsn);
+        }
+    }
+
+    #[test]
+    fn torn_nullability_transition_frames_repair_at_all_four_boundaries() {
+        for stage in [ActivationStage::IntentSynced, ActivationStage::CatalogProposed,
+            ActivationStage::CatalogActivated, ActivationStage::HistoryActivated]
+        {
+            for cut in [0_usize, 1, 17, usize::MAX] {
+                let (dir, _) = interrupted_revision(stage, true);
+                let component = if matches!(stage, ActivationStage::CatalogProposed | ActivationStage::CatalogActivated) {
+                    "catalog"
+                } else { "history-domain" };
+                let path = dir.path().join(component).join("rows.wal");
+                let bytes = std::fs::read(&path).unwrap();
+                let offset = last_frame_offset(&bytes);
+                let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+                file.set_len((offset + cut.min(bytes.len() - offset - 1)) as u64).unwrap();
+                file.sync_all().unwrap();
+                drop(file);
+                let engine = HistorySqlEngine::open(dir.path()).unwrap();
+                let nullable = stage != ActivationStage::IntentSynced;
+                assert_eq!(engine.schema_as_of("test.public.items", engine.last_lsn()).unwrap().0.columns[1].nullable, nullable);
+                let lsn = engine.last_lsn();
+                drop(engine);
+                assert_eq!(HistorySqlEngine::open(dir.path()).unwrap().last_lsn(), lsn);
+            }
         }
     }
 

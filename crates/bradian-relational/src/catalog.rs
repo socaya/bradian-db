@@ -223,7 +223,7 @@ impl Catalog {
     pub(crate) fn activate_nullable_revision(&mut self, proposed: &Table) -> Result<(), CatalogError> {
         let current = self.table(proposed.id)
             .ok_or_else(|| CatalogError::NotFound(format!("table {}", proposed.id.0)))?;
-        crate::schema_evolution::plan_nullable_additions(current, proposed)
+        crate::schema_evolution::plan_nullable_evolution(current, proposed)
             .map_err(|err| CatalogError::InvalidDefinition(err.to_string()))?;
         validate_revision_columns(proposed)?;
         self.tables.insert(proposed.id, proposed.clone());

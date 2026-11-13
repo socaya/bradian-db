@@ -45,10 +45,12 @@ This directory contains the engineering specifications, architectural decisions,
 30. **[Legacy DDL intent retirement ADR](adr/0032-legacy-ddl-intent-retirement.md)** — explicit retirement with a bound catalog horizon and verified archival metadata.
 31. **[Atomic history backup statistics ADR](adr/0033-atomic-history-backup-statistics.md)** — archive receipts and statistics from one mutation lock.
 
+32. **[Nullable relaxation ADR](adr/0034-nullability-relaxation-and-insert-null.md)** — checked DROP NOT NULL, implicit INSERT NULL and additions-only API compatibility.
+
 ## Executed verification
 
-[13 November 2026 verification report](implementation/BRADIAN_VERIFICATION_2026_11_13.md):
-588 Rust tests passed, including 333 relational tests. Workspace check, strict Clippy
+[G39 verification report, 13 November 2026](implementation/BRADIAN_G39_VERIFICATION_2026_11_13.md):
+600 Rust tests passed, including 345 relational tests. Workspace check, strict Clippy
 and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
 statements that Cargo was unavailable; operational and cross-platform qualification
 remain separate work.
@@ -95,6 +97,7 @@ remain separate work.
 | [BRD-G36](gates/BRD-G36-recoverable-historical-alter.md) | Exclusive nullable-column ALTER, multi-epoch reads and cross-WAL recovery | Linux SQL and four-boundary recovery tests passed |
 | [BRD-G37](gates/BRD-G37-legacy-ddl-retirement.md) | Explicit retirement of inactive G28–G31 metadata before G36 upgrade | Linux retirement, restore and partial-frame tests passed |
 | [BRD-G38](gates/BRD-G38-consistent-history-backup-metadata.md) | Archive statistics bound to the copied history snapshot | Concurrent-write backup/restore tests passed |
+| [BRD-G39](gates/BRD-G39-nullability-relaxation.md) | Recoverable non-key DROP NOT NULL and implicit nullable INSERT values | Linux SQL and four-boundary recovery tests passed |
 | Future gates | Concurrent online schema evolution, general/serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 [Implementation gap register](implementation/BRADIAN_IMPLEMENTATION_GAPS.md) tracks the remaining work and required evidence.

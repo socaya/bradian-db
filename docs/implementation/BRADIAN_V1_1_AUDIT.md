@@ -19,6 +19,15 @@ See the [gap register](BRADIAN_IMPLEMENTATION_GAPS.md), current gates and
 [executed verification](BRADIAN_VERIFICATION_2026_11_13.md). Automatic CI remains
 manual-only by owner request.
 
+## G39 constraint evolution (13 November 2026)
+
+The historical engine now supports non-key DROP NOT NULL through the exclusive G36
+recovery protocol and NULL for omitted nullable INSERT fields. Older schema epochs,
+original row bytes and the G33 additions-only proposal contract are preserved. The
+[G39 verification report](BRADIAN_G39_VERIFICATION_2026_11_13.md) records 600 passing
+workspace tests, including 345 relational tests, plus strict Clippy and Studio checks.
+SET NOT NULL/backfill and non-NULL defaults remain open.
+
 ## Executed verification and catalog revisions (12 November 2026)
 
 The [executed verification report](BRADIAN_VERIFICATION_2026_11_12.md) records 550 passing

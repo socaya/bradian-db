@@ -58,3 +58,8 @@ This profile does not support concurrent online DDL, NOT NULL/default backfills,
 DROP/RENAME/type changes, cross-process SQL transactions or distributed DDL. It is
 not physical device power-loss qualification. See the
 [executed verification report](../implementation/BRADIAN_VERIFICATION_2026_11_13.md).
+
+## Follow-up
+
+[G39](BRD-G39-nullability-relaxation.md) extends the same recovery protocol to non-key
+NOT NULL relaxation. The additions-only profile above describes G36 at introduction.

@@ -58,6 +58,7 @@ enum Command {
     DropSchema { schema: SchemaId },
     DropDatabase { database: DatabaseId },
     ProposeTableRevision { table: TableId, proposed: Table },
+    ProposeNullableRevision { table: TableId, proposed: Table },
     ActivateTableRevision { revision: CatalogTableRevision },
     CancelTableRevision { revision: CatalogTableRevision },
 }
@@ -116,11 +117,13 @@ impl Event {
                 revisions.remove(&proposed.id);
                 None
             }
-            Command::ProposeTableRevision { table, proposed } => {
+            Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } => {
                 let original = catalog.table(*table).ok_or_else(||
                     PersistentCatalogError::Corruption("revision refers to missing table".into())
                 )?;
-                crate::schema_evolution::plan_nullable_additions(original, proposed)
+                if matches!(&self.command, Command::ProposeTableRevision { .. }) {
+                    crate::schema_evolution::plan_nullable_additions(original, proposed)
+                } else { crate::schema_evolution::plan_nullable_evolution(original, proposed) }
                     .map_err(|e| PersistentCatalogError::Corruption(e.to_string()))?;
                 // Reuse the authoritative catalog validators without publishing.
                 catalog.clone().activate_nullable_revision(proposed)?;
@@ -293,6 +296,13 @@ impl PersistentCatalog {
         &self, table: TableId, proposed: Table,
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::ProposeTableRevision { table, proposed })?.1)
+    }
+
+    /// G39 proposal supporting non-key NOT NULL relaxation as well as nullable additions.
+    pub(crate) fn propose_nullable_revision(
+        &self, table: TableId, proposed: Table,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::ProposeNullableRevision { table, proposed })?.1)
     }
 
     /// Activate catalog metadata only. Existing typed row domains require coordination.

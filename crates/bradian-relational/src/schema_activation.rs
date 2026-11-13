@@ -118,8 +118,8 @@ fn invalid(message: &str) -> DomainError {
     DomainError::Corruption(format!("schema activation: {message}"))
 }
 
-pub(crate) fn validate_addition(old: &Table, proposed: &Table) -> Result<(), DomainError> {
-    crate::schema_evolution::plan_nullable_additions(old, proposed)?;
+pub(crate) fn validate_nullable_evolution(old: &Table, proposed: &Table) -> Result<(), DomainError> {
+    crate::schema_evolution::plan_nullable_evolution(old, proposed)?;
     crate::catalog::validate_revision_columns(proposed)
         .map_err(|err| invalid(&err.to_string()))?;
     Ok(())
@@ -173,7 +173,7 @@ impl SchemaChanges {
                         .ok_or_else(|| invalid("intent references an unregistered table"))?;
                     let (epoch, old) = schemas.last_key_value().expect("registered schema timeline");
                     if *epoch != intent.previous_epoch { return Err(invalid("stale previous schema epoch")); }
-                    validate_addition(old, &intent.proposed)?;
+                    validate_nullable_evolution(old, &intent.proposed)?;
                     let candidate = PendingActivation { intent_lsn: lsn, intent };
                     candidate.catalog_lsn()?;
                     pending = Some(candidate);

@@ -93,7 +93,7 @@ impl HistorySqlEngine {
 
     pub fn legacy_schema_intents_retired(&self) -> bool { self.domain.legacy_schema_intents_retired() }
 
-    /// Exclusive, recoverable nullable-column DDL. Row sessions cannot overlap
+    /// Exclusive, recoverable nullable-column addition. Row sessions cannot overlap
     /// a mutable engine borrow. Returns the durable history/schema receipt.
     pub fn add_nullable_column(
         &mut self, qualified_table: &str, column: Column,
@@ -103,6 +103,22 @@ impl HistorySqlEngine {
         parser.end()?;
         let mut proposed = self.resolve(&parts)?;
         proposed.columns.push(column);
+        self.activate_schema(proposed, &mut |_| Ok(()))
+    }
+
+    /// Relax an existing non-key NOT NULL column through the same durable protocol.
+    pub fn drop_not_null(
+        &mut self, qualified_table: &str, column_name: &str,
+    ) -> SqlResult<SchemaActivationReceipt> {
+        let mut parser = Parser::new(qualified_table)?;
+        let parts = parser.name()?;
+        parser.end()?;
+        let mut proposed = self.resolve(&parts)?;
+        let mut column = Parser::new(column_name)?;
+        let name = column.word()?;
+        column.end()?;
+        let index = locate(&proposed, &name)?;
+        proposed.columns[index].nullable = true;
         self.activate_schema(proposed, &mut |_| Ok(()))
     }
 
@@ -118,8 +134,8 @@ impl HistorySqlEngine {
         Ok(result?)
     }
 
-    /// ALTER TABLE db.schema.table ADD [COLUMN] name type [NULL].
-    /// Unsupported clauses fail before any durable metadata is written.
+    /// Exclusive ALTER supports ADD [COLUMN] name type [NULL] and
+    /// ALTER [COLUMN] name DROP NOT NULL. Other clauses fail before journaling.
     pub fn execute_ddl(&mut self, sql: &str) -> SqlResult<SchemaActivationReceipt> {
         self.require_ready()?;
         let mut p = Parser::new(sql)?;
@@ -127,13 +143,23 @@ impl HistorySqlEngine {
         p.expect("table")?;
         let parts = p.name()?;
         qualified(&parts, 3)?;
-        p.expect("add")?;
-        p.consume_word("column");
-        let name = p.word()?;
-        let data_type = p.data_type()?;
-        p.consume_word("null");
-        p.end()?;
-        self.add_nullable_column(&parts.join("."), Column { name, data_type, nullable: true })
+        if p.consume_word("add") {
+            p.consume_word("column");
+            let name = p.word()?;
+            let data_type = p.data_type()?;
+            p.consume_word("null");
+            p.end()?;
+            self.add_nullable_column(&parts.join("."), Column { name, data_type, nullable: true })
+        } else {
+            p.expect("alter")?;
+            p.consume_word("column");
+            let name = p.word()?;
+            p.expect("drop")?;
+            p.expect("not")?;
+            p.expect("null")?;
+            p.end()?;
+            self.drop_not_null(&parts.join("."), &name)
+        }
     }
 
     /// Only independently provisioned durable schema pins may be used.
@@ -384,8 +410,8 @@ impl<'a> HistorySqlSession<'a> {
                         p.expect("values")?;
                         let values = p.list(|parser| parser.literal())?;
                         p.end()?;
-                        if names.len() != values.len() || names.len() != table.columns.len() {
-                            return Err(SqlError::Unsupported("INSERT must list every table column exactly once".into()));
+                        if names.len() != values.len() {
+                            return Err(SqlError::Syntax("INSERT column and value counts differ".into()));
                         }
                         let mut fields = BTreeMap::new();
                         for (name, value) in names.into_iter().zip(values) {
@@ -395,9 +421,11 @@ impl<'a> HistorySqlSession<'a> {
                             }
                         }
                         let row = table.columns.iter().map(|column| {
-                            let lit = fields.remove(&column.name)
-                                .ok_or_else(|| SqlError::Resolution("missing column".into()))?;
-                            coerce(&lit, column)
+                            match fields.remove(&column.name) {
+                                Some(lit) => coerce(&lit, column),
+                                None if column.nullable => Ok(crate::typed_table::Value::Null),
+                                None => Err(SqlError::Type(format!("missing NOT NULL column {}", column.name))),
+                            }
                         }).collect::<SqlResult<Vec<_>>>()?;
                         tx.insert(table.id, &row)?;
                         Ok(SqlResultSet::Command { affected: 1 })
