@@ -8,7 +8,7 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions with bounded historical savepoints and opt-in read validation, checked historical UPDATE expressions and ordered query windows, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog revision decisions, opt-in schema-epoch rows, exclusive nullable-column additions, immutable constant defaults and NOT NULL relaxation with recoverable catalog/history coordination, and verified retirement of inactive schema intents. General SQL conformance, concurrent online DDL, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_GATE1_SINGLE_TABLE_LIMITS_VERIFICATION_2026_11_13.md): **694 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
+> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions with bounded historical savepoints and opt-in read validation, checked historical UPDATE expressions and ordered query windows, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog revision decisions, opt-in schema-epoch rows, exclusive nullable-column additions, immutable constant defaults and NOT NULL relaxation with recoverable catalog/history coordination, and verified retirement of inactive schema intents. General SQL conformance, concurrent online DDL, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_GATE1_HISTORY_ADMISSION_VERIFICATION_2026_11_13.md): **707 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
 
 ## Product architecture
 
@@ -150,13 +150,13 @@ master gate completions. Gate 1 remains active. The [native local SQL command](d
 provides the canonical bradian-db executable while retaining dap-admin compatibility.
 [Historical query controls](docs/operations/HISTORY_QUERY_LIMITS.md) and
 [single-table controls](docs/operations/SINGLE_TABLE_QUERY_LIMITS.md) now bound
-scan/snapshot/result buffers, projection work and cancellation. Resident-memory budgets, local identity and
+scan/snapshot/result buffers, projection work and cancellation. [Retained-history admission](docs/operations/RETAINED_HISTORY_LIMITS.md) caps per-domain keys, versions and accounted bytes. Global resident-memory budgets, local identity and
 failure/platform qualification remain open.
 
 ## Executed verification
 
-The [Gate 1 verification report](docs/implementation/BRADIAN_GATE1_SINGLE_TABLE_LIMITS_VERIFICATION_2026_11_13.md)
-records 694 passing Rust tests plus workspace compilation, strict Clippy and Studio
+The [Gate 1 verification report](docs/implementation/BRADIAN_GATE1_HISTORY_ADMISSION_VERIFICATION_2026_11_13.md)
+records 707 passing Rust tests plus workspace compilation, strict Clippy and Studio
 checks. [G44](docs/gates/BRD-G44-ordered-query-windows.md) adds typed ORDER BY,
 explicit NULL placement and bounded LIMIT/OFFSET with deterministic primary-key ties.
 [G43](docs/gates/BRD-G43-checked-update-expressions.md) adds checked numeric

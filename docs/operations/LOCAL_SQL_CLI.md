@@ -73,6 +73,10 @@ Every SQL mode uses default scan/snapshot/result row, byte and work limits. Opti
 [history policy](HISTORY_QUERY_LIMITS.md) for accounting, cancellation, compatibility
 and remaining resident-memory limits.
 
+## Retained-history admission
+
+In --history mode, --max-history-keys, --max-history-versions and --max-history-bytes configure per-domain retained-state admission. Defaults are 1000000 keys, 1000000 versions and 268435456 accounted bytes. These flags require --history. They apply to open and committed growth; they do not reset per query or automatically prune old versions. See the [retained-history policy](RETAINED_HISTORY_LIMITS.md) for accounting, reopen and explicit pruning.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

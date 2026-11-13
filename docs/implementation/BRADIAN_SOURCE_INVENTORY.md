@@ -8,7 +8,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
-| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Historical and single-table SQL buffers/projection are bounded; resident maps and alternate engines still materialize data; no full runtime quotas or production isolation qualification |
+| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query buffers/projection and per-domain retained-history growth are bounded; backing-store replay, catalog/transaction/global admission and alternate engines remain open; no production isolation qualification |
 | `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL is not remote SQL; legacy analytical commands retain their existing behavior |
 | `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
 | `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
@@ -35,12 +35,14 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 | .derc, dap-* crate names, analytical paths | inherited analytical subsystem | Preserve identifiers and wire compatibility until a separately tested migration exists |
 | dap-admin / bradian-db | operator command library | Legacy executable retained; canonical executable added; SQL output is a documented local JSON profile |
 
+HistoryLimits and HistoryUsage in runtime_limits expose process-local retained-history policy/counters; durable MVCC, typed/SQL adapters, migration and restore propagate explicit limits. Policy is not persisted and no format or dependency changed. See [ADR 0043](../adr/0043-retained-history-admission.md).
+
 ## Architecture decisions still requiring prototypes
 
 | Decision | Evidence required before adopting/fixing a format | Owning gate |
 |---|---|---|
 | Mutable pages/allocator and dirty buffer writes | WAL/page-LSN ordering, split/reuse crash matrix and failed sync/rename/disk-full tests | 1 |
-| Runtime quotas/cancellation | Bounded scans, version/catalog limits, interruption cleanup and memory-pressure workload | 1 |
+| Runtime quotas/cancellation | Query limits and per-domain retained-history admission are implemented; backing-store open/replay, catalog/transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
 | Secure local identity and SQL policy context | ACL/root-owner/path threat analysis, every data path checked, revocation and diagnostics tests | 1–2 |
 | Global transaction order/safe-time | Deterministic adversarial multi-participant schedules, clock uncertainty and coordinator recovery | 5 |
 | Cluster node identity and consensus | Authenticated enrollment/fencing, quorum-loss and partition experiments | 4 |

@@ -5,6 +5,7 @@
 //! Exclusive G11/G22 file locks are held through backup and verification.
 //! Archives preserve retained versions, tombstones and the retention floor.
 
+use crate::runtime_limits::HistoryLimits;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -171,7 +172,7 @@ fn catalog_tables(catalog: &PersistentCatalog) -> BTreeMap<TableId, Table> {
     catalog.snapshot().tables().map(|t| (t.id, t.clone())).collect()
 }
 
-fn verify_root(root: &Path, expected: &HistoryBackupReport) -> HistoryBackupResult<()> {
+fn verify_root(root: &Path, expected: &HistoryBackupReport, limits: HistoryLimits) -> HistoryBackupResult<()> {
     // This check also rejects legacy ownership and unregistered historical rows.
     if root.join("shared-domain").exists() || root.join("lifecycle").exists() ||
         root.join("tables").exists()
@@ -180,7 +181,7 @@ fn verify_root(root: &Path, expected: &HistoryBackupReport) -> HistoryBackupResu
     }
     let catalog = PersistentCatalog::open(root.join("catalog"))?;
     let definitions = catalog_tables(&catalog);
-    let domain = DurableTypedStore::open(root.join("history-domain"), &definitions)?;
+    let domain = DurableTypedStore::open_with_history_limits(root.join("history-domain"), &definitions, limits)?;
     domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
     let stats = domain.stats();
     if catalog.last_lsn() != expected.catalog.last_lsn ||
@@ -236,7 +237,7 @@ pub(crate) fn backup_history_database(
     fs::create_dir(&verify)?;
     RowStore::restore_backup(stage.join(COMPONENTS[0]), verify.join(COMPONENTS[0]))?;
     RowStore::restore_backup(stage.join(COMPONENTS[1]), verify.join(COMPONENTS[1]))?;
-    verify_root(&verify, &report)?;
+    verify_root(&verify, &report, history.history_limits())?;
     fs::remove_dir_all(&verify)?;
     sync_dir(&stage)?;
     if fs::symlink_metadata(&dest).is_ok() {
@@ -252,6 +253,12 @@ pub(crate) fn backup_history_database(
 pub fn restore_history_database(
     backup: impl AsRef<Path>,
     destination: impl AsRef<Path>,
+) -> HistoryBackupResult<HistoryBackupReport> {
+    restore_history_database_with_limits(backup, destination, HistoryLimits::default())
+}
+
+pub fn restore_history_database_with_limits(
+    backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: HistoryLimits,
 ) -> HistoryBackupResult<HistoryBackupReport> {
     let backup = fs::canonicalize(backup.as_ref())?;
     let report = read_manifest(&backup)?;
@@ -272,7 +279,7 @@ pub fn restore_history_database(
             return Err(HistoryBackupError::Corruption(format!("{component} receipt mismatch")));
         }
     }
-    verify_root(&stage, &report)?;
+    verify_root(&stage, &report, limits)?;
     sync_dir(&stage)?;
     if fs::symlink_metadata(&dest).is_ok() {
         return Err(HistoryBackupError::Invalid("destination appeared before restore publish".into()));

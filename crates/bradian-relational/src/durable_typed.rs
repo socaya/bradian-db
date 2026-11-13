@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{Table, TableId};
-use crate::runtime_limits::ScanControl;
+use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage};
 use crate::epoch_row::{DecodedEpochRow, EpochRowError, EpochSchemas};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
 use crate::schema_activation::{self, ActivationCommit, ActivationIntent, ActivationStage,
@@ -162,15 +162,21 @@ impl DurableTypedStore {
         domain_root: impl AsRef<Path>,
         catalog_tables: &BTreeMap<TableId, Table>,
     ) -> Result<Self, DomainError> {
-        let store = DurableMvccStore::open(domain_root).map_err(map_mvcc)?;
+        Self::open_with_history_limits(domain_root, catalog_tables, HistoryLimits::default())
+    }
+
+    pub fn open_with_history_limits(
+        domain_root: impl AsRef<Path>, catalog_tables: &BTreeMap<TableId, Table>, limits: HistoryLimits,
+    ) -> Result<Self, DomainError> {
+        let store = DurableMvccStore::open_with_limits(domain_root, limits).map_err(map_mvcc)?;
         Self::from_store(store, Some(catalog_tables))
     }
 
     /// Recovery owns both locks and validates history before changing the catalog.
     pub(crate) fn open_coordinated(
-        domain_root: impl AsRef<Path>, catalog: &PersistentCatalog,
+        domain_root: impl AsRef<Path>, catalog: &PersistentCatalog, limits: HistoryLimits,
     ) -> Result<Self, DomainError> {
-        let store = DurableMvccStore::open(domain_root).map_err(map_mvcc)?;
+        let store = DurableMvccStore::open_with_limits(domain_root, limits).map_err(map_mvcc)?;
         let mut owner = Self::from_store(store, None)?;
         if owner.pending_activation.is_some() {
             owner.finish_activation(catalog, &mut |_| Ok(()))?;
@@ -714,7 +720,12 @@ impl DurableTypedStore {
                 previous_epoch: self.schema_epochs[&proposed.id],
                 catalog_before_lsn: catalog.last_lsn(), proposed },
         };
-        pending.catalog_lsn()?;
+        let final_lsn = pending.catalog_lsn()?;
+        let intent_key = schema_activation::intent_key(pending.intent_lsn);
+        let active_key = schema_activation::activation_key(pending.intent_lsn);
+        let intent_bytes = serde_json::to_vec(&pending.intent)?;
+        let active_bytes = serde_json::to_vec(&ActivationCommit { version: pending.intent.version, intent_lsn: pending.intent_lsn, catalog_lsn: final_lsn })?;
+        self.store.check_additional_versions(&[(&intent_key,Some(&intent_bytes)),(&active_key,Some(&active_bytes))]).map_err(map_mvcc)?;
         Ok(pending)
     }
 
@@ -769,6 +780,9 @@ impl DurableTypedStore {
                 return Err(DomainError::Corruption("catalog table differs during schema recovery".into()));
             }
         }
+        let active_key = schema_activation::activation_key(pending.intent_lsn);
+        let active_bytes = serde_json::to_vec(&ActivationCommit { version: pending.intent.version, intent_lsn: pending.intent_lsn, catalog_lsn: final_lsn })?;
+        self.store.check_additional_versions(&[(&active_key,Some(&active_bytes))]).map_err(map_mvcc)?;
         if actual == base {
             let old = &self.tables[&proposed.id].table;
             let lsn = if old.column_defaults != proposed.column_defaults {
@@ -808,6 +822,8 @@ impl DurableTypedStore {
     }
 
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
+    pub fn history_usage(&self) -> HistoryUsage { self.store.history_usage() }
+    pub fn history_limits(&self) -> HistoryLimits { self.store.history_limits() }
     pub fn retention_floor(&self) -> u64 { self.store.retention_floor() }
 
     pub fn last_lsn(&self) -> u64 { self.store.latest_lsn() }
@@ -1442,6 +1458,35 @@ mod activation_tests {
             assert!(HistorySqlEngine::open(dir.path()).is_err());
             assert_eq!(PersistentCatalog::open(dir.path().join("catalog")).unwrap().last_lsn(), 4);
         }
+    }
+
+    #[test]
+    fn ddl_admission_preflights_both_records_without_fencing_a_healthy_owner() {
+        let (dir,_) = fixture();
+        let raw = DurableMvccStore::open(dir.path().join("history-domain")).unwrap();
+        let usage = raw.history_usage(); let lsn = raw.latest_lsn(); drop(raw);
+        let mut engine = HistorySqlEngine::open_with_history_limits(dir.path(), HistoryLimits {
+            max_keys:100,max_versions:usage.versions+1,max_bytes:1000000,
+        }).unwrap();
+        assert!(engine.execute_ddl("ALTER TABLE test.public.items ADD extra TEXT").is_err());
+        assert_eq!(engine.last_lsn(),lsn);
+        engine.with_session(|s| { s.execute("BEGIN")?; s.execute("SELECT * FROM test.public.items")?; s.execute("ROLLBACK")?; Ok(()) }).unwrap();
+        drop(engine);
+        assert_eq!(PersistentCatalog::open(dir.path().join("catalog")).unwrap().last_lsn(),4);
+    }
+
+    #[test]
+    fn recovery_refuses_activation_capacity_before_repairing_catalog() {
+        let (dir,_) = interrupted(ActivationStage::IntentSynced);
+        let raw = DurableMvccStore::open(dir.path().join("history-domain")).unwrap();
+        let usage=raw.history_usage(); let lsn=raw.latest_lsn(); drop(raw);
+        assert!(HistorySqlEngine::open_with_history_limits(dir.path(),HistoryLimits {
+            max_keys:100,max_versions:usage.versions,max_bytes:1000000,
+        }).is_err());
+        assert_eq!(PersistentCatalog::open(dir.path().join("catalog")).unwrap().last_lsn(),4);
+        assert_eq!(DurableMvccStore::open(dir.path().join("history-domain")).unwrap().latest_lsn(),lsn);
+        let recovered=assert_schema(dir.path(),3);
+        assert_eq!(assert_schema(dir.path(),3),recovered);
     }
 
 }

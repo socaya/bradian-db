@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{Column, Table};
-use crate::runtime_limits::ScanControl;
+use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage};
 use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
@@ -27,6 +27,10 @@ pub struct HistorySqlEngine {
 
 impl HistorySqlEngine {
     pub fn open(root: impl AsRef<Path>) -> SqlResult<Self> {
+        Self::open_with_history_limits(root, HistoryLimits::default())
+    }
+
+    pub fn open_with_history_limits(root: impl AsRef<Path>, limits: HistoryLimits) -> SqlResult<Self> {
         let root = root.as_ref();
         // Refuse opening a root with ANY legacy per-table data. No implicit
         // migration, dual writes, or ambiguous source of truth is allowed.
@@ -54,7 +58,7 @@ impl HistorySqlEngine {
             ));
         }
         let catalog = PersistentCatalog::open(root.join("catalog"))?;
-        let domain = DurableTypedStore::open_coordinated(root.join("history-domain"), &catalog)?;
+        let domain = DurableTypedStore::open_coordinated(root.join("history-domain"), &catalog, limits)?;
         domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
         Ok(Self { catalog, domain, _root: root.to_owned(), failed_ddl: false })
     }
@@ -206,6 +210,9 @@ impl HistorySqlEngine {
     }
 
     /// Observe the in-memory snapshot retention state.
+    pub fn history_usage(&self) -> HistoryUsage { self.domain.history_usage() }
+    pub fn history_limits(&self) -> HistoryLimits { self.domain.history_limits() }
+
     pub fn mvcc_stats(&self) -> crate::durable_mvcc::DurableMvccStats {
         self.domain.stats()
     }

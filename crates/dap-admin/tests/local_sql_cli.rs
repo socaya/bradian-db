@@ -137,6 +137,9 @@ mod unix {
         assert!(!both.status.success());
         assert!(!run(&root,"BEGIN",&["--table","test.public.items","--history"]).status.success());
         assert!(!run(&root,"BEGIN",&["--history"]).status.success());
+        for flag in ["--max-history-keys","--max-history-versions","--max-history-bytes"] {
+            assert!(!run(&root,"BEGIN",&[flag,"1"]).status.success());
+        }
         assert!(!root.exists());
     }
 
@@ -200,5 +203,18 @@ mod unix {
         let rows = ok(run(&root,"BEGIN; SELECT amount FROM test.public.items; COMMIT",&["--history","--max-scan-rows","1","--max-scan-bytes","1000","--max-scan-work","2"]));
         assert_eq!(rows[1]["rows"][0][0]["value"], "105");
         assert!(!run(&root,"SELECT amount FROM test.public.items",&[]).status.success());
+        for flag in ["--max-history-keys","--max-history-versions","--max-history-bytes"] {
+            let output = run(&root,"BEGIN; SELECT id FROM test.public.items; COMMIT",&["--history",flag,"0"]);
+            assert!(!output.status.success());
+            assert!(String::from_utf8(output.stderr).unwrap().contains("retained history"));
+        }
+        let versions = { let db=HistorySqlEngine::open(&root).unwrap(); db.history_usage().versions+1 };
+        let capacity=versions.to_string();
+        ok(run(&root,"BEGIN; UPDATE test.public.items SET amount=106 WHERE id=1; COMMIT",&["--history","--max-history-versions",&capacity]));
+        let failed=run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1; COMMIT",&["--history","--max-history-versions",&capacity]);
+        assert!(!failed.status.success());
+        assert!(String::from_utf8(failed.stderr).unwrap().contains("retained history versions"));
+        let rows=ok(run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-history-versions",&capacity]));
+        assert_eq!(rows[1]["rows"][0][0]["value"],"106");
     }
 }

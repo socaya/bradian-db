@@ -178,6 +178,15 @@ impl RowStore {
             .rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
+    /// Internal recovery traversal: the callback must not re-enter this store.
+    pub(crate) fn visit_snapshot<E>(
+        &self, mut visit: impl FnMut(u64, &[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<u64, E> {
+        let inner = self.inner.lock();
+        for (key, value) in &inner.rows { visit(inner.lsn, key, value)?; }
+        Ok(inner.lsn)
+    }
+
     /// Capture a bounded raw image and its LSN under one lock. Only the
     /// explicitly named metadata record is excluded; all other keys survive
     /// for the typed caller's integrity checks.

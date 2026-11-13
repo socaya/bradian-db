@@ -16,7 +16,7 @@ use std::path::Path;
 
 use parking_lot::Mutex;
 use thiserror::Error;
-use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError};
+use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage};
 
 use crate::row_store::{RowMutation, RowStore, StoreError};
 use crate::backup::BackupReceipt;
@@ -75,13 +75,14 @@ struct State {
     floor: u64,
     versions: BTreeMap<Vec<u8>, Vec<HistoricalVersion>>,
     pins: BTreeMap<u64, usize>,
+    usage: HistoryUsage,
 }
 
 fn state_stats(state: &State) -> DurableMvccStats {
     DurableMvccStats {
         latest_lsn: state.latest, retention_floor: state.floor,
         active_snapshots: state.pins.values().sum(),
-        persisted_versions: state.versions.values().map(Vec::len).sum(),
+        persisted_versions: state.usage.versions,
         known_keys: state.versions.len(),
     }
 }
@@ -89,6 +90,7 @@ fn state_stats(state: &State) -> DurableMvccStats {
 pub struct DurableMvccStore {
     rows: RowStore,
     state: Mutex<State>,
+    limits: HistoryLimits,
 }
 
 fn history_key(key: &[u8], lsn: u64) -> Vec<u8> {
@@ -125,12 +127,38 @@ fn version_value(value: &Option<Vec<u8>>) -> Vec<u8> {
     }
 }
 
-fn decode_version(raw: &[u8]) -> DurableMvccResult<Option<Vec<u8>>> {
+fn decode_version(raw: &[u8]) -> DurableMvccResult<Option<&[u8]>> {
     match raw {
         [0] => Ok(None),
-        [1, payload @ ..] if payload.len() <= MAX_USER_VALUE => Ok(Some(payload.to_vec())),
+        [1, payload @ ..] if payload.len() <= MAX_USER_VALUE => Ok(Some(payload)),
         _ => Err(DurableMvccError::Corruption("invalid versioned value tag/size".into())),
     }
+}
+
+fn key_cost(key: &[u8]) -> usize { key.len() + std::mem::size_of::<(Vec<u8>, Vec<HistoricalVersion>)>() }
+fn version_cost(key: &[u8], payload: Option<&[u8]>) -> usize {
+    let payload = payload.map_or(0, <[u8]>::len);
+    std::mem::size_of::<HistoricalVersion>() + payload + 14 + key.len() + 1 + payload
+        + std::mem::size_of::<(Vec<u8>, Vec<u8>)>()
+}
+fn admit_version(mut usage: HistoryUsage, limits: HistoryLimits, key: &[u8], payload: Option<&[u8]>, new_key: bool) -> Result<HistoryUsage, ResourceError> {
+    if new_key {
+        usage.keys = usage.keys.checked_add(1).ok_or(ResourceError::HistoryLimit { resource:"keys",limit:limits.max_keys })?;
+        usage.bytes = usage.bytes.checked_add(key_cost(key)).ok_or(ResourceError::HistoryLimit { resource:"bytes",limit:limits.max_bytes })?;
+    }
+    usage.versions = usage.versions.checked_add(1).ok_or(ResourceError::HistoryLimit { resource:"versions",limit:limits.max_versions })?;
+    usage.bytes = usage.bytes.checked_add(version_cost(key,payload)).ok_or(ResourceError::HistoryLimit { resource:"bytes",limit:limits.max_bytes })?;
+    limits.check(usage)?;
+    Ok(usage)
+}
+fn projected_usage<'a>(state: &State, limits: HistoryLimits, entries: impl IntoIterator<Item=(&'a [u8],Option<&'a [u8]>)>) -> Result<HistoryUsage, ResourceError> {
+    let mut usage = state.usage;
+    let mut new_keys = BTreeSet::new();
+    for (key,payload) in entries {
+        let new_key = !state.versions.contains_key(key) && new_keys.insert(key);
+        usage = admit_version(usage,limits,key,payload,new_key)?;
+    }
+    Ok(usage)
 }
 
 fn visible(versions: &[HistoricalVersion], horizon: u64) -> Option<Vec<u8>> {
@@ -167,6 +195,10 @@ impl DurableMvccStore {
     /// New-format directories are initialized with one atomic G3 WAL batch.
     /// Nonempty directories without the matching marker fail closed.
     pub fn open(path: impl AsRef<Path>) -> DurableMvccResult<Self> {
+        Self::open_with_limits(path, HistoryLimits::default())
+    }
+
+    pub fn open_with_limits(path: impl AsRef<Path>, limits: HistoryLimits) -> DurableMvccResult<Self> {
         let rows = RowStore::open(path)?;
         if rows.is_empty() && rows.last_lsn() == 0 {
             rows.commit_batch(None, &[
@@ -177,31 +209,32 @@ impl DurableMvccStore {
         if rows.get(FORMAT_KEY).as_deref() != Some(FORMAT) {
             return Err(DurableMvccError::Corruption("missing durable-history format marker".into()));
         }
-        let (latest, entries) = rows.snapshot_with_lsn();
+        let mut usage = HistoryUsage::default();
         let mut floor = None;
         let mut versions: BTreeMap<Vec<u8>, Vec<HistoricalVersion>> = BTreeMap::new();
-        for (key, value) in entries {
+        let latest = rows.visit_snapshot(|latest, key, value| -> DurableMvccResult<()> {
             if key == FORMAT_KEY {
                 if value != FORMAT {
                     return Err(DurableMvccError::Corruption("invalid format marker".into()));
                 }
-                continue;
+                return Ok(());
             }
             if key == FLOOR_KEY {
                 if value.len() != 8 {
                     return Err(DurableMvccError::Corruption("invalid retention floor".into()));
                 }
                 floor = Some(u64::from_be_bytes(value.try_into().unwrap()));
-                continue;
+                return Ok(());
             }
-            let (user_key, lsn) = parse_history_key(&key)?;
+            let (user_key, lsn) = parse_history_key(key)?;
             if lsn <= 1 || lsn > latest {
                 return Err(DurableMvccError::Corruption("history version LSN out of range".into()));
             }
-            versions.entry(user_key).or_default().push(HistoricalVersion {
-                lsn, value: decode_version(&value)?,
-            });
-        }
+            let payload = decode_version(value)?;
+            usage = admit_version(usage, limits, &user_key, payload, !versions.contains_key(&user_key))?;
+            versions.entry(user_key).or_default().push(HistoricalVersion { lsn, value: payload.map(<[u8]>::to_vec) });
+            Ok(())
+        })?;
         let floor = floor.ok_or_else(|| DurableMvccError::Corruption(
             "missing retention floor".into()
         ))?;
@@ -215,9 +248,18 @@ impl DurableMvccStore {
             }
         }
         Ok(Self {
-            rows,
-            state: Mutex::new(State { latest, floor, versions, pins: BTreeMap::new() }),
+            rows, limits,
+            state: Mutex::new(State { latest, floor, versions, pins: BTreeMap::new(), usage }),
         })
+    }
+
+    pub fn history_usage(&self) -> HistoryUsage { self.state.lock().usage }
+    pub fn history_limits(&self) -> HistoryLimits { self.limits }
+
+    pub(crate) fn check_additional_versions(&self, entries: &[(&[u8],Option<&[u8]>)]) -> DurableMvccResult<()> {
+        for (key,payload) in entries { validate_user(key,*payload)?; }
+        projected_usage(&self.state.lock(), self.limits, entries.iter().copied())?;
+        Ok(())
     }
 
     /// G10 captures the exact version-key RowStore, including the retention
@@ -387,30 +429,38 @@ impl DurableMvccStore {
             state.latest = lsn;
             state.floor = floor;
         }
-        let mut doomed = Vec::new();
-        for (key, chain) in &state.versions {
-            let first_after = chain.partition_point(|v| v.lsn <= floor);
-            let obsolete = first_after.saturating_sub(1);
-            for version in chain.iter().take(obsolete) {
-                doomed.push(history_key(key, version.lsn));
+        let mut removed = 0;
+        let mut cursor = Vec::new();
+        loop {
+            let mut doomed = Vec::new();
+            for (key, chain) in state.versions.range(cursor.clone()..) {
+                cursor = key.clone();
+                let obsolete = chain.partition_point(|v| v.lsn <= floor).saturating_sub(1);
+                for version in chain.iter().take(obsolete).take(GC_BATCH - doomed.len()) {
+                    doomed.push((key.clone(),version.lsn));
+                }
+                if doomed.len() == GC_BATCH { break; }
             }
-        }
-        let n = doomed.len();
-        for chunk in doomed.chunks(GC_BATCH) {
-            let deletes = chunk.iter().map(|key| RowMutation::Delete { key: key.clone() })
-                .collect::<Vec<_>>();
+            if doomed.is_empty() { break; }
+            let deletes = doomed.iter().map(|(key,lsn)| RowMutation::Delete { key: history_key(key,*lsn) }).collect::<Vec<_>>();
             let lsn = self.rows.commit_batch(Some(state.latest), &deletes)?;
             state.latest = lsn;
-            // Update only successfully deleted in-memory keys; interrupted
-            // deletion can be retried on next open/prune through same floor.
-            for key in chunk {
-                let (user, old_lsn) = parse_history_key(key)?;
-                if let Some(chain) = state.versions.get_mut(&user) {
-                    chain.retain(|version| version.lsn != old_lsn);
+            let mut counts = BTreeMap::<Vec<u8>,usize>::new();
+            for (key,_) in &doomed { *counts.entry(key.clone()).or_default() += 1; }
+            let State { versions, usage, .. } = &mut *state;
+            for (key,count) in counts {
+                let chain = versions.get_mut(&key).expect("pruned key exists");
+                for version in chain.drain(..count) {
+                    usage.versions -= 1;
+                    usage.bytes -= version_cost(&key,version.value.as_deref());
                 }
             }
+            removed += doomed.len();
         }
-        Ok(n)
+        // Do not keep large, now-unused version-vector reservations after
+        // refunding live-version charges. Allocator RSS reclamation is separate.
+        for chain in state.versions.values_mut() { chain.shrink_to_fit(); }
+        Ok(removed)
     }
 }
 
@@ -605,6 +655,7 @@ impl DurableMvccTransaction<'_> {
         }
         let version_lsn = state.latest.checked_add(1)
             .ok_or(DurableMvccError::CapacityExhausted)?;
+        let usage = projected_usage(&state, self.owner.limits, self.pending.iter().map(|(key,value)|(key.as_slice(),value.as_deref())))?;
         let mutations = self.pending.iter().map(|(key, value)| RowMutation::Put {
             key: history_key(key, version_lsn),
             value: version_value(value),
@@ -619,6 +670,7 @@ impl DurableMvccTransaction<'_> {
             });
         }
         state.latest = actual;
+        state.usage = usage;
         if let Some(count) = state.pins.get_mut(&self.start) {
             *count -= 1;
             if *count == 0 { state.pins.remove(&self.start); }
@@ -633,6 +685,22 @@ impl Drop for DurableMvccTransaction<'_> {
         if !self.released {
             self.owner.unpin(self.start);
             self.released = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn retained_usage_overflow_is_a_resource_error_not_wrapped_admission() {
+        let limits=HistoryLimits { max_keys:usize::MAX,max_versions:usize::MAX,max_bytes:usize::MAX };
+        for (usage,new_key,resource) in [
+            (HistoryUsage { keys:usize::MAX,versions:0,bytes:0 },true,"keys"),
+            (HistoryUsage { keys:1,versions:usize::MAX,bytes:0 },false,"versions"),
+            (HistoryUsage { keys:1,versions:0,bytes:usize::MAX },false,"bytes"),
+        ] {
+            assert!(matches!(admit_version(usage,limits,b"a",Some(b"v"),new_key),Err(ResourceError::HistoryLimit { resource:actual,.. }) if actual==resource));
         }
     }
 }

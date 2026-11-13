@@ -7,6 +7,7 @@
 //! The source remains untouched in logical content; catalog G10 backup can
 //! publish a source checkpoint. Live/online migration is unsupported.
 
+use crate::runtime_limits::HistoryLimits;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -106,6 +107,12 @@ pub fn migrate_shared_to_history(
     source_root: impl AsRef<Path>,
     destination_root: impl AsRef<Path>,
 ) -> HistoryMigrationResult<HistoryMigrationReport> {
+    migrate_shared_to_history_with_limits(source_root, destination_root, HistoryLimits::default())
+}
+
+pub fn migrate_shared_to_history_with_limits(
+    source_root: impl AsRef<Path>, destination_root: impl AsRef<Path>, limits: HistoryLimits,
+) -> HistoryMigrationResult<HistoryMigrationReport> {
     let source = fs::canonicalize(source_root.as_ref())?;
     if !source.is_dir() || !source.join("catalog").is_dir()
         || !source.join("shared-domain").is_dir()
@@ -169,7 +176,7 @@ pub fn migrate_shared_to_history(
     fs::remove_dir_all(&catalog_archive)?;
 
     let history_path = staged.join("history-domain");
-    let history = DurableMvccStore::open(&history_path)?;
+    let history = DurableMvccStore::open_with_limits(&history_path, limits)?;
     // Register schemas as durable, immutable user-key versions before rows.
     for chunk in registered.chunks(BATCH_ROWS) {
         let mut registration = history.begin();
@@ -201,7 +208,7 @@ pub fn migrate_shared_to_history(
                 "destination catalog LSN or table definitions differ".into()
             ));
         }
-        let verified = DurableTypedStore::open(&history_path, &catalog_tables)?;
+        let verified = DurableTypedStore::open_with_history_limits(&history_path, &catalog_tables, limits)?;
         if verified.last_lsn() != destination_lsn
             || verified.active_tables().len() != registered.len()
         {

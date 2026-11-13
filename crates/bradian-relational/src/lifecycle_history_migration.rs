@@ -7,13 +7,14 @@
 //! coordinator's normal pending-intent reconciliation.
 //! Historical versions before cutover cannot be reconstructed from G18.
 
+use crate::runtime_limits::HistoryLimits;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::database_backup::{restore_database, DatabaseBackupError};
-use crate::history_migration::{migrate_shared_to_history, HistoryMigrationError, HistoryMigrationReport};
+use crate::history_migration::{migrate_shared_to_history_with_limits, HistoryMigrationError, HistoryMigrationReport};
 use crate::lifecycle::{CatalogLifecycle, LifecycleError};
 
 #[derive(Debug, Error)]
@@ -84,6 +85,12 @@ pub fn migrate_lifecycle_to_history(
     source_root: impl AsRef<Path>,
     destination_root: impl AsRef<Path>,
 ) -> LifecycleHistoryMigrationResult<LifecycleHistoryMigrationReport> {
+    migrate_lifecycle_to_history_with_limits(source_root, destination_root, HistoryLimits::default())
+}
+
+pub fn migrate_lifecycle_to_history_with_limits(
+    source_root: impl AsRef<Path>, destination_root: impl AsRef<Path>, limits: HistoryLimits,
+) -> LifecycleHistoryMigrationResult<LifecycleHistoryMigrationReport> {
     let source = fs::canonicalize(source_root.as_ref())?;
     if !source.is_dir() || !source.join("catalog").is_dir()
         || !source.join("shared-domain").is_dir()
@@ -128,7 +135,7 @@ pub fn migrate_lifecycle_to_history(
 
     // The unchanged G23 importer retains both recovered source locks,
     // verifies every row and schema, and publishes only a new history root.
-    let imported = migrate_shared_to_history(&recovered, &target)?;
+    let imported = migrate_shared_to_history_with_limits(&recovered, &target, limits)?;
     // The G23 importer independently verifies all typed rows and table pins
     // before publication. The G18 identity check above is performed first.
 

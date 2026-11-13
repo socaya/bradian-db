@@ -1,4 +1,4 @@
-//! Per-operation query-buffer/work limits; not a resident-store memory reservation.
+//! Query-buffer/work and retained-history admission limits; not a total RSS reservation.
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use thiserror::Error;
 
@@ -14,6 +14,8 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResourceError {
+    #[error("retained history {resource} limit exceeded (limit {limit})")]
+    HistoryLimit { resource: &'static str, limit: usize },
     #[error("query cancelled")]
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
@@ -86,5 +88,26 @@ mod tests {
         assert!(matches!(meter.row(1), Err(ResourceError::Limit { resource: "bytes", .. })));
         meter.work = usize::MAX;
         assert!(matches!(meter.step(), Err(ResourceError::Limit { resource: "work", .. })));
+    }
+}
+
+/// Per-domain retained-state estimate; not a total process RSS reservation.
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryLimits {
+    pub max_keys: usize,
+    pub max_versions: usize,
+    pub max_bytes: usize,
+}
+impl Default for HistoryLimits {
+    fn default() -> Self { Self { max_keys: 1000000, max_versions: 1000000, max_bytes: 256 * 1024 * 1024 } }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryUsage { pub keys: usize, pub versions: usize, pub bytes: usize }
+impl HistoryLimits {
+    pub(crate) fn check(&self, usage: HistoryUsage) -> Result<(), ResourceError> {
+        for (resource, actual, limit) in [("keys",usage.keys,self.max_keys),("versions",usage.versions,self.max_versions),("bytes",usage.bytes,self.max_bytes)] {
+            if actual > limit { return Err(ResourceError::HistoryLimit { resource,limit }); }
+        }
+        Ok(())
     }
 }
