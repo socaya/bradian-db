@@ -223,10 +223,34 @@ impl DiskBTree {
     /// Inclusive lower bound, exclusive upper bound. Returns ordered row
     /// pointers without loading the complete B+tree into process memory.
     pub fn range(&mut self, start: &[u8], end: &[u8]) -> IndexResult<Vec<(Vec<u8>, RowPointer)>> {
-        if start >= end || self.root == 0 { return Ok(Vec::new()); }
+        let mut found = Vec::new();
+        self.visit_range(start,end,|key,pointer| { found.push((key.to_vec(),pointer)); Ok(()) })?;
+        Ok(found)
+    }
+
+    /// Reconcile leaves incrementally; no second whole-index result vector.
+    pub(crate) fn verify_entries(&mut self, expected: &[(Vec<u8>, RowPointer)]) -> IndexResult<()> {
+        if self.entries != expected.len() as u64 {
+            return Err(IndexError::Corruption("index entry count differs from snapshot"));
+        }
+        let mut position = 0;
+        self.visit_range(&[], &[0xff; MAX_KEY + 1], |key,pointer| {
+            if expected.get(position).is_none_or(|(wanted,ptr)| wanted.as_slice() != key || *ptr != pointer) {
+                return Err(IndexError::Corruption("index leaf sequence differs from snapshot"));
+            }
+            position += 1;
+            Ok(())
+        })?;
+        if position != expected.len() {
+            return Err(IndexError::Corruption("index leaf sequence is incomplete"));
+        }
+        Ok(())
+    }
+
+    fn visit_range(&mut self, start: &[u8], end: &[u8], mut visit: impl FnMut(&[u8],RowPointer) -> IndexResult<()>) -> IndexResult<()> {
+        if start >= end || self.root == 0 { return Ok(()); }
         let leaf = self.seek_leaf(start)?;
         let mut current_id = leaf.page_id;
-        let mut found = Vec::new();
         let mut visited = 0_u64;
         let mut last_key: Option<Vec<u8>> = None;
         loop {
@@ -241,8 +265,8 @@ impl DiskBTree {
                     return Err(IndexError::Corruption("out-of-order leaf chain"));
                 }
                 last_key = Some(key.clone());
-                if key.as_slice() >= end { return Ok(found); }
-                if key.as_slice() >= start { found.push((key, pointer)); }
+                if key.as_slice() >= end { return Ok(()); }
+                if key.as_slice() >= start { visit(&key, pointer)?; }
             }
             if next == 0 { break; }
             if next <= current_id || next > self.pages {
@@ -250,7 +274,7 @@ impl DiskBTree {
             }
             current_id = next;
         }
-        Ok(found)
+        Ok(())
     }
 
     fn seek_leaf(&mut self, key: &[u8]) -> IndexResult<Page> {
@@ -278,6 +302,9 @@ fn read_leaf(payload: &[u8]) -> IndexResult<(LeafEntries, u64)> {
     let count = u16::from_le_bytes(payload[1..3].try_into().unwrap()) as usize;
     let next = u64::from_le_bytes(payload[3..11].try_into().unwrap());
     if count == 0 { return Err(IndexError::Corruption("empty leaf node")); }
+    if count > (payload.len() - NODE_HEADER) / 13 {
+        return Err(IndexError::Corruption("leaf count exceeds physical payload"));
+    }
     let mut rows = Vec::with_capacity(count);
     let mut pos = NODE_HEADER;
     for _ in 0..count {

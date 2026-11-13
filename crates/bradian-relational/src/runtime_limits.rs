@@ -14,6 +14,8 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResourceError {
+    #[error("index recovery {resource} limit exceeded (limit {limit})")]
+    IndexLimit { resource: &'static str, limit: usize },
     #[error("row store {resource} limit exceeded (limit {limit})")]
     RowStoreLimit { resource: &'static str, limit: usize },
     #[error("retained history {resource} limit exceeded (limit {limit})")]
@@ -156,4 +158,11 @@ impl RowStoreLimits {
         }
         Ok(())
     }
+}
+
+/// Retained checkpoint key/pointer entries used by derived-index audit/rebuild.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexLimits { pub max_entries: usize, pub max_bytes: usize }
+impl Default for IndexLimits {
+    fn default() -> Self { Self { max_entries: 2000000, max_bytes: 256 * 1024 * 1024 } }
 }

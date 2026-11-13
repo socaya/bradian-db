@@ -76,6 +76,8 @@ the incomplete staging directory follows the existing cleanup/fresh-destination
 contract. Backup comparison visits borrowed recovered rows, avoiding another whole
 map copy. Archive format and receipts are unchanged.
 
+[Index recovery controls](INDEX_RECOVERY_LIMITS.md) now separately admit retained key/pointer entries and remove recovery value-map/second-leaf-list copies. Native open_with_recovery_limits and restore_backup_with_recovery_limits accept both backing and recovery policies; ordinary backing APIs retain default recovery policy.
+
 ## Remaining scope
 
 These are accounted map limits. Frame decoding (up to the existing 1 MiB bound), page

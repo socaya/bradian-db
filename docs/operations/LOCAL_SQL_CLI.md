@@ -83,6 +83,8 @@ In --history mode, --max-history-keys, --max-history-versions and --max-history-
 
 All modes also use default [backing RowStore limits](ROW_STORE_LIMITS.md) during checkpoint/replay and writes. Query/history/staging flags do not override backing-map policy; explicit backing policy is currently a native RowStore API.
 
+[Index recovery entry limits](INDEX_RECOVERY_LIMITS.md) also apply by default. Explicit recovery policy is currently a native API.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

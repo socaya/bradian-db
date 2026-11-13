@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use crc32fast::Hasher;
 use thiserror::Error;
 
-use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage};
+use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage, IndexLimits};
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
@@ -107,6 +107,7 @@ struct Inner {
 pub struct RowStore {
     root: PathBuf,
     limits: RowStoreLimits,
+    index_limits: IndexLimits,
     inner: Mutex<Inner>,
     // Drop after the WAL handle so the exclusive ownership remains in force
     // throughout teardown. The kernel releases the lock automatically.
@@ -119,6 +120,10 @@ impl RowStore {
     }
 
     pub fn open_with_limits(root: impl AsRef<Path>, limits: RowStoreLimits) -> StoreResult<Self> {
+        Self::open_with_recovery_limits(root, limits, IndexLimits::default())
+    }
+
+    pub fn open_with_recovery_limits(root: impl AsRef<Path>, limits: RowStoreLimits, index_limits: IndexLimits) -> StoreResult<Self> {
         let root = root.as_ref();
         fs::create_dir_all(root)?;
         let lock = OpenOptions::new()
@@ -148,7 +153,7 @@ impl RowStore {
         // publication. Rebuild only an absent index from verified pages.
         if snapshot_path(root, checkpoint_lsn).exists() {
             if !index_recovery::index_path(root, checkpoint_lsn).exists() {
-                index_recovery::rebuild_missing(root, checkpoint_lsn)?;
+                index_recovery::rebuild_missing_with_limits(root, checkpoint_lsn, index_limits)?;
             }
             if let Some(manifest) = checkpoint_manifest::load(root)? {
                 checkpoint_manifest::check_index(root, manifest)?;
@@ -164,6 +169,7 @@ impl RowStore {
         Ok(Self {
             root: root.to_owned(),
             limits,
+            index_limits,
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
@@ -271,7 +277,7 @@ impl RowStore {
             last_lsn: inner.lsn,
             rows: inner.rows.len() as u64,
         };
-        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows, self.limits)
+        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows, self.limits, self.index_limits)
     }
 
     /// Restore a verified physical database backup into an absent directory.
@@ -286,7 +292,13 @@ impl RowStore {
     pub fn restore_backup_with_limits(
         backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: RowStoreLimits,
     ) -> StoreResult<BackupReceipt> {
-        backup::restore_backup_with_limits(backup.as_ref(), destination.as_ref(), limits)
+        Self::restore_backup_with_recovery_limits(backup, destination, limits, IndexLimits::default())
+    }
+
+    pub fn restore_backup_with_recovery_limits(
+        backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: RowStoreLimits, index_limits: IndexLimits,
+    ) -> StoreResult<BackupReceipt> {
+        backup::restore_backup_with_recovery_limits(backup.as_ref(), destination.as_ref(), limits, index_limits)
     }
 
     /// Sync exactly one replace/insert operation before publishing it.
@@ -492,23 +504,31 @@ impl RowStore {
     /// Verify every checkpoint index pointer against immutable row pages.
     /// Full verification is intentionally an explicit O(N log N) operation.
     pub fn verify_checkpoint_index(&self) -> StoreResult<IndexRecovery> {
+        self.verify_checkpoint_index_with_limits(self.index_limits)
+    }
+
+    pub fn verify_checkpoint_index_with_limits(&self, limits: IndexLimits) -> StoreResult<IndexRecovery> {
         let inner = self.inner.lock();
         if !snapshot_path(&self.root, inner.checkpoint_lsn).exists() {
             return Err(StoreError::Corruption("no published checkpoint to verify".into()));
         }
-        index_recovery::verify(&self.root, inner.checkpoint_lsn)
+        index_recovery::verify_with_limits(&self.root, inner.checkpoint_lsn, limits)
     }
 
     /// Reconstruct a missing derived index from the authoritative checkpoint.
     /// Existing published indexes, even damaged ones, are never overwritten.
     pub fn rebuild_missing_checkpoint_index(&self) -> StoreResult<IndexRecovery> {
+        self.rebuild_missing_checkpoint_index_with_limits(self.index_limits)
+    }
+
+    pub fn rebuild_missing_checkpoint_index_with_limits(&self, limits: IndexLimits) -> StoreResult<IndexRecovery> {
         let mut inner = self.inner.lock();
         if !snapshot_path(&self.root, inner.checkpoint_lsn).exists() {
             return Err(StoreError::Corruption("no published checkpoint to rebuild".into()));
         }
         inner.index = None;
         inner.snapshot_pages = None;
-        index_recovery::rebuild_missing(&self.root, inner.checkpoint_lsn)
+        index_recovery::rebuild_missing_with_limits(&self.root, inner.checkpoint_lsn, limits)
     }
 
     /// Publish a complete checkpoint and then truncate the WAL.
@@ -532,7 +552,7 @@ impl RowStore {
                 None => {
                     // Upgrade a verified pre-manifest checkpoint *in place*:
                     // no payload bytes or WAL commits are changed.
-                    let report = index_recovery::verify(&self.root, inner.lsn)?;
+                    let report = index_recovery::verify_with_limits(&self.root, inner.lsn, self.index_limits)?;
                     let snapshot_length = fs::metadata(snapshot_path(&self.root, inner.lsn))?.len();
                     let index_length = fs::metadata(index_recovery::index_path(&self.root, inner.lsn))?.len();
                     if snapshot_length % PAGE_SIZE as u64 != 0 || index_length % PAGE_SIZE as u64 != 0 {

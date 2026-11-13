@@ -5,16 +5,16 @@
 //! be recovered by building a new immutable generation using verified row
 //! pointers. An existing index is never overwritten implicitly.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
 use crate::btree::{DiskBTree, LeafEntries, RowPointer};
 use crate::page::{Page, PageKind, PAGE_SIZE};
+use crate::runtime_limits::{IndexLimits, ResourceError};
 use crate::row_store::{StoreError, StoreResult};
 
-type VerifiedSnapshot = (LeafEntries, BTreeMap<Vec<u8>, Vec<u8>>, u64);
+type VerifiedSnapshot = (LeafEntries, u64);
 
 const ROW_HEADER: usize = 6;
 const META_LENGTH: usize = 24;
@@ -38,12 +38,20 @@ fn snapshot_path(root: &Path, lsn: u64) -> std::path::PathBuf {
     root.join(format!("snapshot-{lsn}.brp"))
 }
 
+fn admit_entry(entries: usize, bytes: usize, key_len: usize, limits: IndexLimits) -> Result<usize, ResourceError> {
+    entries.checked_add(1).filter(|n| *n <= limits.max_entries)
+        .ok_or(ResourceError::IndexLimit { resource: "entries", limit: limits.max_entries })?;
+    bytes.checked_add(key_len + std::mem::size_of::<(Vec<u8>, RowPointer)>())
+        .filter(|n| *n <= limits.max_bytes)
+        .ok_or(ResourceError::IndexLimit { resource: "bytes", limit: limits.max_bytes })
+}
+
 /// Read all physical row pointers, strictly validating the authoritative page
-/// stream first. The returned key/value map is used for consistency checks;
+/// stream first. Values are validated in their page and never cloned into a map;
 /// nothing from the existing derived index is trusted.
 fn scan_snapshot(
     root: &Path,
-    lsn: u64,
+    lsn: u64, limits: IndexLimits,
 ) -> StoreResult<VerifiedSnapshot> {
     let mut file = File::open(snapshot_path(root, lsn))?;
     let length = file.metadata()?.len();
@@ -69,7 +77,7 @@ fn scan_snapshot(
     }
 
     let mut keys = Vec::new();
-    let mut records = BTreeMap::new();
+    let mut retained_bytes = 0;
     let mut last: Option<Vec<u8>> = None;
     for page_id in 1..=data_pages {
         file.read_exact(&mut bytes)?;
@@ -99,9 +107,8 @@ fn scan_snapshot(
             }
             let key_start = offset + ROW_HEADER;
             let key_end = key_start + key_len;
-            let key = page.payload[key_start..key_end].to_vec();
-            let value = page.payload[key_end..offset + record_len].to_vec();
-            if last.as_ref().is_some_and(|prev| prev >= &key) {
+            let key = &page.payload[key_start..key_end];
+            if last.as_ref().is_some_and(|prev| prev.as_slice() >= key) {
                 return Err(StoreError::Corruption("snapshot row order is not strictly increasing".into()));
             }
             let pointer = RowPointer {
@@ -109,23 +116,27 @@ fn scan_snapshot(
                 offset: u16::try_from(offset)
                     .map_err(|_| StoreError::Corruption("row pointer offset overflow".into()))?,
             };
-            keys.push((key.clone(), pointer));
-            records.insert(key.clone(), value);
-            last = Some(key);
+            retained_bytes = admit_entry(keys.len(),retained_bytes,key.len(),limits)?;
+            keys.push((key.to_vec(), pointer));
+            last = Some(key.to_vec());
             offset += record_len;
         }
     }
     if keys.len() as u64 != expected_rows {
         return Err(StoreError::Corruption("snapshot row count differs from metadata".into()));
     }
-    Ok((keys, records, data_pages))
+    Ok((keys, data_pages))
 }
 
 /// Verify an existing index against every row pointer from its authoritative
 /// checkpoint. This is O(N log N) and intended for an explicit integrity audit,
 /// not every normal query.
 pub fn verify(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
-    let (entries, _rows, pages) = scan_snapshot(root, lsn)?;
+    verify_with_limits(root, lsn, IndexLimits::default())
+}
+
+pub fn verify_with_limits(root: &Path, lsn: u64, limits: IndexLimits) -> StoreResult<IndexRecovery> {
+    let (entries, pages) = scan_snapshot(root, lsn, limits)?;
     let mut index = DiskBTree::open(&index_path(root, lsn), lsn)?;
     if index.len() != entries.len() as u64 {
         return Err(StoreError::Corruption("derived index entry count disagrees with snapshot".into()));
@@ -133,10 +144,7 @@ pub fn verify(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
     // A 513-byte all-FF bound sorts after every valid key (max 512 bytes).
     // Reconcile the complete linked-leaf key sequence, not only individual
     // point searches; this detects extra, absent and reordered leaf entries.
-    let all = index.range(&[], &[0xff; MAX_KEY + 1])?;
-    if all != entries {
-        return Err(StoreError::Corruption("derived index leaf sequence differs from snapshot".into()));
-    }
+    index.verify_entries(&entries)?;
     for (key, pointer) in &entries {
         if index.get(key)? != Some(*pointer) {
             return Err(StoreError::Corruption("derived index pointer disagrees with snapshot".into()));
@@ -151,11 +159,11 @@ pub fn verify(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
 /// Rebuild an *absent* index, using only the published snapshot as authority.
 /// A corrupt existing index must be addressed by an explicit repair procedure;
 /// silently overwriting it would conceal an integrity failure.
-pub(crate) fn rebuild_missing(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
+pub(crate) fn rebuild_missing_with_limits(root: &Path, lsn: u64, limits: IndexLimits) -> StoreResult<IndexRecovery> {
     if index_path(root, lsn).exists() {
-        return verify(root, lsn);
+        return verify_with_limits(root, lsn, limits);
     }
-    let (entries, _rows, pages) = scan_snapshot(root, lsn)?;
+    let (entries, pages) = scan_snapshot(root, lsn, limits)?;
     let tmp = root.join(format!("index-{lsn}.rebuild.tmp"));
     if tmp.exists() {
         fs::remove_file(&tmp)?;
@@ -167,9 +175,7 @@ pub(crate) fn rebuild_missing(root: &Path, lsn: u64) -> StoreResult<IndexRecover
         if generated.len() != entries.len() as u64 {
             return Err(StoreError::Corruption("rebuilt index count mismatch".into()));
         }
-        if generated.range(&[], &[0xff; MAX_KEY + 1])? != entries {
-            return Err(StoreError::Corruption("rebuilt index leaves do not match snapshot".into()));
-        }
+        generated.verify_entries(&entries)?;
         for (key, pointer) in &entries {
             if generated.get(key)? != Some(*pointer) {
                 return Err(StoreError::Corruption("rebuilt index pointer mismatch".into()));
@@ -197,4 +203,15 @@ fn sync_directory(root: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn sync_directory(_root: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn pointer_admission_overflow_is_a_resource_error() {
+        let limits=IndexLimits { max_entries:usize::MAX,max_bytes:usize::MAX };
+        assert!(matches!(admit_entry(usize::MAX,0,1,limits),Err(ResourceError::IndexLimit { resource:"entries",.. })));
+        assert!(matches!(admit_entry(0,usize::MAX,1,limits),Err(ResourceError::IndexLimit { resource:"bytes",.. })));
+    }
 }

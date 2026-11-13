@@ -8,7 +8,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
-| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query/history/staging and backing live/delta map admission are bounded; metadata/index/checkpoint workspace, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
+| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query/history/staging, backing maps and retained index recovery entries are bounded; metadata/builder/checkpoint workspace, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
 | `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL is not remote SQL; legacy analytical commands retain their existing behavior |
 | `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
 | `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
@@ -39,12 +39,14 @@ HistoryLimits and HistoryUsage in runtime_limits expose process-local retained-h
 
 RowStoreLimits/RowStoreUsage add independent live-row and delta map admission to open, replay and writes. Backup inherits source policy; native restore accepts explicit policy. Default higher-level SQL/history opens use backing defaults. No format or dependency changed; see [ADR 0045](../adr/0045-backing-row-map-admission.md).
 
+IndexLimits separately admits retained checkpoint key/pointer entries for audit/rebuild. Recovery validates values without cloning them, and compares leaves incrementally. Explicit native open/restore and backup verification carry selected recovery policy. No format or dependency changed; see [ADR 0046](../adr/0046-bounded-index-recovery-entries.md).
+
 ## Architecture decisions still requiring prototypes
 
 | Decision | Evidence required before adopting/fixing a format | Owning gate |
 |---|---|---|
 | Mutable pages/allocator and dirty buffer writes | WAL/page-LSN ordering, split/reuse crash matrix and failed sync/rename/disk-full tests | 1 |
-| Runtime quotas/cancellation | Query/history/staging and backing-map limits are implemented; metadata/index/checkpoint workspace, catalog/aggregate transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
+| Runtime quotas/cancellation | Query/history/staging, backing-map and index recovery entry limits are implemented; metadata/builder/checkpoint workspace, catalog/aggregate transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
 | Secure local identity and SQL policy context | ACL/root-owner/path threat analysis, every data path checked, revocation and diagnostics tests | 1–2 |
 | Global transaction order/safe-time | Deterministic adversarial multi-participant schedules, clock uncertainty and coordinator recovery | 5 |
 | Cluster node identity and consensus | Authenticated enrollment/fencing, quorum-loss and partition experiments | 4 |
