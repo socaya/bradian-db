@@ -1,4 +1,4 @@
-//! G32 opt-in version-tagged row payloads for a future historical schema engine.
+//! G32 version-tagged row payloads, integrated with immutable-schema SQL by G35.
 //!
 //! The existing BRRW v1 payload remains unchanged. A BRVE envelope binds a
 //! physical row to one explicit schema epoch and its immutable definition.
@@ -33,8 +33,9 @@ pub struct DecodedEpochRow {
     pub values: Vec<Value>,
 }
 
-/// Explicit registry: epoch IDs are WAL commit positions supplied by a
-/// validated future DDL coordinator, never inferred from payload bytes.
+/// Explicit registry: epoch IDs are validated schema-registration WAL positions,
+/// never inferred from payload bytes. Future schema activation must supply its
+/// own coordinated immutable schema epochs.
 #[derive(Default)]
 pub struct EpochSchemas {
     tables: BTreeMap<(TableId, u64), Table>,

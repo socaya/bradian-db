@@ -192,6 +192,16 @@ impl HistorySqlEngine {
         self.domain.ddl_readiness_records()
     }
 
+    /// Opt in to G35 BRVE writes in subsequently started transactions.
+    /// Existing data and schemas are not rewritten; this is not ALTER TABLE.
+    pub fn enable_epoch_row_writes(&self) -> SqlResult<u64> {
+        Ok(self.domain.enable_epoch_row_writes()?)
+    }
+
+    pub fn epoch_row_writes_enabled(&self) -> SqlResult<bool> {
+        Ok(self.domain.epoch_row_writes_enabled()?)
+    }
+
     pub fn checkpoint(&self) -> SqlResult<u64> { Ok(self.domain.checkpoint()?) }
 
     /// Create a separate verified G24 archive while both source storage locks

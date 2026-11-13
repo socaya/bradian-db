@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{Table, TableId};
+use crate::epoch_row::{EpochRowError, EpochSchemas};
 use crate::durable_mvcc::{DurableMvccError, DurableMvccStats, DurableMvccStore, DurableMvccTransaction};
 use crate::typed_table::{
     decode_row, encode_key, encode_row, validate_table, TableError, Value,
@@ -43,6 +44,30 @@ pub struct DdlCoordinationRecord {
     pub proposal_crc32: u32,
 }
 const INLINE_CAPACITY: usize = 3545;
+const ENCODING_KEY: &[u8] = b"\0bradian-row-encoding-v1";
+const EPOCH_ENCODING: &[u8] = b"BRADIAN-EPOCH-ROWS-V1";
+
+fn is_metadata_key(key: &[u8]) -> bool {
+    key == ENCODING_KEY || key.starts_with(SCHEMA_PREFIX)
+        || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX)
+        || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX)
+}
+
+fn decode_physical_row(
+    definition: &Definition, epochs: &EpochSchemas, bytes: &[u8], enabled: bool,
+) -> Result<Vec<Value>, DomainError> {
+    if !bytes.starts_with(b"BRVE") {
+        return Ok(decode_row(&definition.table, bytes)?);
+    }
+    if !enabled {
+        return Err(DomainError::Corruption("versioned row predates epoch encoding activation".into()));
+    }
+    let decoded = epochs.decode(bytes).map_err(|err| DomainError::Corruption(err.to_string()))?;
+    if decoded.table_id != definition.table.id {
+        return Err(DomainError::Corruption("row envelope belongs to a different table".into()));
+    }
+    Ok(decoded.values)
+}
 
 #[derive(Clone)]
 struct Definition {
@@ -74,6 +99,7 @@ pub struct DurableTypedStore {
     store: DurableMvccStore,
     tables: BTreeMap<TableId, Definition>,
     schema_epochs: BTreeMap<TableId, u64>,
+    epoch_schemas: EpochSchemas,
     proposals: BTreeMap<TableId, (Table, u64)>,
     aborted: BTreeMap<TableId, u64>,
     coordination: BTreeMap<TableId, (DdlCoordinationRecord, u64)>,
@@ -120,21 +146,6 @@ impl DurableTypedStore {
                 "shared MVCC domain has no registered catalog table schemas".into(),
             ));
         }
-        for (key, bytes) in &records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
-            let table_id = table_id_from_row_key(key)?;
-            let schema = tables.get(&table_id).ok_or_else(|| {
-                DomainError::Corruption(format!(
-                    "physical row refers to unregistered table {}", table_id.0
-                ))
-            })?;
-            let row = decode_row(&schema.table, bytes)?;
-            if key_from_row(schema, &row)? != *key {
-                return Err(DomainError::Corruption(
-                    "stored row key differs from decoded primary key".into(),
-                ));
-            }
-        }
         // Validate EVERY retained version, not just the latest visible rows.
         // A malformed older payload or a tombstoned unknown-table key must
         // not become reachable through AS OF after the database is opened.
@@ -163,6 +174,21 @@ impl DurableTypedStore {
                 return Err(DomainError::Corruption(format!(
                     "historical schema pin {} was rewritten", id.0
                 )));
+            }
+        }
+        let mut epoch_schemas = EpochSchemas::default();
+        for (id, epoch) in &registered_at {
+            epoch_schemas.register(*epoch, tables[id].table.clone())
+                .map_err(|err| DomainError::Corruption(err.to_string()))?;
+        }
+        let mut encoding_lsn = None;
+        for (key, lsn, value) in &versions {
+            if key.as_slice() != ENCODING_KEY { continue; }
+            if value.as_deref() != Some(EPOCH_ENCODING)
+                || registered_at.values().any(|epoch| *lsn <= *epoch)
+                || encoding_lsn.replace(*lsn).is_some()
+            {
+                return Err(DomainError::Corruption("epoch row encoding decision was deleted, rewritten or is invalid".into()));
             }
         }
         let mut proposals = BTreeMap::new();
@@ -279,7 +305,7 @@ impl DurableTypedStore {
             }
         }
         for (key, lsn, value) in &versions {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
+            if is_metadata_key(key) { continue; }
             let id = table_id_from_row_key(key)?;
             let def = tables.get(&id).ok_or_else(|| DomainError::Corruption(
                 format!("historical row refers to unregistered table {}", id.0)
@@ -290,7 +316,8 @@ impl DurableTypedStore {
                 )));
             }
             if let Some(bytes) = value {
-                let row = decode_row(&def.table, bytes)?;
+                let row = decode_physical_row(def, &epoch_schemas, bytes,
+                    encoding_lsn.is_some_and(|activated| *lsn > activated))?;
                 if key_from_row(def, &row)? != *key {
                     return Err(DomainError::Corruption(
                         "historical row key differs from decoded primary key".into()
@@ -298,7 +325,7 @@ impl DurableTypedStore {
                 }
             }
         }
-        Ok(Self { store, tables, schema_epochs: registered_at, proposals, aborted, coordination, readiness })
+        Ok(Self { store, tables, schema_epochs: registered_at, epoch_schemas, proposals, aborted, coordination, readiness })
     }
 
     pub fn active_tables(&self) -> Vec<TableId> {
@@ -483,6 +510,28 @@ impl DurableTypedStore {
         self.readiness.values().cloned().collect()
     }
 
+    /// Commit a one-way encoding capability decision. Existing rows stay unchanged.
+    /// Readers from before G35 reject the new metadata namespace on reopen.
+    pub fn enable_epoch_row_writes(&self) -> Result<u64, DomainError> {
+        let mut tx = self.store.begin();
+        tx.insert(ENCODING_KEY, EPOCH_ENCODING).map_err(map_mvcc)?;
+        tx.commit().map_err(map_mvcc)
+    }
+
+    /// Status at the current committed horizon, including a transition made
+    /// after this handle opened. The decision is not an active schema revision.
+    pub fn epoch_row_writes_enabled(&self) -> Result<bool, DomainError> {
+        self.encoding_enabled_at(self.last_lsn())
+    }
+
+    fn encoding_enabled_at(&self, lsn: u64) -> Result<bool, DomainError> {
+        match self.store.read_as_of(ENCODING_KEY, lsn).map_err(map_mvcc)? {
+            None => Ok(false),
+            Some(value) if value == EPOCH_ENCODING => Ok(true),
+            Some(_) => Err(DomainError::Corruption("unsupported epoch row encoding decision".into())),
+        }
+    }
+
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
     pub fn retention_floor(&self) -> u64 { self.store.retention_floor() }
 
@@ -524,7 +573,8 @@ impl DurableTypedStore {
         let key = encode_key(&def.table, &def.pk_positions, pk)?;
         self.store.read_as_of(&key, lsn).map_err(map_mvcc)?
             .map(|bytes| {
-                let row = decode_row(&def.table, &bytes)?;
+                let row = decode_physical_row(def, &self.epoch_schemas, &bytes,
+                    self.encoding_enabled_at(lsn)?)?;
                 if key_from_row(def, &row)? != key {
                     return Err(DomainError::Corruption("historical row primary key differs".into()));
                 }
@@ -538,12 +588,13 @@ impl DurableTypedStore {
         self.check_schema_as_of(id, lsn)?;
         let def = self.tables.get(&id).ok_or(DomainError::UnknownTable(id.0))?;
         let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
+        let encoding_enabled = self.encoding_enabled_at(lsn)?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
+            if is_metadata_key(&key) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
-            let row = decode_row(&def.table, &bytes)?;
+            let row = decode_physical_row(def, &self.epoch_schemas, &bytes, encoding_enabled)?;
             if key_from_row(def, &row)? != key {
                 return Err(DomainError::Corruption("historical scan key differs".into()));
             }
@@ -584,7 +635,8 @@ impl DurableTypedTransaction<'_> {
         let def = self.definition(id)?;
         let physical_key = encode_key(&def.table, &def.pk_positions, key)?;
         self.inner.get(&physical_key).map_err(map_mvcc)?.map(|bytes| {
-            let row = decode_row(&def.table, &bytes)?;
+            let row = decode_physical_row(def, &self.owner.epoch_schemas, &bytes,
+                self.epoch_encoding_enabled()?)?;
             if key_from_row(def, &row)? != physical_key {
                 return Err(DomainError::Corruption(
                     "MVCC row does not match its physical primary key".into(),
@@ -599,15 +651,16 @@ impl DurableTypedTransaction<'_> {
             return Err(DomainError::UnknownTable(id.0));
         }
         let records = self.inner.scan();
+        let encoding_enabled = self.epoch_encoding_enabled()?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
             // The full physical scan participates in G20's conservative
             // global LSN change validation when the transaction writes.
-            if key.starts_with(SCHEMA_PREFIX) || key.starts_with(PROPOSAL_PREFIX) || key.starts_with(ABORT_PREFIX) || key.starts_with(COORD_PREFIX) || key.starts_with(READY_PREFIX) { continue; }
+            if is_metadata_key(&key) { continue; }
             let table_id = table_id_from_row_key(&key)?;
             if table_id != id { continue; }
             let def = self.definition(id)?;
-            let row = decode_row(&def.table, &bytes)?;
+            let row = decode_physical_row(def, &self.owner.epoch_schemas, &bytes, encoding_enabled)?;
             if key_from_row(def, &row)? != key {
                 return Err(DomainError::Corruption(
                     "MVCC scan found row with mismatched physical key".into(),
@@ -618,26 +671,40 @@ impl DurableTypedTransaction<'_> {
         Ok(rows)
     }
 
-    pub fn insert(&mut self, id: TableId, row: &[Value]) -> Result<(), DomainError> {
-        let def = self.definition(id)?;
-        let bytes = encode_row(&def.table, row)?;
+    fn epoch_encoding_enabled(&self) -> Result<bool, DomainError> {
+        match self.inner.get(ENCODING_KEY).map_err(map_mvcc)? {
+            None => Ok(false),
+            Some(value) if value == EPOCH_ENCODING => Ok(true),
+            Some(_) => Err(DomainError::Corruption("unsupported epoch row encoding decision".into())),
+        }
+    }
+
+    fn encode_physical_row(&self, def: &Definition, row: &[Value]) -> Result<Vec<u8>, DomainError> {
+        let bytes = if self.epoch_encoding_enabled()? {
+            self.owner.epoch_schemas.encode(def.table.id, self.owner.schema_epochs[&def.table.id], row)
+                .map_err(|err| match err {
+                    EpochRowError::Typed(err) => DomainError::Table(err),
+                    other => DomainError::Table(TableError::Value(other.to_string())),
+                })?
+        } else { encode_row(&def.table, row)? };
         if bytes.len() > INLINE_CAPACITY {
             return Err(DomainError::Table(TableError::Value(
                 "encoded row exceeds physical inline limit".into()
             )));
         }
+        Ok(bytes)
+    }
+
+    pub fn insert(&mut self, id: TableId, row: &[Value]) -> Result<(), DomainError> {
+        let def = self.definition(id)?;
+        let bytes = self.encode_physical_row(def, row)?;
         let key = key_from_row(def, row)?;
         self.inner.insert(&key, &bytes).map_err(map_mvcc)
     }
 
     pub fn replace(&mut self, id: TableId, row: &[Value]) -> Result<(), DomainError> {
         let def = self.definition(id)?;
-        let bytes = encode_row(&def.table, row)?;
-        if bytes.len() > INLINE_CAPACITY {
-            return Err(DomainError::Table(TableError::Value(
-                "encoded row exceeds physical inline limit".into()
-            )));
-        }
+        let bytes = self.encode_physical_row(def, row)?;
         let key = key_from_row(def, row)?;
         self.inner.replace(&key, &bytes).map_err(map_mvcc)
     }

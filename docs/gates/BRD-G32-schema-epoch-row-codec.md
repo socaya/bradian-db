@@ -56,3 +56,9 @@ These commands were not executable in the present environment because the Rust t
 ## Next engineering priority
 
 G33 should implement replay-validated, **inactive** catalog schema-revision records with stable identities and compatibility checks; only then design an atomic/recoverable activation protocol binding G11, G22 and `BRVE` row epochs.
+
+## Follow-up integration
+
+[G35](BRD-G35-live-schema-epoch-rows.md) connects this codec to opt-in live and
+historical SQL under immutable schema pins. The original codec-only boundary
+above describes G32 at introduction; multi-schema activation remains open.

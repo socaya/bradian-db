@@ -8,7 +8,7 @@
 
 Bradian Database Systems is being engineered as a native, general-purpose database management system that combines **OLTP**, **OLAP**, and **HTAP** with secure, built-in horizontal scaling, independent distributed installations and browser-based administration through **Bradian Studio**. The product is intended to operate on Linux, Windows, macOS and supported Unix-like systems, from a single-node installation to multi-node clusters and federated deployments.
 
-> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog-only additive schema revision decisions. General SQL, coordinated historical ALTER TABLE, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_12.md): **550 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
+> **Development status — pre-release.** Implemented components include the analytical engine, WAL-backed relational catalog and typed row storage, immutable checkpoint B+trees, bounded page caching, atomic WAL batches, scoped SQL transactions, shared-domain multi-table writes, opt-in durable historical SQL, verified offline migrations, backup/restore, and catalog-only additive schema revision decisions and opt-in live schema-epoch row encoding. General SQL, coordinated historical ALTER TABLE, serializable isolation, production HTAP, distributed SQL and independently qualified security remain incomplete. See the [executed verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_13.md): **562 Rust tests passed**, with workspace checks, strict Clippy and Studio typecheck/build passing on Linux.
 
 ## Product architecture
 
@@ -144,11 +144,12 @@ The approved Bradian horizontal logo is available in [navy blue](docs/media/Brad
 
 ## Executed verification
 
-The [12 November 2026 verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_12.md)
-records the complete workspace run and its limits. [G34](docs/gates/BRD-G34-catalog-revision-decisions.md)
-adds durable catalog activation/cancellation with stale-proposal protection, concurrency,
-restart, process-exit, torn-WAL and backup/restore tests. This catalog-only API does not
-activate schemas in existing historical row domains.
+The [13 November 2026 verification report](docs/implementation/BRADIAN_VERIFICATION_2026_11_13.md)
+records the workspace run and its limits. [G35](docs/gates/BRD-G35-live-schema-epoch-rows.md)
+connects the G32 codec to live/historical SQL through an explicit capability transition.
+New transactions then write epoch-tagged rows; existing legacy rows and historical
+LSNs remain readable. [G34](docs/gates/BRD-G34-catalog-revision-decisions.md) remains a
+catalog-only API; coordinated historical ALTER TABLE is still incomplete.
 
 ## Delivery principles
 

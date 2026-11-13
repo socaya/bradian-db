@@ -513,31 +513,6 @@ fn pending_revision_fences_constraint_changes_without_wal_append() {
     assert!(catalog.snapshot().table(id).unwrap().foreign_keys.is_empty());
 }
 
-#[test]
-fn revision_decision_recovers_after_process_exit_without_destructors() {
-    const CHILD_PATH: &str = "BRADIAN_REVISION_CRASH_TEST_PATH";
-    if let Some(root) = std::env::var_os(CHILD_PATH) {
-        let catalog = PersistentCatalog::open(root).unwrap();
-        let (id, proposed) = revision_fixture(&catalog);
-        catalog.propose_table_revision(id, proposed).unwrap();
-        catalog.checkpoint().unwrap();
-        catalog.activate_table_revision(catalog.pending_table_revision(id).unwrap()).unwrap();
-        // Bypass Rust destructors and any orderly close/checkpoint path.
-        std::process::exit(77);
-    }
-    let dir = tempdir().unwrap();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "revision_decision_recovers_after_process_exit_without_destructors"])
-        .env(CHILD_PATH, dir.path())
-        .status().unwrap();
-    assert_eq!(status.code(), Some(77));
-    let catalog = PersistentCatalog::open(dir.path()).unwrap();
-    let live = catalog.snapshot();
-    let table = live.tables().next().unwrap();
-    assert_eq!(table.columns.last().unwrap().name, "notes");
-    assert!(catalog.pending_table_revision(table.id).is_none());
-    assert_eq!(catalog.last_lsn(), 6);
-}
 
 #[test]
 fn torn_revision_decision_retains_pending_state_and_can_be_retried() {

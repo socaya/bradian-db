@@ -39,11 +39,12 @@ This directory contains the engineering specifications, architectural decisions,
 25. **[Durable MVCC history ADR](adr/0027-durable-mvcc-history.md)** — history keys persisted in one WAL batch, retained as-of reads and crash-safe version GC.
 26. **[Durable typed SQL history ADR](adr/0028-durable-typed-sql-history.md)** — G22 version keys with G11/G15 typed metadata, SQL AS OF and verified G16-to-G23 cutover.
 27. **[Catalog revision decisions ADR](adr/0029-catalog-revision-decisions.md)** — proposal-bound activation/cancellation within the catalog WAL.
+28. **[Live schema epoch row encoding ADR](adr/0030-live-schema-epoch-row-encoding.md)** — explicit capability transition and mixed BRRW/BRVE SQL reads/writes.
 
 ## Executed verification
 
-[12 November 2026 verification report](implementation/BRADIAN_VERIFICATION_2026_11_12.md):
-550 Rust tests passed, including 295 relational tests. Workspace check, strict Clippy
+[13 November 2026 verification report](implementation/BRADIAN_VERIFICATION_2026_11_13.md):
+562 Rust tests passed, including 307 relational tests. Workspace check, strict Clippy
 and Studio typecheck/build passed on Linux. This evidence supersedes earlier gate
 statements that Cargo was unavailable; operational and cross-platform qualification
 remain separate work.
@@ -86,6 +87,7 @@ remain separate work.
 | [BRD-G32](gates/BRD-G32-schema-epoch-row-codec.md) | Opt-in version-tagged typed row format and explicit schema epoch decoding | Linux regression suite passed; operational qualification outstanding |
 | [BRD-G33](gates/BRD-G33-inactive-catalog-schema-revisions.md) | Replay-validated inactive catalog schema revisions and safe duplicate refusal | Linux regression suite passed; operational qualification outstanding |
 | [BRD-G34](gates/BRD-G34-catalog-revision-decisions.md) | Catalog-only additive activation/cancellation with exact proposal LSN binding | Linux regression suite and partial-write recovery tests passed |
+| [BRD-G35](gates/BRD-G35-live-schema-epoch-rows.md) | Opt-in epoch-tagged SQL writes, mixed row decoding and recovery | Linux integration and recovery suite passed |
 | Future gates | Coordinated historical schema activation, serializable SQL, atomic multi-store DDL, remote/PITR backup, versioned physical B+tree, HTAP, clusters and security | Must be implemented and qualified |
 
 ## Formal specification and assets

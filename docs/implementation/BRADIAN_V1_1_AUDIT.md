@@ -16,6 +16,17 @@ cancellation with exact proposal identity, replay validation and partial-write r
 Live ALTER across catalog and historical row WALs remains unimplemented; schema-pin
 mismatches fail closed. These Linux checks do not certify production or platform power loss.
 
+## Live epoch row integration (13 November 2026)
+
+G35 connects the G32 codec to actual G23 SQL reads and writes after an explicit
+one-way capability decision in the history WAL. Mixed BRRW/BRVE rows remain
+queryable through live sessions and AS OF, backup/restore and restart. Each new
+BRVE row uses the exact original schema-registration epoch; table definitions
+remain immutable. This is a prerequisite for historical schema activation,
+not an implementation of coordinated catalog/history ALTER. The
+[13 November verification report](BRADIAN_VERIFICATION_2026_11_13.md) records the
+new regression and recovery evidence.
+
 ## Original audit baseline
 
 The repository contains a proprietary analytical column format (`.derc`), WAL-backed analytical partitions, vectorized operators, DHIS2 semantic modules, an Axum analytical API, a React analytics administration interface, and test suites. It does **not** contain a verified independent general-purpose authoritative relational database with complete SQL DDL/DML, B+tree row pages, ACID/MVCC transactions, cross-shard atomic commits, distributed consensus, or strongly consistent HTAP projections.
