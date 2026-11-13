@@ -21,6 +21,8 @@ use crate::typed_table::{TableError, TableStore, TableTransaction, Value};
 
 #[derive(Debug, Error)]
 pub enum SqlError {
+    #[error(transparent)]
+    Resource(#[from] crate::runtime_limits::ResourceError),
     #[error("SQL syntax error: {0}")]
     Syntax(String),
     #[error("SQL unsupported feature: {0}")]

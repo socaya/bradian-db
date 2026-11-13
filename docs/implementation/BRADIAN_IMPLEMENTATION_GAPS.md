@@ -12,7 +12,7 @@ are frozen. Gate 1 is the active kernel implementation gate, not master Gate 44.
 
 | Master gate/task | Remaining gap | Required next evidence |
 |---|---|---|
-| 1 / G1-MEMORY | Materialized full scans, catalog/version growth and cancellation | Enforceable runtime limits and failure cleanup under pressure |
+| 1 / G1-MEMORY | Historical query buffers are now bounded; resident maps, legacy scans, JSON output and admission/cancellation coverage remain incomplete | Global runtime/retention limits and memory-pressure/failure qualification |
 | 1 / G1-LOCAL-ACCESS | Complete OS-owner/ACL/path policy and equivalent library/service enforcement | Threat-reviewed local identity and negative access-path tests |
 | 1 / G1-FAULTS | Failed sync/rename, disk-full and physical/device behavior | Deterministic I/O fault matrix and platform recovery runs |
 | 1 / G1-REFERENCE | Broader SQL/isolation reference and installation qualification | Published conformance corpus and Windows/macOS installer/lock tests |
@@ -56,6 +56,6 @@ current master gate until its exit conditions pass.
 | P1 | Client and Studio integration | Service/wire protocol for relational sessions, drivers and a secured administration workflow; Rust APIs are not a public SQL server |
 | P1 | Recovery/metadata growth | Schema history compaction with reference proofs, remote/PITR/incremental archives and workload benchmarks |
 
-[Current executed verification](BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md) records the test
+[Current executed verification](BRADIAN_GATE1_SCAN_LIMITS_VERIFICATION_2026_11_13.md) records the test
 scope and limits. These open requirements must not be presented as production-ready
 features or silently enabled through fallback storage engines.

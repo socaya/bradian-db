@@ -34,6 +34,8 @@ const MAX_RETRIES: usize = 16;
 #[derive(Debug, Error)]
 pub enum DomainError {
     #[error(transparent)]
+    Resource(#[from] crate::runtime_limits::ResourceError),
+    #[error(transparent)]
     Storage(#[from] StoreError),
     #[error(transparent)]
     Table(#[from] TableError),

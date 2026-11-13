@@ -59,6 +59,8 @@ impl SelectWindow {
         Ok(Self { keys, primary_key, limit, offset, active: ordered || limit.is_some() || offset_clause })
     }
 
+    pub(crate) fn input_row_limit(&self) -> Option<usize> { self.active.then_some(MAX_INPUT_ROWS) }
+
     pub(crate) fn apply(self, mut rows: Vec<Vec<Value>>, table: &Table) -> SqlResult<Vec<Vec<Value>>> {
         if !self.active { return Ok(rows); }
         if rows.len() > MAX_INPUT_ROWS { return Err(SqlError::Unsupported("ordered/windowed SELECT exceeds 10000 input rows".into())); }

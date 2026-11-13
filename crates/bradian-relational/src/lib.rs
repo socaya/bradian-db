@@ -30,6 +30,7 @@ pub mod mvcc;
 pub mod typed_mvcc;
 pub mod mvcc_sql;
 pub mod durable_mvcc;
+pub mod runtime_limits;
 pub mod durable_typed;
 pub mod history_sql;
 mod sql_expression;

@@ -65,6 +65,12 @@ A library-created/migrated root may need its owner to provision appropriate priv
 permissions before the CLI accepts it. Do not point one engine mode at another
 mode's root or delete migration markers to bypass compatibility checks.
 
+## Historical query budgets
+
+--history uses default per-query scan row/byte/work limits. Optional --max-scan-rows,
+--max-scan-bytes and --max-scan-work require that mode. See the [scan policy](HISTORY_QUERY_LIMITS.md)
+for accounting, cancellation, compatibility and remaining resident-memory limits.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

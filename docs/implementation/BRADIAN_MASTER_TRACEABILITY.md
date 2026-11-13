@@ -41,7 +41,7 @@ passes. See the current verification and fixed roadmap for executed scope.
 | BRD-STU-001 | 6 | PARTIAL | Browser database explorer, data editor, SQL workbench | [Source](../../apps/dap-ui) | Authenticated relational workflow and operational/browser E2E proof |
 | BRD-STU-002 | 6 | PARTIAL | Cluster, security, backup and performance consoles | [Source](../../apps/dap-ui) | Authenticated relational workflow and operational/browser E2E proof |
 | BRD-API-001 | 6 | PARTIAL | Versioned SQL drivers and secure administrative APIs | [Source](../../crates/dap-serving) | Relational drivers, secure sessions and versioned contract/load proof |
-| BRD-OPS-001 | 1 | PARTIAL | Observability, limits, cancellation and upgrade support | [Source](../../crates/dap-admin) | Enforced limits, cancellation, upgrades and reliability workloads |
+| BRD-OPS-001 | 1 | PARTIAL | Observability, limits, cancellation and upgrade support | [Source](../../crates/dap-admin) | Historical query-buffer/work limits exist; resident/admission limits, complete cancellation, upgrades and reliability workloads remain open |
 | BRD-PORT-001 | 1 | PARTIAL | Native Windows/Linux/macOS profiles and storage portability | [Source](../../crates/dap-admin/tests/local_sql_cli.rs) | Windows/macOS installer, file-lock and recovery qualification |
 | BRD-EXT-001 | 9 | PARTIAL | Controlled plugins and optional DER/DHIS2 adapter | [Source](../../crates/dap-dhis2) | Capability-controlled generic extension lifecycle and isolation proof |
 | BRD-DTX-001 | 5 | OPEN | Atomic and recoverable cross-shard transaction decision | [Source](../../crates/dap-distributed) | Durable cross-shard decision, safe time, idempotent outcomes and crash/partition matrix |

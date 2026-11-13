@@ -54,13 +54,14 @@ this does not sign off unresolved architecture decisions or production security.
 | G1-CLI | Implemented | Canonical bradian-db and legacy dap-admin executables, local SQL scripts, explicit transaction/history modes and process tests |
 | G1-LOCAL-ACCESS | Partial | SQL CLI private Unix root checks; library paths, ACL/hostile-filesystem and complete local identity policy remain unqualified |
 | G1-INSTALL | Partial | Linux development install is exercised; portable release installers/signing/upgrades remain open |
-| G1-MEMORY | Open | Whole-domain scans and version/catalog growth need enforceable runtime budgets and cancellation |
+| G1-MEMORY | Partial | Historical SQL uses table-prefix scans with row/byte/work budgets and cancellation; resident maps, legacy paths, output/admission and global budgets remain open |
 | G1-FAULTS | Partial | Existing torn-frame/CRC/process-exit tests; disk-full, failed sync/rename and physical-device qualification remain open |
 | G1-REFERENCE | Partial | Checked SQL/decimal result corpora; external reference SQL and full documented isolation qualification remain open |
 | G1-PORTABILITY | Open | Windows/macOS installation, lock lifecycle and recovery runs |
 
 Gate 1 stays active until its exit conditions have evidence. The next implementation
 work must address G1-MEMORY, G1-LOCAL-ACCESS and G1-FAULTS before new Gate 2 features.
+The [query scan verification](BRADIAN_GATE1_SCAN_LIMITS_VERIFICATION_2026_11_13.md) records the latest runtime slice.
 The [Gate 1 local CLI verification](BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md)
 records what was actually run. No existing analytical, schema or SQL work is deleted
 merely because it was implemented before this ordering was reconciled.

@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{Column, Table};
+use crate::runtime_limits::ScanControl;
 use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
@@ -346,9 +347,18 @@ impl HistorySqlEngine {
         &self,
         callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
     ) -> SqlResult<R> {
+        self.with_session_control(ScanControl::default(), callback)
+    }
+
+    /// Explicit query controls; cloned handles can cancel scans from another thread.
+    pub fn with_session_control<R>(
+        &self, control: ScanControl,
+        callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
         self.require_ready()?;
         let mut session = HistorySqlSession {
             engine: self,
+            control,
             active: None,
             failed_statement: false,
             last_commit_lsn: None,
@@ -360,6 +370,7 @@ impl HistorySqlEngine {
 /// A scoped SQL session that may access several registered catalog tables.
 pub struct HistorySqlSession<'a> {
     engine: &'a HistorySqlEngine,
+    control: ScanControl,
     active: Option<DurableTypedTransaction<'a>>,
     last_commit_lsn: Option<u64>,
     failed_statement: bool,
@@ -520,6 +531,7 @@ impl<'a> HistorySqlSession<'a> {
                         Ok(SqlResultSet::Command { affected: 1 })
                     }
                     "select" => {
+                        self.control.check()?;
                         let requested = if p.consume_symbol('*') { None } else {
                             let mut names = vec![p.word()?];
                             while p.consume_symbol(',') { names.push(p.word()?); }
@@ -549,6 +561,10 @@ impl<'a> HistorySqlSession<'a> {
                         let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
                         let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
                         p.end()?;
+                        let control = match window.input_row_limit() {
+                            Some(limit) => self.control.cap_rows(limit),
+                            None => self.control.clone(),
+                        };
                         let rows = if let Some(key) = key {
                             match as_of {
                                 Some(lsn) => self.engine.domain.get_as_of(table.id, &key, lsn)?
@@ -557,11 +573,13 @@ impl<'a> HistorySqlSession<'a> {
                             }
                         } else {
                             match as_of {
-                                Some(lsn) => self.engine.domain.scan_as_of(table.id, lsn)?,
-                                None => tx.scan(table.id)?,
+                                Some(lsn) => self.engine.domain.scan_as_of_with_control(table.id, lsn, &control)?,
+                                None => tx.scan_with_control(table.id, &control)?,
                             }
                         };
+                        control.check()?;
                         let rows = window.apply(rows, &table)?;
+                        control.check()?;
                         Ok(SqlResultSet::Rows {
                             columns,
                             rows: rows.into_iter().map(|row: Vec<_>|

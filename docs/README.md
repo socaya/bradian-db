@@ -65,10 +65,12 @@ Use the [Gate 0–9 roadmap](implementation/BRADIAN_MASTER_ROADMAP.md),
 [threat model](security/BRADIAN_THREAT_MODEL.md). Gate 1 remains active; the records
 below are historical implementation evidence and do not represent 44 accepted gates.
 The [native SQL command](operations/LOCAL_SQL_CLI.md) addresses its runnable CLI task.
+[Historical scan controls](operations/HISTORY_QUERY_LIMITS.md) address per-query
+buffer/work limits; the global runtime acceptance task remains open.
 
 ## Executed verification
 
-[Gate 1 local CLI verification, 13 November 2026](implementation/BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md)
+[Gate 1 scan-limit verification, 13 November 2026](implementation/BRADIAN_GATE1_SCAN_LIMITS_VERIFICATION_2026_11_13.md)
 records current executed checks. The prior [implementation-record verification](implementation/BRADIAN_G44_VERIFICATION_2026_11_13.md)
 retains its dated evidence. Operational/platform qualification remains separate work.
 

@@ -16,6 +16,7 @@ use std::path::Path;
 
 use parking_lot::Mutex;
 use thiserror::Error;
+use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError};
 
 use crate::row_store::{RowMutation, RowStore, StoreError};
 use crate::backup::BackupReceipt;
@@ -33,6 +34,8 @@ const MAX_READ_KEYS: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum DurableMvccError {
+    #[error(transparent)]
+    Resource(#[from] ResourceError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("durable MVCC corruption or incompatible format: {0}")]
@@ -132,6 +135,23 @@ fn decode_version(raw: &[u8]) -> DurableMvccResult<Option<Vec<u8>>> {
 
 fn visible(versions: &[HistoricalVersion], horizon: u64) -> Option<Vec<u8>> {
     versions.iter().rev().find(|v| v.lsn <= horizon).and_then(|v| v.value.clone())
+}
+
+fn visible_checked<'a>(versions: &'a [HistoricalVersion], horizon: u64, meter: &mut ScanMeter<'_>) -> Result<Option<&'a [u8]>, ResourceError> {
+    for version in versions.iter().rev() {
+        meter.step()?;
+        if version.lsn <= horizon { return Ok(version.value.as_deref()); }
+    }
+    Ok(None)
+}
+
+fn collect_visible(out: &mut Vec<(Vec<u8>, Vec<u8>)>, key: &[u8], value: Option<&[u8]>, meter: &mut ScanMeter<'_>) -> Result<(), ResourceError> {
+    if let Some(value) = value {
+        let bytes = key.len().saturating_add(value.len()).saturating_add(std::mem::size_of::<(Vec<u8>, Vec<u8>)>());
+        meter.row(bytes)?;
+        out.push((key.to_vec(), value.to_vec()));
+    }
+    Ok(())
 }
 
 fn validate_user(key: &[u8], val: Option<&[u8]>) -> DurableMvccResult<()> {
@@ -293,6 +313,25 @@ impl DurableMvccStore {
         Ok(state.versions.iter().filter_map(|(key, versions)| {
             visible(versions, lsn).map(|value| (key.clone(), value))
         }).collect())
+    }
+
+    /// Bound copied rows/bytes and examined keys/versions to a logical key prefix.
+    pub fn scan_prefix_as_of_with_control(&self, prefix: &[u8], lsn: u64, control: &ScanControl) -> DurableMvccResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        if prefix.len() > MAX_USER_KEY { return Err(DurableMvccError::Capacity); }
+        let mut meter = control.meter()?;
+        let state = self.state.lock();
+        control.check()?;
+        if lsn < state.floor || lsn > state.latest {
+            return Err(DurableMvccError::SnapshotUnavailable { requested: lsn, floor: state.floor, latest: state.latest });
+        }
+        let mut result = Vec::new();
+        for (key, chain) in state.versions.range(prefix.to_vec()..).take_while(|(key, _)| key.starts_with(prefix)) {
+            meter.step()?;
+            let value = visible_checked(chain, lsn, &mut meter)?;
+            collect_visible(&mut result, key, value, &mut meter)?;
+        }
+        control.check()?;
+        Ok(result)
     }
 
     pub fn begin(&self) -> DurableMvccTransaction<'_> {
@@ -479,6 +518,38 @@ impl DurableMvccTransaction<'_> {
             }
         }
         visible_rows.into_iter().collect()
+    }
+
+    /// Prefix-scoped ordered merge; no whole-domain or staged-map clone.
+    pub fn scan_prefix_with_control(&mut self, prefix: &[u8], control: &ScanControl) -> DurableMvccResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        // Keep this observation even when a budget or cancellation aborts the scan.
+        self.scanned = true;
+        if prefix.len() > MAX_USER_KEY { return Err(DurableMvccError::Capacity); }
+        let mut meter = control.meter()?;
+        let state = self.owner.state.lock();
+        control.check()?;
+        let mut committed = state.versions.range(prefix.to_vec()..).take_while(|(key, _)| key.starts_with(prefix)).peekable();
+        let mut pending = self.pending.range(prefix.to_vec()..).take_while(|(key, _)| key.starts_with(prefix)).peekable();
+        let mut result = Vec::new();
+        while committed.peek().is_some() || pending.peek().is_some() {
+            meter.step()?;
+            let use_pending = match (committed.peek(), pending.peek()) {
+                (Some((a, _)), Some((b, _))) => b <= a,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if use_pending {
+                let (key, value) = pending.next().expect("pending key exists");
+                if committed.peek().is_some_and(|(other, _)| *other == key) { committed.next(); }
+                collect_visible(&mut result, key, value.as_deref(), &mut meter)?;
+            } else {
+                let (key, chain) = committed.next().expect("committed key exists");
+                let value = visible_checked(chain, self.start, &mut meter)?;
+                collect_visible(&mut result, key, value, &mut meter)?;
+            }
+        }
+        control.check()?;
+        Ok(result)
     }
 
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> DurableMvccResult<()> {

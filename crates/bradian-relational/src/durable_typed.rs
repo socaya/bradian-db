@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{Table, TableId};
+use crate::runtime_limits::ScanControl;
 use crate::epoch_row::{DecodedEpochRow, EpochRowError, EpochSchemas};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
 use crate::schema_activation::{self, ActivationCommit, ActivationIntent, ActivationStage,
@@ -107,6 +108,18 @@ fn map_catalog(err: PersistentCatalogError) -> DomainError {
 struct Definition {
     table: Table,
     pk_positions: Vec<usize>,
+}
+
+fn row_prefix(id: TableId) -> Vec<u8> {
+    let mut prefix = ROW_PREFIX.to_vec();
+    prefix.push(1);
+    prefix.extend_from_slice(&id.0.to_le_bytes());
+    prefix
+}
+
+fn decoded_row_bytes(row: &Vec<Value>) -> usize {
+    std::mem::size_of::<Vec<Value>>().saturating_add(row.capacity().saturating_mul(std::mem::size_of::<Value>()))
+        .saturating_add(row.iter().map(|value| match value { Value::String(text) => text.capacity(), _ => 0 }).fold(0_usize, usize::saturating_add))
 }
 
 fn table_id_from_row_key(key: &[u8]) -> Result<TableId, DomainError> {
@@ -859,9 +872,14 @@ impl DurableTypedStore {
     /// Read-only historical full-table scan. The G22 retention floor rejects
     /// queries before the earliest permitted WAL horizon.
     pub fn scan_as_of(&self, id: TableId, lsn: u64) -> Result<Vec<Vec<Value>>, DomainError> {
+        self.scan_as_of_with_control(id, lsn, &ScanControl::legacy_unlimited())
+    }
+
+    pub fn scan_as_of_with_control(&self, id: TableId, lsn: u64, control: &ScanControl) -> Result<Vec<Vec<Value>>, DomainError> {
+        let mut meter = control.meter()?;
         let (table, _) = self.schema_as_of(id, lsn)?;
         let def = &Definition { pk_positions: validate_table(&table)?, table };
-        let records = self.store.scan_as_of(lsn).map_err(map_mvcc)?;
+        let records = self.store.scan_prefix_as_of_with_control(&row_prefix(id), lsn, control).map_err(map_mvcc)?;
         let encoding_enabled = self.encoding_enabled_at(lsn)?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
@@ -872,8 +890,10 @@ impl DurableTypedStore {
             if key_from_row(def, &row)? != key {
                 return Err(DomainError::Corruption("historical scan key differs".into()));
             }
+            meter.row(decoded_row_bytes(&row))?;
             rows.push(row);
         }
+        control.check()?;
         Ok(rows)
     }
 
@@ -888,6 +908,7 @@ impl DurableTypedStore {
 
 fn map_mvcc(err: DurableMvccError) -> DomainError {
     match err {
+        DurableMvccError::Resource(err) => DomainError::Resource(err),
         DurableMvccError::Store(err) => DomainError::Storage(err),
         DurableMvccError::DuplicateKey => DomainError::Table(TableError::DuplicateKey),
         DurableMvccError::NotFound => DomainError::Table(TableError::NotFound),
@@ -938,10 +959,15 @@ impl DurableTypedTransaction<'_> {
     }
 
     pub fn scan(&mut self, id: TableId) -> Result<Vec<Vec<Value>>, DomainError> {
+        self.scan_with_control(id, &ScanControl::legacy_unlimited())
+    }
+
+    pub fn scan_with_control(&mut self, id: TableId, control: &ScanControl) -> Result<Vec<Vec<Value>>, DomainError> {
+        let mut meter = control.meter()?;
         if !self.owner.tables.contains_key(&id) {
             return Err(DomainError::UnknownTable(id.0));
         }
-        let records = self.inner.scan();
+        let records = self.inner.scan_prefix_with_control(&row_prefix(id), control).map_err(map_mvcc)?;
         let encoding_enabled = self.epoch_encoding_enabled()?;
         let mut rows = Vec::new();
         for (key, bytes) in records {
@@ -957,8 +983,10 @@ impl DurableTypedTransaction<'_> {
                     "MVCC scan found row with mismatched physical key".into(),
                 ));
             }
+            meter.row(decoded_row_bytes(&row))?;
             rows.push(row);
         }
+        control.check()?;
         Ok(rows)
     }
 

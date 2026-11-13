@@ -32,6 +32,8 @@ G43 [ADR 0038](docs/adr/0038-checked-history-update-expressions.md) scopes expre
 
 G44 [ADR 0039](docs/adr/0039-ordered-history-query-windows.md) binds order/window clauses before reads and before projection. Preserve historical-schema binding, explicit NULL direction, logical composite-PK ties and scan conflict observations, including LIMIT 0. Sorting is bounded to 16 keys/10000 input rows; the underlying scan still materializes data. Do not claim streaming, collation or distributed ordering.
 
+Gate 1 scan controls are specified in [ADR 0041](docs/adr/0041-bounded-historical-query-scans.md). Historical SQL must use controlled table-prefix scans, charge buffers/work, and preserve scan observations on errors/rollback. Ordered queries cap input before cloning. Resource errors are not corruption. Unlimited administrative/native compatibility methods are excluded from SQL; resident maps and legacy paths remain unqualified, so do not claim total-process memory bounds.
+
 ## 3. Architecture boundaries
 
 - **Core and relational catalog:** Generic database/schema/table IDs, column types, constraints, dependency analysis and versioned catalog evolution.

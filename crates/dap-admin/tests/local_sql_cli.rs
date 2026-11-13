@@ -137,6 +137,9 @@ mod unix {
         assert!(!both.status.success());
         assert!(!run(&root,"BEGIN",&["--table","test.public.items","--history"]).status.success());
         assert!(!run(&root,"BEGIN",&["--history"]).status.success());
+        for flag in ["--max-scan-rows","--max-scan-bytes","--max-scan-work"] {
+            assert!(!run(&root,"BEGIN",&[flag,"1"]).status.success());
+        }
         assert!(!root.exists());
     }
 
@@ -175,6 +178,13 @@ mod unix {
         let failed = run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1",&["--history"]);
         assert!(!failed.status.success());
         let rows = ok(run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history"]));
+        assert_eq!(rows[1]["rows"][0][0]["value"], "105");
+        for flag in ["--max-scan-rows","--max-scan-bytes","--max-scan-work"] {
+            let output = run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1; SELECT id FROM test.public.items; COMMIT", &["--history",flag,"0"]);
+            assert!(!output.status.success());
+            assert!(String::from_utf8(output.stderr).unwrap().contains("budget exceeded"));
+        }
+        let rows = ok(run(&root,"BEGIN; SELECT amount FROM test.public.items; COMMIT",&["--history","--max-scan-rows","1","--max-scan-bytes","1000","--max-scan-work","2"]));
         assert_eq!(rows[1]["rows"][0][0]["value"], "105");
         assert!(!run(&root,"SELECT amount FROM test.public.items",&[]).status.success());
     }
