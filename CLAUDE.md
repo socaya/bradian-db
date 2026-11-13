@@ -100,7 +100,7 @@ npm run typecheck
 npm run build
 ```
 
-**Git workflow:** Changes may be committed directly to `main` under the current owner instruction. Automatic GitHub Actions triggers have been disabled for now; the workflow remains available for manual invocation. Do not claim checks have run unless there is actual evidence.
+**Git workflow:** The owner authorizes publishing all completed, tested Bradian changes directly to the public `socaya/bradian-db` repository's `main` branch on an ongoing basis. Fetch the latest remote state before publishing, reconcile and merge relevant changes without overwriting newer work, and leave `main` current with the completed implementation. This authorization applies to future tested increments; do not request it again for each increment. Automatic GitHub Actions triggers remain disabled; the workflow is manual-only. Do not claim checks have run without actual evidence.
 
 ## 6. Security gates
 
