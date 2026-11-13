@@ -89,6 +89,10 @@ Default [checkpoint/build reservation limits](CHECKPOINT_BUILD_LIMITS.md) also a
 
 Native checkpoint and archive helpers now use [metadata byte limits](METADATA_LIMITS.md). Explicit JSON archive policy is available through native backup/restore APIs.
 
+## Historical active transactions
+
+--max-active-transactions requires --history and defaults to 128 handles per domain. Historical SQL BEGIN now checks shared pin capacity before admission. A zero limit refuses BEGIN without adding a pin; native owner validation/recovery can still proceed. The [admission policy](HISTORY_TRANSACTION_ADMISSION.md) explains fallible native APIs, administrative compatibility and slot lifetime.
+
 ## Output byte budget
 
 --max-output-bytes applies to every SQL mode, defaulting to 16777216 bytes per statement including the newline. The encoder borrows typed results and admits a complete line before emission; quota refusal emits no partial line and stops the script. It does not undo completed commits. See the [output policy](SQL_OUTPUT_LIMITS.md) for exact accounting and failure semantics.

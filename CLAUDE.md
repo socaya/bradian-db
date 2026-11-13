@@ -48,6 +48,8 @@ Gate 1 metadata I/O is specified in [ADR 0048](docs/adr/0048-bounded-archive-met
 
 Gate 1 SQL CLI output is specified in [ADR 0049](docs/adr/0049-bounded-sql-cli-output.md). Borrow typed rows/cells instead of building another JSON tree. --max-output-bytes applies in every SQL mode, including newline, and resets per statement. Admit the whole line before emission; output failure stops scoped callbacks and drops pending work, but never implies completed commits rolled back. Preserve exact JSON/wide-value behavior and actual write/flush error context.
 
+Gate 1 historical admission is specified in [ADR 0050](docs/adr/0050-historical-transaction-admission.md). Historical SQL BEGIN must use typed/raw try_begin_with_limits under shared per-domain TransactionLimits. Check all pin references and overflow under the pin mutex before admission; preserve slot lifetime across savepoint errors and cleanup on completion/error/unwind. Infallible native administrative compatibility methods remain unmetered and count toward later SQL/fallible admission; never claim a universal/global native cap.
+
 Gate 1's single-table snapshot/scan extension is specified in [ADR 0042](docs/adr/0042-bounded-single-table-query-snapshots.md). SQL must bound BEGIN snapshots, scans and projection before cloning, including repeated-column amplification. Preserve full snapshot LSNs, corruption checks and old single-table full-abort semantics. Native administrative compatibility APIs stay explicit and are not SQL fallbacks. CLI limits now apply to all SQL modes; global resident-memory qualification is still open.
 
 ## 3. Architecture boundaries

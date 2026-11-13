@@ -14,6 +14,8 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResourceError {
+    #[error("active history transaction limit exceeded (limit {limit})")]
+    TransactionLimit { limit: usize },
     #[error("metadata manifest byte limit exceeded (limit {limit})")]
     MetadataLimit { limit: usize },
     #[error("index build {resource} limit exceeded (limit {limit})")]
@@ -186,4 +188,11 @@ pub struct StorageLimits { pub rows: RowStoreLimits, pub index: IndexLimits, pub
 pub struct MetadataLimits { pub max_manifest_bytes: usize }
 impl Default for MetadataLimits {
     fn default() -> Self { Self { max_manifest_bytes: 1024 * 1024 } }
+}
+
+/// Shared per-history-domain admission for SQL and fallible native BEGIN APIs.
+#[derive(Clone, Copy, Debug)]
+pub struct TransactionLimits { pub max_active: usize }
+impl Default for TransactionLimits {
+    fn default() -> Self { Self { max_active: 128 } }
 }

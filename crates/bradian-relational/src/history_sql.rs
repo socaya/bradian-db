@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{Column, Table};
-use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage};
+use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage, TransactionLimits};
 use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
@@ -31,6 +31,10 @@ impl HistorySqlEngine {
     }
 
     pub fn open_with_history_limits(root: impl AsRef<Path>, limits: HistoryLimits) -> SqlResult<Self> {
+        Self::open_with_resource_limits(root,limits,TransactionLimits::default())
+    }
+
+    pub fn open_with_resource_limits(root:impl AsRef<Path>, limits:HistoryLimits, transactions:TransactionLimits) -> SqlResult<Self> {
         let root = root.as_ref();
         // Refuse opening a root with ANY legacy per-table data. No implicit
         // migration, dual writes, or ambiguous source of truth is allowed.
@@ -58,7 +62,7 @@ impl HistorySqlEngine {
             ));
         }
         let catalog = PersistentCatalog::open(root.join("catalog"))?;
-        let domain = DurableTypedStore::open_coordinated(root.join("history-domain"), &catalog, limits)?;
+        let domain = DurableTypedStore::open_coordinated(root.join("history-domain"), &catalog, limits, transactions)?;
         domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
         Ok(Self { catalog, domain, _root: root.to_owned(), failed_ddl: false })
     }
@@ -212,6 +216,7 @@ impl HistorySqlEngine {
     /// Observe the in-memory snapshot retention state.
     pub fn history_usage(&self) -> HistoryUsage { self.domain.history_usage() }
     pub fn history_limits(&self) -> HistoryLimits { self.domain.history_limits() }
+    pub fn transaction_limits(&self) -> TransactionLimits { self.domain.transaction_limits() }
 
     pub fn mvcc_stats(&self) -> crate::durable_mvcc::DurableMvccStats {
         self.domain.stats()
@@ -443,7 +448,7 @@ impl<'a> HistorySqlSession<'a> {
                 if self.active.is_some() {
                     return Err(SqlError::Unsupported("nested BEGIN is unsupported".into()));
                 }
-                let tx: DurableTypedTransaction<'a> = self.engine.domain.begin_with_limits(self.staging, validate_reads);
+                let tx: DurableTypedTransaction<'a> = self.engine.domain.try_begin_with_limits(self.staging, validate_reads)?;
                 self.active = Some(tx);
                 self.failed_statement = false;
                 Ok(SqlResultSet::Command { affected: 0 })

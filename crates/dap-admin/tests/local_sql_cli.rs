@@ -151,7 +151,7 @@ mod unix {
         assert!(!both.status.success());
         assert!(!run(&root,"BEGIN",&["--table","test.public.items","--history"]).status.success());
         assert!(!run(&root,"BEGIN",&["--history"]).status.success());
-        for flag in ["--max-history-keys","--max-history-versions","--max-history-bytes","--max-staged-keys","--max-staged-bytes"] {
+        for flag in ["--max-history-keys","--max-history-versions","--max-history-bytes","--max-staged-keys","--max-staged-bytes","--max-active-transactions"] {
             assert!(!run(&root,"BEGIN",&[flag,"1"]).status.success());
         }
         assert!(!root.exists());
@@ -236,6 +236,10 @@ mod unix {
         assert!(!failed.status.success());
         assert!(String::from_utf8(failed.stderr).unwrap().contains("retained history versions"));
         let rows=ok(run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-history-versions",&capacity]));
+        assert_eq!(rows[1]["rows"][0][0]["value"],"106");
+        let refused=run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-active-transactions","0"]);
+        assert!(!refused.status.success()); assert!(refused.stdout.is_empty()); assert!(String::from_utf8(refused.stderr).unwrap().contains("active history transaction limit"));
+        let rows=ok(run(&root,"BEGIN WITH READ VALIDATION; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history","--max-active-transactions","1"]));
         assert_eq!(rows[1]["rows"][0][0]["value"],"106");
         let baseline=run(&root,"BEGIN; SELECT amount FROM test.public.items WHERE id=1; COMMIT",&["--history"]);
         assert!(baseline.status.success()); let text=String::from_utf8(baseline.stdout).unwrap(); let n=text.lines().nth(1).unwrap().len()+1;

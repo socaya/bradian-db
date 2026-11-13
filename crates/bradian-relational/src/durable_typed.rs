@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{Table, TableId};
-use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage};
+use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage, TransactionLimits};
 use crate::epoch_row::{DecodedEpochRow, EpochRowError, EpochSchemas};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
 use crate::schema_activation::{self, ActivationCommit, ActivationIntent, ActivationStage,
@@ -168,15 +168,21 @@ impl DurableTypedStore {
     pub fn open_with_history_limits(
         domain_root: impl AsRef<Path>, catalog_tables: &BTreeMap<TableId, Table>, limits: HistoryLimits,
     ) -> Result<Self, DomainError> {
-        let store = DurableMvccStore::open_with_limits(domain_root, limits).map_err(map_mvcc)?;
-        Self::from_store(store, Some(catalog_tables))
+        Self::open_with_resource_limits(domain_root,catalog_tables,limits,TransactionLimits::default())
+    }
+
+    pub fn open_with_resource_limits(
+        domain_root:impl AsRef<Path>, catalog_tables:&BTreeMap<TableId,Table>, limits:HistoryLimits, transactions:TransactionLimits,
+    ) -> Result<Self,DomainError> {
+        let store=DurableMvccStore::open_with_resource_limits(domain_root,limits,transactions).map_err(map_mvcc)?;
+        Self::from_store(store,Some(catalog_tables))
     }
 
     /// Recovery owns both locks and validates history before changing the catalog.
     pub(crate) fn open_coordinated(
-        domain_root: impl AsRef<Path>, catalog: &PersistentCatalog, limits: HistoryLimits,
+        domain_root: impl AsRef<Path>, catalog: &PersistentCatalog, limits: HistoryLimits, transactions: TransactionLimits,
     ) -> Result<Self, DomainError> {
-        let store = DurableMvccStore::open_with_limits(domain_root, limits).map_err(map_mvcc)?;
+        let store = DurableMvccStore::open_with_resource_limits(domain_root, limits, transactions).map_err(map_mvcc)?;
         let mut owner = Self::from_store(store, None)?;
         if owner.pending_activation.is_some() {
             owner.finish_activation(catalog, &mut |_| Ok(()))?;
@@ -824,6 +830,7 @@ impl DurableTypedStore {
     pub fn stats(&self) -> DurableMvccStats { self.store.stats() }
     pub fn history_usage(&self) -> HistoryUsage { self.store.history_usage() }
     pub fn history_limits(&self) -> HistoryLimits { self.store.history_limits() }
+    pub fn transaction_limits(&self) -> TransactionLimits { self.store.transaction_limits() }
     pub fn retention_floor(&self) -> u64 { self.store.retention_floor() }
 
     pub fn last_lsn(&self) -> u64 { self.store.latest_lsn() }
@@ -906,6 +913,16 @@ impl DurableTypedStore {
         }
         control.check()?;
         Ok(rows)
+    }
+
+    pub fn try_begin(&self) -> Result<DurableTypedTransaction<'_>,DomainError> {
+        self.try_begin_with_limits(StagingLimits::default(),false)
+    }
+    pub fn try_begin_with_read_validation(&self) -> Result<DurableTypedTransaction<'_>,DomainError> {
+        self.try_begin_with_limits(StagingLimits::default(),true)
+    }
+    pub fn try_begin_with_limits(&self, limits:StagingLimits, validate_reads:bool) -> Result<DurableTypedTransaction<'_>,DomainError> {
+        Ok(DurableTypedTransaction { owner:self,inner:self.store.try_begin_with_limits(limits,validate_reads).map_err(map_mvcc)? })
     }
 
     pub fn begin_with_limits(&self, limits: StagingLimits, validate_reads: bool) -> DurableTypedTransaction<'_> {

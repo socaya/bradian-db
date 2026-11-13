@@ -47,6 +47,8 @@ Metadata I/O uses exact 40-byte binary records plus a trailing-byte probe and bo
 
 The SQL CLI now borrows typed results during serialization and admits each complete JSON line including newline under --max-output-bytes. Default budget is 16 MiB per statement in all modes; no second full JSON tree is constructed. Native JSON profile and dependencies are unchanged; see [ADR 0049](../adr/0049-bounded-sql-cli-output.md).
 
+TransactionLimits admits historical SQL and explicit native try_begin calls under the same mutex as pin creation. Shared reference counts include administrative pins and same-LSN handles. Trusted infallible native BEGIN retains its compatibility contract and can exceed policy; this is not process-wide admission. No format or dependency changed; see [ADR 0050](../adr/0050-historical-transaction-admission.md).
+
 ## Architecture decisions still requiring prototypes
 
 | Decision | Evidence required before adopting/fixing a format | Owning gate |

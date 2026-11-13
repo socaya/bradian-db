@@ -16,7 +16,7 @@ use std::path::Path;
 
 use parking_lot::Mutex;
 use thiserror::Error;
-use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage};
+use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage, TransactionLimits};
 
 use crate::row_store::{RowMutation, RowStore, StoreError};
 use crate::backup::BackupReceipt;
@@ -91,6 +91,15 @@ pub struct DurableMvccStore {
     rows: RowStore,
     state: Mutex<State>,
     limits: HistoryLimits,
+    transactions: TransactionLimits,
+}
+
+fn admit_transaction(pins:impl IntoIterator<Item=usize>, limits:TransactionLimits) -> Result<(),ResourceError> {
+    let active=pins.into_iter().try_fold(0_usize,|total,count|total.checked_add(count));
+    if active.and_then(|n|n.checked_add(1)).is_none_or(|n|n>limits.max_active) {
+        return Err(ResourceError::TransactionLimit { limit:limits.max_active });
+    }
+    Ok(())
 }
 
 fn history_key(key: &[u8], lsn: u64) -> Vec<u8> {
@@ -199,6 +208,10 @@ impl DurableMvccStore {
     }
 
     pub fn open_with_limits(path: impl AsRef<Path>, limits: HistoryLimits) -> DurableMvccResult<Self> {
+        Self::open_with_resource_limits(path,limits,TransactionLimits::default())
+    }
+
+    pub fn open_with_resource_limits(path: impl AsRef<Path>, limits: HistoryLimits, transactions: TransactionLimits) -> DurableMvccResult<Self> {
         let rows = RowStore::open(path)?;
         if rows.is_empty() && rows.last_lsn() == 0 {
             rows.commit_batch(None, &[
@@ -248,13 +261,14 @@ impl DurableMvccStore {
             }
         }
         Ok(Self {
-            rows, limits,
+            rows, limits, transactions,
             state: Mutex::new(State { latest, floor, versions, pins: BTreeMap::new(), usage }),
         })
     }
 
     pub fn history_usage(&self) -> HistoryUsage { self.state.lock().usage }
     pub fn history_limits(&self) -> HistoryLimits { self.limits }
+    pub fn transaction_limits(&self) -> TransactionLimits { self.transactions }
 
     pub(crate) fn check_additional_versions(&self, entries: &[(&[u8],Option<&[u8]>)]) -> DurableMvccResult<()> {
         for (key,payload) in entries { validate_user(key,*payload)?; }
@@ -376,6 +390,7 @@ impl DurableMvccStore {
         Ok(result)
     }
 
+    /// Administrative compatibility API; use try_begin for active-count admission.
     pub fn begin(&self) -> DurableMvccTransaction<'_> {
         self.begin_with_limits(StagingLimits::default(), false)
     }
@@ -385,8 +400,25 @@ impl DurableMvccStore {
         self.begin_with_limits(StagingLimits::default(), true)
     }
 
+    /// Infallible compatibility staging API; active-count admission is in try_begin_with_limits.
     pub fn begin_with_limits(&self, limits: StagingLimits, validate_reads: bool) -> DurableMvccTransaction<'_> {
         let mut state = self.state.lock();
+        self.begin_locked(&mut state,limits,validate_reads)
+    }
+
+    /// Fallible admission for callers that need a shared active-snapshot ceiling.
+    pub fn try_begin(&self) -> DurableMvccResult<DurableMvccTransaction<'_>> {
+        self.try_begin_with_limits(StagingLimits::default(),false)
+    }
+    pub fn try_begin_with_read_validation(&self) -> DurableMvccResult<DurableMvccTransaction<'_>> {
+        self.try_begin_with_limits(StagingLimits::default(),true)
+    }
+    pub fn try_begin_with_limits(&self, limits: StagingLimits, validate_reads: bool) -> DurableMvccResult<DurableMvccTransaction<'_>> {
+        let mut state=self.state.lock();
+        admit_transaction(state.pins.values().copied(),self.transactions)?;
+        Ok(self.begin_locked(&mut state,limits,validate_reads))
+    }
+    fn begin_locked(&self, state:&mut State, limits:StagingLimits, validate_reads:bool) -> DurableMvccTransaction<'_> {
         let start = state.latest;
         *state.pins.entry(start).or_default() += 1;
         DurableMvccTransaction {
@@ -737,5 +769,18 @@ mod admission_tests {
         ] {
             assert!(matches!(admit_version(usage,limits,b"a",Some(b"v"),new_key),Err(ResourceError::HistoryLimit { resource:actual,.. }) if actual==resource));
         }
+    }
+}
+
+#[cfg(test)]
+mod transaction_admission_tests {
+    use super::*;
+    #[test]
+    fn active_pin_count_and_next_slot_overflow_refuse_admission() {
+        let limits=TransactionLimits { max_active:usize::MAX };
+        assert!(matches!(admit_transaction([usize::MAX],limits),Err(ResourceError::TransactionLimit { .. })));
+        assert!(matches!(admit_transaction([usize::MAX,1],limits),Err(ResourceError::TransactionLimit { .. })));
+        assert!(admit_transaction([1,1],TransactionLimits { max_active:3 }).is_ok());
+        assert!(admit_transaction([1,1],TransactionLimits { max_active:2 }).is_err());
     }
 }
