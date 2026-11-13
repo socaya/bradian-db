@@ -64,4 +64,4 @@ conflict or scope drop.
 
 Existing unlimited native/administrative scan APIs keep their compatibility behavior
 so query-policy changes do not silently cap migration/backup verification. Historical
-SQL calls controlled methods directly and has no unbounded fallback. [Retained-history limits](RETAINED_HISTORY_LIMITS.md) now bound per-domain growth and derived-history reopen admission, with bounded pruning batches. Other embedded engines, full backing-store open, checkpoint/backup working memory and global resident-memory enforcement remain separate Gate 1 work.
+SQL calls controlled methods directly and has no unbounded fallback. [Retained-history limits](RETAINED_HISTORY_LIMITS.md) now bound per-domain growth and derived-history reopen admission, with bounded pruning batches. [Backing-map limits](ROW_STORE_LIMITS.md) also control RowStore checkpoint/replay maps. Other embedded engines, metadata/index/checkpoint/backup working memory and global resident-memory enforcement remain separate Gate 1 work.

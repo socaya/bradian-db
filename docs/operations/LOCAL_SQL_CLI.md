@@ -81,6 +81,8 @@ In --history mode, --max-history-keys, --max-history-versions and --max-history-
 
 --max-staged-keys and --max-staged-bytes require --history. Defaults are 256 distinct current keys and 8388608 combined accounted bytes for current mutations and all savepoint copies. The physical 256-key maximum cannot be raised. A refusal occurs before copying the new staged entry/marker and uses existing SQL error/rollback rules. See the [staging policy](HISTORY_STAGING_LIMITS.md) for accounting, refunds and native APIs.
 
+All modes also use default [backing RowStore limits](ROW_STORE_LIMITS.md) during checkpoint/replay and writes. Query/history/staging flags do not override backing-map policy; explicit backing policy is currently a native RowStore API.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

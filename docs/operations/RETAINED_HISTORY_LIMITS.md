@@ -14,7 +14,8 @@ The byte estimate uses native Rust header sizes. It excludes fixed format/floor
 records, allocator/container slack, RowStore overlays/caches, active transactions,
 pins, typed catalog/epoch structures, staging and temporary validation/output
 buffers. It is not process RSS or a combined global reservation. Initial RowStore
-open/replay precedes the derived-history admission check and remains separate work.
+open/replay precedes the derived-history admission check and now uses separate default
+[backing-map limits](ROW_STORE_LIMITS.md). Those limits do not cover all recovery workspace.
 Borrowed backing-row traversal avoids an additional complete raw snapshot clone.
 
 ## CLI and native policy

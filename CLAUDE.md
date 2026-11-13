@@ -38,6 +38,8 @@ Gate 1 retained-history admission is specified in [ADR 0043](docs/adr/0043-retai
 
 Gate 1 historical staging is specified in [ADR 0044](docs/adr/0044-historical-transaction-staging-limits.md). Admit distinct pending keys (physical maximum 256) and combined pending/savepoint bytes before copying. Preserve state on native resource errors, SQL error recovery, original snapshots and monotone conflict observations. Refund only discarded current/marker state; aggregate transaction/pin admission remains open.
 
+Gate 1 backing maps are specified in [ADR 0045](docs/adr/0045-backing-row-map-admission.md). Admit checkpoint rows before copying and complete WAL frames before application. Under the mutation mutex, project final coalesced live/delta state before WAL append, remove affected old entries before copying, and refund delta only after successful checkpoint/truncation. Quota failure must not poison an owner or trim WAL. Global budgets and index/checkpoint/metadata workspaces remain open.
+
 Gate 1's single-table snapshot/scan extension is specified in [ADR 0042](docs/adr/0042-bounded-single-table-query-snapshots.md). SQL must bound BEGIN snapshots, scans and projection before cloning, including repeated-column amplification. Preserve full snapshot LSNs, corruption checks and old single-table full-abort semantics. Native administrative compatibility APIs stay explicit and are not SQL fallbacks. CLI limits now apply to all SQL modes; global resident-memory qualification is still open.
 
 ## 3. Architecture boundaries

@@ -58,7 +58,7 @@ This bounds accounted pending state per historical transaction, not total proces
 memory. Read observations/pins, allocator/container slack, fixed transaction headers,
 statement parsing/typed encoding, transient point-read copies, scan/output buffers
 and commit serialization are outside this budget. Active transaction count and global
-admission, backing-store replay and other engines' staging remain open. No OOM,
+admission, recovery working memory and other engines' staging remain open. [Backing-map limits](ROW_STORE_LIMITS.md) now separately control checkpoint/replay live and delta maps. No OOM,
 disk-full, failed I/O or cross-platform qualification is claimed.
 
 See [ADR 0044](../adr/0044-historical-transaction-staging-limits.md),

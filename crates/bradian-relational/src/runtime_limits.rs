@@ -1,4 +1,4 @@
-//! Query-buffer/work, retained-history and transaction staging limits; not a total RSS reservation.
+//! Query, backing-map, retained-history and staging limits; not a total RSS reservation.
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use thiserror::Error;
 
@@ -14,6 +14,8 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResourceError {
+    #[error("row store {resource} limit exceeded (limit {limit})")]
+    RowStoreLimit { resource: &'static str, limit: usize },
     #[error("retained history {resource} limit exceeded (limit {limit})")]
     HistoryLimit { resource: &'static str, limit: usize },
     #[error("transaction staging {resource} limit exceeded (limit {limit})")]
@@ -127,6 +129,30 @@ impl StagingLimits {
     pub(crate) fn check(&self, usage: StagingUsage) -> Result<(), ResourceError> {
         for (resource, actual, limit) in [("keys",usage.keys,self.max_keys.min(256)),("bytes",usage.bytes,self.max_bytes)] {
             if actual > limit { return Err(ResourceError::StagingLimit { resource,limit }); }
+        }
+        Ok(())
+    }
+}
+
+/// Separate live-row and WAL-delta map budgets; excludes allocator slack and I/O buffers.
+#[derive(Clone, Copy, Debug)]
+pub struct RowStoreLimits {
+    pub max_rows: usize,
+    pub max_row_bytes: usize,
+    pub max_delta_keys: usize,
+    pub max_delta_bytes: usize,
+}
+impl Default for RowStoreLimits {
+    fn default() -> Self { Self { max_rows: 2000000, max_row_bytes: 256 * 1024 * 1024,
+        max_delta_keys: 2000000, max_delta_bytes: 256 * 1024 * 1024 } }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowStoreUsage { pub rows: usize, pub row_bytes: usize, pub delta_keys: usize, pub delta_bytes: usize }
+impl RowStoreLimits {
+    pub(crate) fn check(&self, usage: RowStoreUsage) -> Result<(), ResourceError> {
+        for (resource, actual, limit) in [("rows",usage.rows,self.max_rows),("row bytes",usage.row_bytes,self.max_row_bytes),
+            ("delta keys",usage.delta_keys,self.max_delta_keys),("delta bytes",usage.delta_bytes,self.max_delta_bytes)] {
+            if actual > limit { return Err(ResourceError::RowStoreLimit { resource,limit }); }
         }
         Ok(())
     }

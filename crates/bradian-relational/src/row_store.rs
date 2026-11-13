@@ -28,6 +28,7 @@ use parking_lot::Mutex;
 use crc32fast::Hasher;
 use thiserror::Error;
 
+use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage};
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
@@ -50,6 +51,8 @@ const MAX_BATCH_OPS: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error(transparent)]
+    Resource(#[from] ResourceError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -95,6 +98,7 @@ struct Inner {
     index: Option<DiskBTree>,
     snapshot_pages: Option<PageCache>,
     poisoned: bool,
+    usage: RowStoreUsage,
 }
 
 /// Durable, single-process row store. A mutex serializes operations within this
@@ -102,6 +106,7 @@ struct Inner {
 #[derive(Debug)]
 pub struct RowStore {
     root: PathBuf,
+    limits: RowStoreLimits,
     inner: Mutex<Inner>,
     // Drop after the WAL handle so the exclusive ownership remains in force
     // throughout teardown. The kernel releases the lock automatically.
@@ -110,6 +115,10 @@ pub struct RowStore {
 
 impl RowStore {
     pub fn open(root: impl AsRef<Path>) -> StoreResult<Self> {
+        Self::open_with_limits(root, RowStoreLimits::default())
+    }
+
+    pub fn open_with_limits(root: impl AsRef<Path>, limits: RowStoreLimits) -> StoreResult<Self> {
         let root = root.as_ref();
         fs::create_dir_all(root)?;
         let lock = OpenOptions::new()
@@ -123,17 +132,7 @@ impl RowStore {
             Err(TryLockError::WouldBlock) => return Err(StoreError::Busy),
             Err(TryLockError::Error(error)) => return Err(StoreError::Io(error)),
         }
-        let (checkpoint_lsn, mut rows) = read_latest_snapshot(root)?;
-        // A committed checkpoint can outlive an interrupted derived-index
-        // publication. Rebuild only an absent index from verified pages.
-        if snapshot_path(root, checkpoint_lsn).exists() {
-            if !index_recovery::index_path(root, checkpoint_lsn).exists() {
-                index_recovery::rebuild_missing(root, checkpoint_lsn)?;
-            }
-            if let Some(manifest) = checkpoint_manifest::load(root)? {
-                checkpoint_manifest::check_index(root, manifest)?;
-            }
-        }
+        let (checkpoint_lsn, mut rows, mut usage) = read_latest_snapshot(root, limits)?;
         let mut delta = BTreeMap::new();
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
@@ -144,7 +143,17 @@ impl RowStore {
             .open(wal_path)?;
         // Persist the directory entry for newly created WAL files on Unix.
         sync_directory(root)?;
-        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows, &mut delta)?;
+        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows, &mut delta, &mut usage, limits)?;
+        // A committed checkpoint can outlive an interrupted derived-index
+        // publication. Rebuild only an absent index from verified pages.
+        if snapshot_path(root, checkpoint_lsn).exists() {
+            if !index_recovery::index_path(root, checkpoint_lsn).exists() {
+                index_recovery::rebuild_missing(root, checkpoint_lsn)?;
+            }
+            if let Some(manifest) = checkpoint_manifest::load(root)? {
+                checkpoint_manifest::check_index(root, manifest)?;
+            }
+        }
         // An interrupted append is not a complete transaction. Repair the
         // trailing, incomplete frame so future writes remain replayable.
         if valid_length < wal.metadata()?.len() {
@@ -154,6 +163,7 @@ impl RowStore {
         wal.seek(SeekFrom::End(0))?;
         Ok(Self {
             root: root.to_owned(),
+            limits,
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
@@ -164,9 +174,13 @@ impl RowStore {
                 index: None,
                 snapshot_pages: None,
                 poisoned: false,
+                usage,
             }),
         })
     }
+
+    pub fn resource_usage(&self) -> RowStoreUsage { self.inner.lock().usage }
+    pub fn resource_limits(&self) -> RowStoreLimits { self.limits }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.inner.lock().rows.get(key).cloned()
@@ -257,7 +271,7 @@ impl RowStore {
             last_lsn: inner.lsn,
             rows: inner.rows.len() as u64,
         };
-        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows)
+        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows, self.limits)
     }
 
     /// Restore a verified physical database backup into an absent directory.
@@ -266,7 +280,13 @@ impl RowStore {
         backup: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> StoreResult<BackupReceipt> {
-        backup::restore_backup(backup.as_ref(), destination.as_ref())
+        Self::restore_backup_with_limits(backup, destination, RowStoreLimits::default())
+    }
+
+    pub fn restore_backup_with_limits(
+        backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: RowStoreLimits,
+    ) -> StoreResult<BackupReceipt> {
+        backup::restore_backup_with_limits(backup.as_ref(), destination.as_ref(), limits)
     }
 
     /// Sync exactly one replace/insert operation before publishing it.
@@ -286,6 +306,8 @@ impl RowStore {
         if inner.poisoned {
             return Err(StoreError::Poisoned);
         }
+        let changes = BTreeMap::from([(key,value)]);
+        let usage = projected_usage(&inner.rows, &inner.delta, inner.usage, self.limits, &changes)?;
         let next = inner.lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
         let frame = encode_wal(next, key, value);
         // Any WAL write/sync failure can leave an unknown partial record. The
@@ -294,16 +316,9 @@ impl RowStore {
             inner.poisoned = true;
             return Err(StoreError::Io(error));
         }
-        match value {
-            Some(bytes) => {
-                inner.rows.insert(key.to_vec(), bytes.to_vec());
-                inner.delta.insert(key.to_vec(), Some(bytes.to_vec()));
-            }
-            None => {
-                inner.rows.remove(key);
-                inner.delta.insert(key.to_vec(), None);
-            }
-        }
+        let Inner { rows, delta, .. } = &mut *inner;
+        apply_changes(rows, delta, &changes);
+        inner.usage = usage;
         inner.lsn = next;
         Ok(next)
     }
@@ -353,24 +368,17 @@ impl RowStore {
                 return Err(StoreError::Conflict { expected, actual: inner.lsn });
             }
         }
+        let changes = final_changes(mutations);
+        let usage = projected_usage(&inner.rows, &inner.delta, inner.usage, self.limits, &changes)?;
         let next = inner.lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
         let frame = encode_batch(next, mutations, size);
         if let Err(error) = inner.wal.write_all(&frame).and_then(|_| inner.wal.sync_all()) {
             inner.poisoned = true;
             return Err(StoreError::Io(error));
         }
-        for mutation in mutations {
-            match mutation {
-                RowMutation::Put { key, value } => {
-                    inner.rows.insert(key.clone(), value.clone());
-                    inner.delta.insert(key.clone(), Some(value.clone()));
-                }
-                RowMutation::Delete { key } => {
-                    inner.rows.remove(key);
-                    inner.delta.insert(key.clone(), None);
-                }
-            }
-        }
+        let Inner { rows, delta, .. } = &mut *inner;
+        apply_changes(rows, delta, &changes);
+        inner.usage = usage;
         inner.lsn = next;
         Ok(next)
     }
@@ -602,12 +610,58 @@ impl RowStore {
         }
         inner.checkpoint_lsn = lsn;
         inner.delta.clear();
+        inner.usage.delta_keys = 0;
+        inner.usage.delta_bytes = 0;
         inner.index = None;
         inner.snapshot_pages = None;
         // Older checkpoints are no longer needed once the newest snapshot is
         // published and WAL truncation is complete. Cleanup is opportunistic.
         let _ = prune_snapshots(&self.root, lsn);
         Ok(lsn)
+    }
+}
+
+type Changes<'a> = BTreeMap<&'a [u8], Option<&'a [u8]>>;
+fn row_cost(key: &[u8], value: &[u8]) -> usize {
+    std::mem::size_of::<(Vec<u8>, Vec<u8>)>() + key.len() + value.len()
+}
+fn delta_cost(key: &[u8], value: Option<&[u8]>) -> usize {
+    std::mem::size_of::<(Vec<u8>, Option<Vec<u8>>)>() + key.len() + value.map_or(0, <[u8]>::len)
+}
+fn add_usage(current: usize, added: usize, resource: &'static str, limit: usize) -> Result<usize, ResourceError> {
+    current.checked_add(added).ok_or(ResourceError::RowStoreLimit { resource, limit })
+}
+fn final_changes(mutations: &[RowMutation]) -> Changes<'_> {
+    mutations.iter().map(|m| match m {
+        RowMutation::Put { key, value } => (key.as_slice(),Some(value.as_slice())),
+        RowMutation::Delete { key } => (key.as_slice(),None),
+    }).collect()
+}
+fn projected_usage(rows: &RowMap, delta: &BTreeMap<Vec<u8>, Option<Vec<u8>>>, mut usage: RowStoreUsage,
+    limits: RowStoreLimits, changes: &Changes<'_>) -> StoreResult<RowStoreUsage> {
+    // Remove every affected old charge before adding the final coalesced state.
+    // Admission must not depend on key order or intermediate operations in a batch.
+    for key in changes.keys() {
+        if let Some(value) = rows.get(*key) { usage.rows -= 1; usage.row_bytes -= row_cost(key,value); }
+        if let Some(value) = delta.get(*key) { usage.delta_keys -= 1; usage.delta_bytes -= delta_cost(key,value.as_deref()); }
+    }
+    for (key,value) in changes {
+        if let Some(value) = value {
+            usage.rows = add_usage(usage.rows,1,"rows",limits.max_rows)?;
+            usage.row_bytes = add_usage(usage.row_bytes,row_cost(key,value),"row bytes",limits.max_row_bytes)?;
+        }
+        usage.delta_keys = add_usage(usage.delta_keys,1,"delta keys",limits.max_delta_keys)?;
+        usage.delta_bytes = add_usage(usage.delta_bytes,delta_cost(key,*value),"delta bytes",limits.max_delta_bytes)?;
+    }
+    limits.check(usage)?;
+    Ok(usage)
+}
+fn apply_changes(rows: &mut RowMap, delta: &mut BTreeMap<Vec<u8>, Option<Vec<u8>>>, changes: &Changes<'_>) {
+    // Drop affected old entries first so admitted final state is also the map-copy peak.
+    for key in changes.keys() { rows.remove(*key); delta.remove(*key); }
+    for (key,value) in changes {
+        if let Some(value) = value { rows.insert(key.to_vec(),value.to_vec()); }
+        delta.insert(key.to_vec(),value.map(<[u8]>::to_vec));
     }
 }
 
@@ -727,6 +781,7 @@ fn replay(
     checkpoint_lsn: u64,
     rows: &mut BTreeMap<Vec<u8>, Vec<u8>>,
     delta: &mut BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    usage: &mut RowStoreUsage, limits: RowStoreLimits,
 ) -> StoreResult<(u64, u64)> {
     wal.seek(SeekFrom::Start(0))?;
     let mut lsn = checkpoint_lsn;
@@ -770,18 +825,10 @@ fn replay(
             if seq != lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)? {
                 return Err(StoreError::Corruption(format!("WAL gap after checkpoint at byte {start}")));
             }
-            for operation in operations {
-                match operation {
-                    RowMutation::Put { key, value } => {
-                        rows.insert(key.clone(), value.clone());
-                        delta.insert(key, Some(value));
-                    }
-                    RowMutation::Delete { key } => {
-                        rows.remove(&key);
-                        delta.insert(key, None);
-                    }
-                }
-            }
+            let changes = final_changes(&operations);
+            let admitted = projected_usage(rows, delta, *usage, limits, &changes)?;
+            apply_changes(rows, delta, &changes);
+            *usage = admitted;
             lsn = seq;
         }
         valid_end = wal.stream_position()?;
@@ -809,7 +856,7 @@ fn list_snapshots(root: &Path) -> StoreResult<Vec<(u64, PathBuf)>> {
     Ok(snapshots)
 }
 
-fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, RowMap)> {
+fn read_latest_snapshot(root: &Path, limits: RowStoreLimits) -> StoreResult<(u64, RowMap, RowStoreUsage)> {
     let manifest = checkpoint_manifest::load(root)?;
     let snapshot = match manifest {
         Some(m) => {
@@ -819,7 +866,7 @@ fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, RowMap)> {
         None => list_snapshots(root)?.pop(), // read-only compatibility with pre-manifest stores
     };
     let Some((lsn, path)) = snapshot else {
-        return Ok((0, BTreeMap::new()));
+        return Ok((0, BTreeMap::new(), RowStoreUsage::default()));
     };
     let mut file = File::open(path)?;
     let file_len = file.metadata()?.len();
@@ -842,6 +889,7 @@ fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, RowMap)> {
         return Err(StoreError::Corruption("snapshot metadata and file length disagree".into()));
     }
     let mut rows = BTreeMap::new();
+    let mut usage = RowStoreUsage::default();
     let mut previous = None::<Vec<u8>>;
     for page_id in 1..=pages {
         file.read_exact(&mut bytes)?;
@@ -861,13 +909,16 @@ fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, RowMap)> {
             if size > page.payload.len() - pos || key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE {
                 return Err(StoreError::Corruption("invalid snapshot row length".into()));
             }
-            let key = page.payload[pos + ROW_HEADER..pos + ROW_HEADER + key_len].to_vec();
-            let value = page.payload[pos + ROW_HEADER + key_len..pos + size].to_vec();
-            if previous.as_ref().is_some_and(|prev| prev >= &key) {
+            let key = &page.payload[pos + ROW_HEADER..pos + ROW_HEADER + key_len];
+            let value = &page.payload[pos + ROW_HEADER + key_len..pos + size];
+            if previous.as_ref().is_some_and(|prev| prev.as_slice() >= key) {
                 return Err(StoreError::Corruption("snapshot rows are not strictly ordered".into()));
             }
-            previous = Some(key.clone());
-            rows.insert(key, value);
+            usage.rows = add_usage(usage.rows,1,"rows",limits.max_rows)?;
+            usage.row_bytes = add_usage(usage.row_bytes,row_cost(key,value),"row bytes",limits.max_row_bytes)?;
+            limits.check(usage)?;
+            previous = Some(key.to_vec());
+            rows.insert(key.to_vec(), value.to_vec());
             pos += size;
         }
     }
@@ -879,7 +930,7 @@ fn read_latest_snapshot(root: &Path) -> StoreResult<(u64, RowMap)> {
             return Err(StoreError::Corruption("checkpoint manifest and snapshot contents disagree".into()));
         }
     }
-    Ok((checkpoint, rows))
+    Ok((checkpoint, rows, usage))
 }
 
 fn write_snapshot(
@@ -993,4 +1044,16 @@ fn sync_directory(root: &Path) -> std::io::Result<()> {
 fn sync_directory(_root: &Path) -> std::io::Result<()> {
     // Windows needs a separately tested directory-replacement durability layer.
     Ok(())
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn map_accounting_overflow_refuses_instead_of_wrapping() {
+        for resource in ["rows","row bytes","delta keys","delta bytes"] {
+            assert!(matches!(add_usage(usize::MAX,1,resource,usize::MAX),
+                Err(ResourceError::RowStoreLimit { resource:actual,.. }) if actual==resource));
+        }
+    }
 }
