@@ -3,7 +3,7 @@
 Updated 13 November 2026. Scope and evidence refer to the checked implementation,
 not blanket completion of the master SRS. Automatic CI remains manual-only.
 
-## Closed through G42
+## Closed through G43
 
 | Gap | Implemented behavior | Evidence |
 |---|---|---|
@@ -20,6 +20,7 @@ not blanket completion of the master SRS. Automatic CI remains manual-only.
 | Constant defaults unavailable for added columns | Immutable typed defaults, required additions, old-row projection and INSERT DEFAULT | [G40](../gates/BRD-G40-immutable-column-defaults.md), recovery and compatibility tests |
 | Transaction cannot recover part of staged work | Bounded SAVEPOINT, ROLLBACK TO and RELEASE with failed-state recovery and preserved conflict checks | [G41](../gates/BRD-G41-history-savepoints.md), native, SQL and process-exit tests |
 | Point reads are never validated at commit | Opt-in bounded read validation, including absent keys, scans and savepoint observations | [G42](../gates/BRD-G42-transaction-read-validation.md), concurrent and twenty-schedule tests |
+| Historical UPDATE accepts literals only | Bounded checked arithmetic, same-type column references and standalone DEFAULT, evaluated from the original row | [G43](../gates/BRD-G43-checked-update-expressions.md), numeric corpus and transaction tests |
 
 ## Remaining implementation and qualification
 
@@ -27,7 +28,7 @@ not blanket completion of the master SRS. Automatic CI remains manual-only.
 |---|---|---|
 | P0 | Broader schema evolution | Default expressions and SET/DROP DEFAULT, SET NOT NULL/backfill, DROP/RENAME/type changes, dependency planning and recovery tests |
 | P0 | Concurrent online DDL | Schema leases/reader fencing and explicit old-writer commit semantics; current ALTER requires exclusive mutable ownership |
-| P0 | SQL conformance and transaction semantics | Joins, expressions, secondary/foreign-key enforcement, full isolation-level qualification and reference schedules; ordinary snapshot mode still permits write skew, while G42 validates reads only when opted in |
+| P0 | SQL conformance and transaction semantics | Joins, general expressions outside the G43 UPDATE subset, secondary/foreign-key enforcement, full isolation-level qualification and reference schedules; ordinary snapshot mode still permits write skew, while G42 validates reads only when opted in |
 | P0 | Enterprise access and transport | Individual sessions, SQL authorization, revocation, tenant isolation and TLS/mTLS; current bootstrap gate is loopback-only |
 | P0 | Operational recovery qualification | Real power-loss, disk-full, torn-device writes, Windows/macOS tests and long-running restore rehearsals |
 | P1 | Mutable physical storage | WAL-protected dirty pages and buffer management; existing on-disk B+tree checkpoints remain immutable |
@@ -36,6 +37,6 @@ not blanket completion of the master SRS. Automatic CI remains manual-only.
 | P1 | Client and Studio integration | Service/wire protocol for relational sessions, drivers and a secured administration workflow; Rust APIs are not a public SQL server |
 | P1 | Recovery/metadata growth | Schema history compaction with reference proofs, remote/PITR/incremental archives and workload benchmarks |
 
-[Current executed verification](BRADIAN_G42_VERIFICATION_2026_11_13.md) records the test
+[Current executed verification](BRADIAN_G43_VERIFICATION_2026_11_13.md) records the test
 scope and limits. These open requirements must not be presented as production-ready
 features or silently enabled through fallback storage engines.

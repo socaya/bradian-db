@@ -32,6 +32,7 @@ pub mod mvcc_sql;
 pub mod durable_mvcc;
 pub mod durable_typed;
 pub mod history_sql;
+mod sql_expression;
 pub mod history_migration;
 pub mod history_backup;
 pub mod lifecycle_history_migration;

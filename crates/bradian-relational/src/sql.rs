@@ -55,11 +55,15 @@ enum Token {
     Symbol(char),
 }
 
-fn lex(source: &str) -> SqlResult<Vec<Token>> {
+fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
     let mut chars = source.chars().peekable();
     let mut out = Vec::new();
     while let Some(&ch) = chars.peek() {
         if ch.is_whitespace() { chars.next(); continue; }
+        if expressions && ((ch == '-' && chars.clone().nth(1) == Some('-'))
+            || (ch == '/' && chars.clone().nth(1) == Some('*'))) {
+            return Err(SqlError::Unsupported("SQL comments are unsupported".into()));
+        }
         if ch == '\'' {
             chars.next();
             let mut value = String::new();
@@ -81,7 +85,7 @@ fn lex(source: &str) -> SqlResult<Vec<Token>> {
                 word.push(chars.next().unwrap());
             }
             out.push(Token::Word(word));
-        } else if ch.is_ascii_digit() || ch == '-' {
+        } else if ch.is_ascii_digit() || (ch == '-' && !expressions) {
             let mut number = String::new();
             if ch == '-' {
                 number.push(chars.next().unwrap());
@@ -103,7 +107,7 @@ fn lex(source: &str) -> SqlResult<Vec<Token>> {
                 }
             }
             out.push(Token::Number(number));
-        } else if "(),.=;*".contains(ch) {
+        } else if "(),.=;*".contains(ch) || (expressions && "+-/".contains(ch)) {
             chars.next();
             out.push(Token::Symbol(ch));
         } else {
@@ -132,7 +136,18 @@ pub(crate) struct Parser {
 
 impl Parser {
     pub(crate) fn new(sql: &str) -> SqlResult<Self> {
-        Ok(Self { tokens: lex(sql)?, pos: 0 })
+        Ok(Self { tokens: lex(sql, false)?, pos: 0 })
+    }
+
+    pub(crate) fn new_expressions(sql: &str) -> SqlResult<Self> {
+        Ok(Self { tokens: lex(sql, true)?, pos: 0 })
+    }
+
+    pub(crate) fn next_is_literal(&self) -> bool {
+        matches!(self.peek(), Some(Token::Text(_) | Token::Number(_)))
+            || ["null", "true", "false"].iter().any(|word| self.next_is_word(word))
+            || (self.peek() == Some(&Token::Symbol('-'))
+                && matches!(self.tokens.get(self.pos + 1), Some(Token::Number(_))))
     }
 
     fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
@@ -198,6 +213,15 @@ impl Parser {
     }
 
     pub(crate) fn literal(&mut self) -> SqlResult<Literal> {
+        if self.consume_symbol('-') {
+            return match self.tokens.get(self.pos).cloned() {
+                Some(Token::Number(value)) => {
+                    self.pos += 1;
+                    Ok(Literal::Number(format!("-{value}")))
+                },
+                _ => Err(SqlError::Syntax("minus must prefix a numeric literal".into())),
+            };
+        }
         match self.tokens.get(self.pos).cloned() {
             Some(Token::Text(value)) => { self.pos += 1; Ok(Literal::Text(value)) }
             Some(Token::Number(value)) => { self.pos += 1; Ok(Literal::Number(value)) }

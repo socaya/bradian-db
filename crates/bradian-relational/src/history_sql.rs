@@ -391,7 +391,7 @@ impl<'a> HistorySqlSession<'a> {
     }
 
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
-        let mut p = Parser::new(sql)?;
+        let mut p = Parser::new_expressions(sql)?;
         let command = p.word()?;
         if self.failed_statement && command != "rollback" {
             return Err(SqlError::Unsupported("transaction requires ROLLBACK TO a savepoint or ROLLBACK after a statement error".into()));
@@ -570,21 +570,24 @@ impl<'a> HistorySqlSession<'a> {
                     "update" => {
                         let table = self.engine.resolve(&p.name()?)?;
                         p.expect("set")?;
-                        let updates = p.assignments()?;
+                        let updates = crate::sql_expression::assignments(&mut p)?;
                         let key = key_predicate(&mut p, &table)?;
                         p.end()?;
                         let mut replacements = BTreeMap::new();
-                        for (name, lit) in updates {
+                        for (name, expression) in updates {
                             if table.primary_key.columns.contains(&name) {
                                 return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
                             }
                             let position = locate(&table, &name)?;
-                            if replacements.insert(position, coerce(&lit, &table.columns[position])?).is_some() {
+                            if replacements.insert(position, crate::sql_expression::bind(&table, position, expression)?).is_some() {
                                 return Err(SqlError::Syntax("duplicate SET column".into()));
                             }
                         }
                         let affected = if let Some(mut row) = tx.get(table.id, &key)? {
-                            for (position, value) in replacements { row[position] = value; }
+                            let original = row.clone();
+                            for (position, expression) in replacements {
+                                row[position] = expression.evaluate(&original, &table.columns[position])?;
+                            }
                             tx.replace(table.id, &row)?;
                             1
                         } else { 0 };
