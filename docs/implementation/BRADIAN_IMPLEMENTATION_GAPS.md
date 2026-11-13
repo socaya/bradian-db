@@ -12,7 +12,7 @@ are frozen. Gate 1 is the active kernel implementation gate, not master Gate 44.
 
 | Master gate/task | Remaining gap | Required next evidence |
 |---|---|---|
-| 1 / G1-MEMORY | Query buffers/projection and per-domain retained-history admission are controlled; backing-store open/replay, catalogs, active transactions, alternate engines, JSON output and global admission/cancellation remain incomplete | Global runtime limits and memory-pressure/failure qualification; see [latest evidence](BRADIAN_GATE1_HISTORY_ADMISSION_VERIFICATION_2026_11_13.md) |
+| 1 / G1-MEMORY | Query buffers, retained history and per-historical-transaction write/savepoint admission are controlled; backing-store open/replay, catalogs, aggregate transactions/pins, alternate engines, JSON output and global admission/cancellation remain incomplete | Global runtime limits and memory-pressure/failure qualification; see [latest evidence](BRADIAN_GATE1_STAGING_LIMITS_VERIFICATION_2026_11_13.md) |
 | 1 / G1-LOCAL-ACCESS | Complete OS-owner/ACL/path policy and equivalent library/service enforcement | Threat-reviewed local identity and negative access-path tests |
 | 1 / G1-FAULTS | Failed sync/rename, disk-full and physical/device behavior | Deterministic I/O fault matrix and platform recovery runs |
 | 1 / G1-REFERENCE | Broader SQL/isolation reference and installation qualification | Published conformance corpus and Windows/macOS installer/lock tests |

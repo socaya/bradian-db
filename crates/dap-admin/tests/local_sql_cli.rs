@@ -137,7 +137,7 @@ mod unix {
         assert!(!both.status.success());
         assert!(!run(&root,"BEGIN",&["--table","test.public.items","--history"]).status.success());
         assert!(!run(&root,"BEGIN",&["--history"]).status.success());
-        for flag in ["--max-history-keys","--max-history-versions","--max-history-bytes"] {
+        for flag in ["--max-history-keys","--max-history-versions","--max-history-bytes","--max-staged-keys","--max-staged-bytes"] {
             assert!(!run(&root,"BEGIN",&[flag,"1"]).status.success());
         }
         assert!(!root.exists());
@@ -208,6 +208,13 @@ mod unix {
             assert!(!output.status.success());
             assert!(String::from_utf8(output.stderr).unwrap().contains("retained history"));
         }
+        for flag in ["--max-staged-keys","--max-staged-bytes"] {
+            ok(run(&root,"BEGIN; SELECT id FROM test.public.items; COMMIT",&["--history",flag,"0"]));
+            let output=run(&root,"BEGIN; UPDATE test.public.items SET amount=999 WHERE id=1; COMMIT",&["--history",flag,"0"]);
+            assert!(!output.status.success());
+            assert!(String::from_utf8(output.stderr).unwrap().contains("transaction staging"));
+        }
+        ok(run(&root,"BEGIN; UPDATE test.public.items SET amount=105 WHERE id=1; COMMIT",&["--history","--max-staged-keys","1","--max-staged-bytes","1000"]));
         let versions = { let db=HistorySqlEngine::open(&root).unwrap(); db.history_usage().versions+1 };
         let capacity=versions.to_string();
         ok(run(&root,"BEGIN; UPDATE test.public.items SET amount=106 WHERE id=1; COMMIT",&["--history","--max-history-versions",&capacity]));

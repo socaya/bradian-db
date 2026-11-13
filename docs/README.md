@@ -67,11 +67,11 @@ below are historical implementation evidence and do not represent 44 accepted ga
 The [native SQL command](operations/LOCAL_SQL_CLI.md) addresses its runnable CLI task.
 [Historical scan controls](operations/HISTORY_QUERY_LIMITS.md) and
 [single-table snapshot/result controls](operations/SINGLE_TABLE_QUERY_LIMITS.md)
-address per-query buffer/work limits. [Retained-history admission](operations/RETAINED_HISTORY_LIMITS.md) adds per-domain growth/reopen limits and bounded pruning; global runtime acceptance remains open. See [ADR 0043](adr/0043-retained-history-admission.md).
+address per-query buffer/work limits. [Retained-history admission](operations/RETAINED_HISTORY_LIMITS.md) adds per-domain growth/reopen limits and bounded pruning; global runtime acceptance remains open. See [ADR 0043](adr/0043-retained-history-admission.md). [Transaction staging controls](operations/HISTORY_STAGING_LIMITS.md) now bound pending keys and combined write/savepoint bytes; [ADR 0044](adr/0044-historical-transaction-staging-limits.md) records the contract.
 
 ## Executed verification
 
-[Gate 1 retained-history admission verification, 13 November 2026](implementation/BRADIAN_GATE1_HISTORY_ADMISSION_VERIFICATION_2026_11_13.md)
+[Gate 1 transaction staging verification, 13 November 2026](implementation/BRADIAN_GATE1_STAGING_LIMITS_VERIFICATION_2026_11_13.md)
 records current executed checks. The prior [implementation-record verification](implementation/BRADIAN_G44_VERIFICATION_2026_11_13.md)
 retains its dated evidence. Operational/platform qualification remains separate work.
 

@@ -7,7 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{Table, TableId};
-use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage};
+use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage};
 use crate::epoch_row::{DecodedEpochRow, EpochRowError, EpochSchemas};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
 use crate::schema_activation::{self, ActivationCommit, ActivationIntent, ActivationStage,
@@ -908,6 +908,10 @@ impl DurableTypedStore {
         Ok(rows)
     }
 
+    pub fn begin_with_limits(&self, limits: StagingLimits, validate_reads: bool) -> DurableTypedTransaction<'_> {
+        DurableTypedTransaction { owner: self, inner: self.store.begin_with_limits(limits, validate_reads) }
+    }
+
     pub fn begin(&self) -> DurableTypedTransaction<'_> {
         DurableTypedTransaction { owner: self, inner: self.store.begin() }
     }
@@ -939,6 +943,8 @@ impl DurableTypedTransaction<'_> {
     pub fn start_lsn(&self) -> u64 { self.inner.start_lsn() }
     pub fn read_validation_enabled(&self) -> bool { self.inner.read_validation_enabled() }
     pub fn savepoint_count(&self) -> usize { self.inner.savepoint_count() }
+    pub fn staging_usage(&self) -> StagingUsage { self.inner.staging_usage() }
+    pub fn staging_limits(&self) -> StagingLimits { self.inner.staging_limits() }
     pub fn savepoint(&mut self, name: &str) -> Result<(), DomainError> {
         self.inner.savepoint(name).map_err(map_mvcc)
     }

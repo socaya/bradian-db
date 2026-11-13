@@ -223,10 +223,12 @@ fn too_many_operations_are_rejected_without_partial_versions() {
     let db = DurableMvccStore::open(dir.path()).unwrap();
     let before = db.latest_lsn();
     let mut tx = db.begin();
-    for index in 0..257 {
+    for index in 0..256 {
         tx.insert(format!("key-{index:03}").as_bytes(), b"value").unwrap();
     }
-    assert!(matches!(tx.commit(), Err(DurableMvccError::CapacityExhausted)));
+    assert!(matches!(tx.insert(b"overflow", b"value"), Err(DurableMvccError::Resource(_))));
+    assert_eq!(tx.staging_usage().keys, 256);
+    tx.rollback();
     assert_eq!(db.latest_lsn(), before);
     assert_eq!(db.stats().persisted_versions, 0);
 }

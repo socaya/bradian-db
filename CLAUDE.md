@@ -36,6 +36,8 @@ Gate 1 scan controls are specified in [ADR 0041](docs/adr/0041-bounded-historica
 
 Gate 1 retained-history admission is specified in [ADR 0043](docs/adr/0043-retained-history-admission.md). Enforce key/version/accounted-byte limits before WAL append and derived-history allocation; preserve exact counters through reopen/prune. Preflight both DDL records before intent, and remaining activation capacity before catalog recovery. Bound prune worklists and never auto-drop history on quota refusal. This is not total RSS or backing-store open/replay admission.
 
+Gate 1 historical staging is specified in [ADR 0044](docs/adr/0044-historical-transaction-staging-limits.md). Admit distinct pending keys (physical maximum 256) and combined pending/savepoint bytes before copying. Preserve state on native resource errors, SQL error recovery, original snapshots and monotone conflict observations. Refund only discarded current/marker state; aggregate transaction/pin admission remains open.
+
 Gate 1's single-table snapshot/scan extension is specified in [ADR 0042](docs/adr/0042-bounded-single-table-query-snapshots.md). SQL must bound BEGIN snapshots, scans and projection before cloning, including repeated-column amplification. Preserve full snapshot LSNs, corruption checks and old single-table full-abort semantics. Native administrative compatibility APIs stay explicit and are not SQL fallbacks. CLI limits now apply to all SQL modes; global resident-memory qualification is still open.
 
 ## 3. Architecture boundaries

@@ -77,6 +77,10 @@ and remaining resident-memory limits.
 
 In --history mode, --max-history-keys, --max-history-versions and --max-history-bytes configure per-domain retained-state admission. Defaults are 1000000 keys, 1000000 versions and 268435456 accounted bytes. These flags require --history. They apply to open and committed growth; they do not reset per query or automatically prune old versions. See the [retained-history policy](RETAINED_HISTORY_LIMITS.md) for accounting, reopen and explicit pruning.
 
+## Historical transaction staging
+
+--max-staged-keys and --max-staged-bytes require --history. Defaults are 256 distinct current keys and 8388608 combined accounted bytes for current mutations and all savepoint copies. The physical 256-key maximum cannot be raised. A refusal occurs before copying the new staged entry/marker and uses existing SQL error/rollback rules. See the [staging policy](HISTORY_STAGING_LIMITS.md) for accounting, refunds and native APIs.
+
 ## Output and failure contract
 
 One JSON line is emitted for each successfully executed statement. The statement

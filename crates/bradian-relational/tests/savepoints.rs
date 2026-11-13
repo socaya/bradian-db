@@ -55,12 +55,13 @@ fn invalid_names_marker_limits_and_staged_key_limits_do_not_mutate_state() {
     assert!(tx.savepoint("overflow").is_err());
     assert_eq!(tx.savepoint_count(), 16);
     tx.rollback_to("s0").unwrap();
-    for i in 0_u32..257 { tx.insert(&i.to_be_bytes(), b"v").unwrap(); }
-    assert!(tx.savepoint("too_many_keys").is_err());
-    assert_eq!(tx.savepoint_count(), 1);
+    for i in 0_u32..256 { tx.insert(&i.to_be_bytes(), b"v").unwrap(); }
+    assert!(tx.insert(&256_u32.to_be_bytes(), b"v").is_err());
+    tx.savepoint("at_key_limit").unwrap();
+    assert_eq!(tx.savepoint_count(), 2);
     assert!(tx.rollback_to("absent").is_err());
     assert!(tx.release_savepoint("absent").is_err());
-    assert_eq!(tx.get(&256_u32.to_be_bytes()).unwrap(), Some(b"v".to_vec()));
+    assert_eq!(tx.get(&256_u32.to_be_bytes()).unwrap(), None);
     tx.rollback_to("s0").unwrap();
     tx.release_savepoint("s0").unwrap();
     assert_eq!(tx.commit().unwrap(), baseline);

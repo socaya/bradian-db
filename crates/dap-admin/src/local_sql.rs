@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bradian_relational::history_sql::HistorySqlEngine;
 use bradian_relational::sql::{SqlEngine, SqlResultSet};
 use bradian_relational::typed_table::Value;
-use bradian_relational::runtime_limits::{ScanControl, ScanLimits, HistoryLimits};
+use bradian_relational::runtime_limits::{ScanControl, ScanLimits, HistoryLimits, StagingLimits};
 use clap::Parser;
 use serde_json::{json, Value as Json};
 
@@ -48,6 +48,12 @@ pub(crate) struct SqlArgs {
     /// Accounted retained history bytes (default 268435456; not total RSS).
     #[arg(long, requires = "history")]
     max_history_bytes: Option<usize>,
+    /// Distinct staged history keys (default and physical maximum 256).
+    #[arg(long, requires = "history")]
+    max_staged_keys: Option<usize>,
+    /// Accounted staged mutations plus savepoint copies (default 8388608).
+    #[arg(long, requires = "history")]
+    max_staged_bytes: Option<usize>,
 }
 
 fn read_script(args: &SqlArgs) -> Result<String> {
@@ -168,7 +174,11 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
             max_versions: args.max_history_versions.unwrap_or(defaults.max_versions),
             max_bytes: args.max_history_bytes.unwrap_or(defaults.max_bytes),
         })?;
-        engine.with_session_control(control, |session| {
+        let defaults = StagingLimits::default();
+        engine.with_session_limits(control, StagingLimits {
+            max_keys: args.max_staged_keys.unwrap_or(defaults.max_keys),
+            max_bytes: args.max_staged_bytes.unwrap_or(defaults.max_bytes),
+        }, |session| {
             for (index, statement) in statements.iter().enumerate() {
                 let result = session.execute(statement).with_context(||format!("statement {} failed", index + 1));
                 // Keep CLI output errors outside engine error categories while
@@ -205,7 +215,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn args() -> SqlArgs { SqlArgs { root: PathBuf::from("unused"), execute: None, file: None, table: None, history: false, max_scan_rows: None, max_scan_bytes: None, max_scan_work: None, max_history_keys: None, max_history_versions: None, max_history_bytes: None } }
+    fn args() -> SqlArgs { SqlArgs { root: PathBuf::from("unused"), execute: None, file: None, table: None, history: false, max_scan_rows: None, max_scan_bytes: None, max_scan_work: None, max_history_keys: None, max_history_versions: None, max_history_bytes: None, max_staged_keys: None, max_staged_bytes: None } }
 
     #[test]
     fn splitting_preserves_quoted_semicolons_unicode_and_doubled_quotes() {

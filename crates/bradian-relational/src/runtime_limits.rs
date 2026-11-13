@@ -1,4 +1,4 @@
-//! Query-buffer/work and retained-history admission limits; not a total RSS reservation.
+//! Query-buffer/work, retained-history and transaction staging limits; not a total RSS reservation.
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use thiserror::Error;
 
@@ -16,6 +16,8 @@ impl Default for ScanLimits {
 pub enum ResourceError {
     #[error("retained history {resource} limit exceeded (limit {limit})")]
     HistoryLimit { resource: &'static str, limit: usize },
+    #[error("transaction staging {resource} limit exceeded (limit {limit})")]
+    StagingLimit { resource: &'static str, limit: usize },
     #[error("query cancelled")]
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
@@ -107,6 +109,24 @@ impl HistoryLimits {
     pub(crate) fn check(&self, usage: HistoryUsage) -> Result<(), ResourceError> {
         for (resource, actual, limit) in [("keys",usage.keys,self.max_keys),("versions",usage.versions,self.max_versions),("bytes",usage.bytes,self.max_bytes)] {
             if actual > limit { return Err(ResourceError::HistoryLimit { resource,limit }); }
+        }
+        Ok(())
+    }
+}
+
+/// Accounted pending mutations and savepoint copies in one historical transaction.
+/// The physical WAL ceiling remains 256 distinct staged keys even with a higher policy.
+#[derive(Clone, Copy, Debug)]
+pub struct StagingLimits { pub max_keys: usize, pub max_bytes: usize }
+impl Default for StagingLimits {
+    fn default() -> Self { Self { max_keys: 256, max_bytes: 8 * 1024 * 1024 } }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StagingUsage { pub keys: usize, pub bytes: usize }
+impl StagingLimits {
+    pub(crate) fn check(&self, usage: StagingUsage) -> Result<(), ResourceError> {
+        for (resource, actual, limit) in [("keys",usage.keys,self.max_keys.min(256)),("bytes",usage.bytes,self.max_bytes)] {
+            if actual > limit { return Err(ResourceError::StagingLimit { resource,limit }); }
         }
         Ok(())
     }

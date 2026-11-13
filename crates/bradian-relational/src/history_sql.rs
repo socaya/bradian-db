@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{Column, Table};
-use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage};
+use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage};
 use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::sql::{
@@ -362,10 +362,19 @@ impl HistorySqlEngine {
         &self, control: ScanControl,
         callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
     ) -> SqlResult<R> {
+        self.with_session_limits(control, StagingLimits::default(), callback)
+    }
+
+    /// Separate query-buffer and transaction staging policies; neither bounds total RSS.
+    pub fn with_session_limits<R>(
+        &self, control: ScanControl, staging: StagingLimits,
+        callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
         self.require_ready()?;
         let mut session = HistorySqlSession {
             engine: self,
             control,
+            staging,
             active: None,
             failed_statement: false,
             last_commit_lsn: None,
@@ -378,12 +387,14 @@ impl HistorySqlEngine {
 pub struct HistorySqlSession<'a> {
     engine: &'a HistorySqlEngine,
     control: ScanControl,
+    staging: StagingLimits,
     active: Option<DurableTypedTransaction<'a>>,
     last_commit_lsn: Option<u64>,
     failed_statement: bool,
 }
 
 impl<'a> HistorySqlSession<'a> {
+    pub fn staging_usage(&self) -> Option<StagingUsage> { self.active.as_ref().map(DurableTypedTransaction::staging_usage) }
     pub fn in_transaction(&self) -> bool { self.active.is_some() }
     pub fn last_commit_lsn(&self) -> Option<u64> { self.last_commit_lsn }
     pub fn read_validation_enabled(&self) -> bool {
@@ -426,9 +437,7 @@ impl<'a> HistorySqlSession<'a> {
                 if self.active.is_some() {
                     return Err(SqlError::Unsupported("nested BEGIN is unsupported".into()));
                 }
-                let tx: DurableTypedTransaction<'a> = if validate_reads {
-                    self.engine.domain.begin_with_read_validation()
-                } else { self.engine.domain.begin() };
+                let tx: DurableTypedTransaction<'a> = self.engine.domain.begin_with_limits(self.staging, validate_reads);
                 self.active = Some(tx);
                 self.failed_statement = false;
                 Ok(SqlResultSet::Command { affected: 0 })

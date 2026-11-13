@@ -8,7 +8,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
-| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query buffers/projection and per-domain retained-history growth are bounded; backing-store replay, catalog/transaction/global admission and alternate engines remain open; no production isolation qualification |
+| `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query buffers, retained-history growth and historical transaction writes/savepoint copies are bounded; backing-store replay, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
 | `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL is not remote SQL; legacy analytical commands retain their existing behavior |
 | `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
 | `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
@@ -42,7 +42,7 @@ HistoryLimits and HistoryUsage in runtime_limits expose process-local retained-h
 | Decision | Evidence required before adopting/fixing a format | Owning gate |
 |---|---|---|
 | Mutable pages/allocator and dirty buffer writes | WAL/page-LSN ordering, split/reuse crash matrix and failed sync/rename/disk-full tests | 1 |
-| Runtime quotas/cancellation | Query limits and per-domain retained-history admission are implemented; backing-store open/replay, catalog/transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
+| Runtime quotas/cancellation | Query, retained-history and per-historical-transaction staging limits are implemented; backing-store open/replay, catalog/aggregate transaction/global limits, interruption cleanup and memory-pressure workload remain | 1 |
 | Secure local identity and SQL policy context | ACL/root-owner/path threat analysis, every data path checked, revocation and diagnostics tests | 1–2 |
 | Global transaction order/safe-time | Deterministic adversarial multi-participant schedules, clock uncertainty and coordinator recovery | 5 |
 | Cluster node identity and consensus | Authenticated enrollment/fencing, quorum-loss and partition experiments | 4 |

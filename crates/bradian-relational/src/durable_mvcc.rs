@@ -16,7 +16,7 @@ use std::path::Path;
 
 use parking_lot::Mutex;
 use thiserror::Error;
-use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage};
+use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage};
 
 use crate::row_store::{RowMutation, RowStore, StoreError};
 use crate::backup::BackupReceipt;
@@ -377,21 +377,21 @@ impl DurableMvccStore {
     }
 
     pub fn begin(&self) -> DurableMvccTransaction<'_> {
-        self.begin_mode(false)
+        self.begin_with_limits(StagingLimits::default(), false)
     }
 
     /// Validate observed point reads and scans atomically with commit publication.
     pub fn begin_with_read_validation(&self) -> DurableMvccTransaction<'_> {
-        self.begin_mode(true)
+        self.begin_with_limits(StagingLimits::default(), true)
     }
 
-    fn begin_mode(&self, validate_reads: bool) -> DurableMvccTransaction<'_> {
+    pub fn begin_with_limits(&self, limits: StagingLimits, validate_reads: bool) -> DurableMvccTransaction<'_> {
         let mut state = self.state.lock();
         let start = state.latest;
         *state.pins.entry(start).or_default() += 1;
         DurableMvccTransaction {
             owner: self, start, pending: BTreeMap::new(), savepoints: Vec::new(), scanned: false, released: false,
-            validate_reads, observations: Mutex::new(ReadObservations::default()),
+            limits, pending_bytes: 0, saved_bytes: 0, validate_reads, observations: Mutex::new(ReadObservations::default()),
         }
     }
 
@@ -482,6 +482,7 @@ struct ReadObservations {
 struct Savepoint {
     name: String,
     pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pending_bytes: usize,
 }
 
 pub struct DurableMvccTransaction<'a> {
@@ -489,6 +490,9 @@ pub struct DurableMvccTransaction<'a> {
     start: u64,
     pending: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     savepoints: Vec<Savepoint>,
+    limits: StagingLimits,
+    pending_bytes: usize,
+    saved_bytes: usize,
     scanned: bool,
     released: bool,
     validate_reads: bool,
@@ -509,7 +513,28 @@ impl DurableMvccTransaction<'_> {
         } else { reads.keys.insert(key.to_vec()); }
     }
 
+    pub fn staging_usage(&self) -> StagingUsage { StagingUsage { keys: self.pending.len(), bytes: self.pending_bytes + self.saved_bytes } }
+    pub fn staging_limits(&self) -> StagingLimits { self.limits }
     pub fn savepoint_count(&self) -> usize { self.savepoints.len() }
+
+    fn staged_cost(key: &[u8], value: Option<&[u8]>) -> usize {
+        std::mem::size_of::<(Vec<u8>, Option<Vec<u8>>)>() + key.len() + value.map_or(0, <[u8]>::len)
+    }
+    fn marker_cost(point: &Savepoint) -> usize {
+        std::mem::size_of::<Savepoint>() + point.name.len() + point.pending_bytes
+    }
+    fn stage(&mut self, key: &[u8], value: Option<&[u8]>) -> DurableMvccResult<()> {
+        let previous = self.pending.get(key);
+        let old_bytes = previous.map_or(0, |v| Self::staged_cost(key,v.as_deref()));
+        let pending_bytes = self.pending_bytes - old_bytes + Self::staged_cost(key,value);
+        self.limits.check(StagingUsage { keys: self.pending.len() + usize::from(previous.is_none()), bytes: pending_bytes + self.saved_bytes })?;
+        // Free the old owned row before copying its replacement. No fallible
+        // policy work remains; allocator failure itself is outside this contract.
+        self.pending.remove(key);
+        self.pending.insert(key.to_vec(),value.map(<[u8]>::to_vec));
+        self.pending_bytes = pending_bytes;
+        Ok(())
+    }
 
     /// Capture bounded staged mutations without changing the snapshot or WAL.
     pub fn savepoint(&mut self, name: &str) -> DurableMvccResult<()> {
@@ -521,7 +546,12 @@ impl DurableMvccTransaction<'_> {
         if self.savepoints.len() >= MAX_SAVEPOINTS || self.pending.len() > MAX_WRITE_KEYS {
             return Err(DurableMvccError::Savepoint("bounded marker or staged-key capacity exceeded".into()));
         }
-        self.savepoints.push(Savepoint { name: name.into(), pending: self.pending.clone() });
+        let bytes = std::mem::size_of::<Savepoint>() + name.len() + self.pending_bytes;
+        let total = self.staging_usage().bytes.checked_add(bytes)
+            .ok_or(ResourceError::StagingLimit { resource: "bytes", limit: self.limits.max_bytes })?;
+        self.limits.check(StagingUsage { keys: self.pending.len(), bytes: total })?;
+        self.savepoints.push(Savepoint { name: name.into(), pending: self.pending.clone(), pending_bytes: self.pending_bytes });
+        self.saved_bytes += bytes;
         Ok(())
     }
 
@@ -533,8 +563,15 @@ impl DurableMvccTransaction<'_> {
     /// Restore staged writes, keeping the target marker and all conflict observations.
     pub fn rollback_to(&mut self, name: &str) -> DurableMvccResult<()> {
         let position = self.savepoint_position(name)?;
-        self.pending = self.savepoints[position].pending.clone();
+        let saved_bytes = self.savepoints[..=position].iter().map(Self::marker_cost).sum::<usize>();
+        let pending_bytes = self.savepoints[position].pending_bytes;
+        self.limits.check(StagingUsage { keys: self.savepoints[position].pending.len(), bytes: saved_bytes + pending_bytes })?;
+        // Drop descendants and current writes before cloning the target map.
+        self.pending.clear();
         self.savepoints.truncate(position + 1);
+        self.pending = self.savepoints[position].pending.clone();
+        self.pending_bytes = pending_bytes;
+        self.saved_bytes = saved_bytes;
         Ok(())
     }
 
@@ -542,6 +579,7 @@ impl DurableMvccTransaction<'_> {
     pub fn release_savepoint(&mut self, name: &str) -> DurableMvccResult<()> {
         let position = self.savepoint_position(name)?;
         self.savepoints.truncate(position);
+        self.saved_bytes = self.savepoints.iter().map(Self::marker_cost).sum();
         Ok(())
     }
 
@@ -605,22 +643,19 @@ impl DurableMvccTransaction<'_> {
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> DurableMvccResult<()> {
         validate_user(key, Some(value))?;
         if self.get(key)?.is_some() { return Err(DurableMvccError::DuplicateKey); }
-        self.pending.insert(key.to_vec(), Some(value.to_vec()));
-        Ok(())
+        self.stage(key, Some(value))
     }
 
     pub fn replace(&mut self, key: &[u8], value: &[u8]) -> DurableMvccResult<()> {
         validate_user(key, Some(value))?;
         if self.get(key)?.is_none() { return Err(DurableMvccError::NotFound); }
-        self.pending.insert(key.to_vec(), Some(value.to_vec()));
-        Ok(())
+        self.stage(key, Some(value))
     }
 
     pub fn delete(&mut self, key: &[u8]) -> DurableMvccResult<()> {
         validate_user(key, None)?;
         if self.get(key)?.is_none() { return Err(DurableMvccError::NotFound); }
-        self.pending.insert(key.to_vec(), None);
-        Ok(())
+        self.stage(key, None)
     }
 
     pub fn rollback(self) {}

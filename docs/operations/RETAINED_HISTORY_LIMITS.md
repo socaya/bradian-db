@@ -35,6 +35,8 @@ Policy-aware shared and lifecycle migration and restore entry points end in
 _with_limits. Existing entry points use defaults. Backup verification carries the
 source policy, while restore accepts its own explicit policy.
 
+The separate [transaction staging policy](HISTORY_STAGING_LIMITS.md) now controls current historical writes and saved copies. It does not charge them to the retained-state budget.
+
 ## Refusal and recovery
 
 Commit checks the complete final staged key set under the mutation mutex before
