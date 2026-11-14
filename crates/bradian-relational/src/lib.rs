@@ -46,6 +46,7 @@ pub mod schema_evolution;
 pub mod epoch_row;
 pub mod schema_activation;
 pub mod local_access;
+pub mod workspace_usage;
 
 pub use catalog::{Catalog, CatalogError};
 pub use model::{
