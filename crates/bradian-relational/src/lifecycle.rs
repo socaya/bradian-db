@@ -20,7 +20,8 @@ use thiserror::Error;
 
 use crate::{Table, TableId};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
-use crate::row_store::{RowStore, StoreError};
+use crate::row_store::{BaceWiring, RowStore, StoreError};
+use crate::runtime_limits::StorageLimits;
 use crate::transaction_domain::{DomainError, MultiTableStore};
 
 const MARKER: &[u8] = b"bradian.lifecycle.format";
@@ -87,17 +88,40 @@ pub struct CatalogLifecycle {
     catalog: PersistentCatalog,
     domain: MultiTableStore,
     journal: RowStore,
+    /// ADR 0069 — present when the coordinator was opened via
+    /// `open_with_bace`. Each component store holds its own copy of
+    /// this wiring; we keep a coordinator-level clone so
+    /// `backup_database_to` can hand it to `database_backup::backup_database`
+    /// for the staging-side `restore_backup_with_bace` dispatch.
+    bace_wiring: Option<BaceWiring>,
     operation: Mutex<()>,
 }
 
 impl CatalogLifecycle {
     pub fn open(root: impl AsRef<Path>) -> LifecycleResult<Self> {
-        if root.as_ref().join("history-domain").exists() {
+        Self::open_inner(root.as_ref(), None)
+    }
+
+    /// ADR 0069 — open the G18 coordinator with a single shared BACE
+    /// wiring threaded through its three component stores (catalog,
+    /// shared-domain, lifecycle journal). Each sub-store will decode
+    /// BRPG v2 pages on recovery and emit BACE envelopes on
+    /// checkpoint. Legacy `open` remains for stores that never had
+    /// BACE enabled; mixing (opening with BACE a directory that was
+    /// written v1-only) is tolerated by ADR 0065 §3.5.
+    pub fn open_with_bace(
+        root: impl AsRef<Path>,
+        wiring: BaceWiring,
+    ) -> LifecycleResult<Self> {
+        Self::open_inner(root.as_ref(), Some(wiring))
+    }
+
+    fn open_inner(root: &Path, wiring: Option<BaceWiring>) -> LifecycleResult<Self> {
+        if root.join("history-domain").exists() {
             return Err(LifecycleError::Integrity(
                 "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
             ));
         }
-        let root = root.as_ref();
         let legacy = root.join("tables");
         if legacy.exists() && fs::read_dir(&legacy)?.next().is_some() {
             return Err(LifecycleError::Integrity(
@@ -105,9 +129,20 @@ impl CatalogLifecycle {
             ));
         }
         fs::create_dir_all(root)?;
-        let catalog = PersistentCatalog::open(root.join("catalog"))?;
-        let domain = MultiTableStore::open(root.join("shared-domain"))?;
-        let journal = RowStore::open(root.join("lifecycle"))?;
+        let (catalog, domain, journal, wiring_stored) = match wiring {
+            Some(w) => (
+                PersistentCatalog::open_with_bace(root.join("catalog"), w.clone())?,
+                MultiTableStore::open_with_bace(root.join("shared-domain"), w.clone())?,
+                RowStore::open_with_bace(root.join("lifecycle"), StorageLimits::default(), w.clone())?,
+                Some(w),
+            ),
+            None => (
+                PersistentCatalog::open(root.join("catalog"))?,
+                MultiTableStore::open(root.join("shared-domain"))?,
+                RowStore::open(root.join("lifecycle"))?,
+                None,
+            ),
+        };
         if journal.is_empty() {
             journal.put(MARKER, VERSION)?;
         } else if journal.get(MARKER).as_deref() != Some(VERSION) {
@@ -118,6 +153,7 @@ impl CatalogLifecycle {
         let owner = Self {
             root: root.to_path_buf(),
             catalog, domain, journal,
+            bace_wiring: wiring_stored,
             operation: Mutex::new(()),
         };
         owner.reconcile()?;
@@ -302,6 +338,22 @@ impl CatalogLifecycle {
         crate::database_backup::backup_database(
             &self.root, destination.as_ref(), &self.catalog,
             &self.domain, &self.journal, &statuses, metadata,
+            self.bace_wiring.as_ref(),
+        )
+    }
+
+    /// ADR 0069 — explicit BACE-aware coordinator backup. Honestly
+    /// equivalent to `backup_database_to` on a lifecycle that was
+    /// opened via `open_with_bace`, because each sub-store's
+    /// `backup_current_generation` already threads `self.bace_wiring`
+    /// through staging-side verification (ADR 0067 §3.3). This entry
+    /// point exists for API clarity and to anchor future BACE-
+    /// specific coordinator options.
+    pub fn backup_database_to_with_bace(
+        &self, destination: impl AsRef<Path>,
+    ) -> Result<crate::database_backup::DatabaseBackupReport,crate::database_backup::DatabaseBackupError> {
+        self.backup_database_to_with_metadata_limits(
+            destination, crate::runtime_limits::MetadataLimits::default(),
         )
     }
 

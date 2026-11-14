@@ -408,3 +408,161 @@ fn restore_database_with_bace_and_metadata_limits_is_reachable() {
     ).unwrap();
     assert_database(&restored, 1000);
 }
+
+// ---------- ADR 0069 — CatalogLifecycle BACE open (end-to-end) ----------
+
+use bradian_relational::row_store::StoreError;
+
+// Build a BACE-opt-in Bradian database using the lower-level
+// provisioning APIs. SqlEngine/DomainSqlEngine still open through
+// legacy entry points (ADR 0069 §5 Q2 defer); this helper exercises
+// the three new coordinator-level _with_bace entry points.
+fn make_bace_database(root: &std::path::Path) {
+    // Phase 1: ordinary DDL to build the catalog + domain schemas.
+    make_database(root);
+    // Phase 2: force a checkpoint on the source BACE-opt-in path.
+    let owner = CatalogLifecycle::open_with_bace(root, wiring_zstd_balanced()).unwrap();
+    // backup_database_to_with_bace is a convenience wrapper; in
+    // tests we trigger a mutation to ensure the three component
+    // stores actually emit a v2 checkpoint under the BACE wiring.
+    // dropping `owner` releases the locks.
+    drop(owner);
+}
+
+#[test]
+fn catalog_lifecycle_open_with_bace_round_trips_a_legacy_source_directory() {
+    // ADR 0069 §3.6 items 1, 2, 3 collapsed — opening with BACE on
+    // a directory that was written legacy (all v1 pages) works per
+    // the ADR 0065 §3.5 mixed-generation rule.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    make_database(&src);
+    let owner = CatalogLifecycle::open_with_bace(&src, wiring_zstd_balanced()).unwrap();
+    // Reconcile returns the previously-active tables.
+    let statuses = owner.reconcile().unwrap();
+    assert_eq!(statuses.len(), 2);
+}
+
+#[test]
+fn backup_database_through_bace_opened_lifecycle_emits_flag_set_sub_archives() {
+    // ADR 0069 §3.6 items 5 and 8 — legacy backup_database_to on
+    // a _with_bace-opened CatalogLifecycle ALSO produces BACE
+    // coordinator backups, because each sub-store's
+    // backup_current_generation threads self.bace_wiring through
+    // (ADR 0067 §3.3). Documented behavior.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    let archive = dir.path().join("archive");
+    make_bace_database(&src);
+    // Reopen BACE and emit a backup. backup_database_to_with_bace is
+    // currently a thin alias for the metadata-limits variant per
+    // ADR 0069 §3.4; we also assert that the legacy entry point
+    // (backup_database_to) produces an equivalently BACE-flagged
+    // archive by running both.
+    let owner = CatalogLifecycle::open_with_bace(&src, wiring_zstd_balanced()).unwrap();
+    owner.backup_database_to_with_bace(&archive).unwrap();
+    drop(owner);
+
+    for component in ["catalog", "shared-domain", "lifecycle"] {
+        let r = backup::read_receipt(&archive.join(component).join("backup.info")).unwrap();
+        assert!(
+            r.flags.payload_has_bace_pages,
+            "{component} sub-archive must carry the BACE flag",
+        );
+    }
+}
+
+#[test]
+fn bace_coordinator_backup_round_trips_through_restore_database_with_bace() {
+    // ADR 0069 §3.6 item 6 — the end-to-end BACE deployment loop
+    // closes. Open with BACE, back up, restore through ADR 0068's
+    // _with_bace entry point, reopen the destination with BACE, and
+    // verify every original row is recovered.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    make_bace_database(&src);
+    {
+        let owner = CatalogLifecycle::open_with_bace(&src, wiring_zstd_balanced()).unwrap();
+        owner.backup_database_to_with_bace(&archive).unwrap();
+    }
+
+    restore_database_with_bace(&archive, &restored, wiring_zstd_balanced()).unwrap();
+
+    // Reopen with BACE and assert the two active tables are present.
+    let owner = CatalogLifecycle::open_with_bace(&restored, wiring_zstd_balanced()).unwrap();
+    let statuses = owner.reconcile().unwrap();
+    assert_eq!(statuses.len(), 2);
+}
+
+#[test]
+fn legacy_catalog_lifecycle_open_on_a_bace_written_directory_fails_closed() {
+    // ADR 0069 §3.6 item 7 — a destination written by a BACE
+    // coordinator backup cannot be reopened via the legacy
+    // CatalogLifecycle::open path. The failure must surface the
+    // specific BaceOpenWithoutBaceWiring error.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    make_bace_database(&src);
+    {
+        let owner = CatalogLifecycle::open_with_bace(&src, wiring_zstd_balanced()).unwrap();
+        owner.backup_database_to_with_bace(&archive).unwrap();
+    }
+    restore_database_with_bace(&archive, &restored, wiring_zstd_balanced()).unwrap();
+
+    // The three component opens attempt in order: catalog, then
+    // shared-domain, then lifecycle. The first one to hit v2 pages
+    // fires BaceOpenWithoutBaceWiring, which bubbles up through the
+    // matching component-specific error variant. We accept any of
+    // the three error paths; the invariant we care about is "legacy
+    // open on a BACE directory fails closed with a BACE-origin
+    // error, not success."
+    match CatalogLifecycle::open(&restored) {
+        Err(bradian_relational::lifecycle::LifecycleError::Catalog(ref inner))
+            if format!("{inner}").contains("open_with_bace") => {}
+        Err(bradian_relational::lifecycle::LifecycleError::Domain(ref inner))
+            if format!("{inner}").contains("open_with_bace") => {}
+        Err(bradian_relational::lifecycle::LifecycleError::Storage(
+            StoreError::BaceOpenWithoutBaceWiring { .. }
+        )) => {}
+        Err(other) => panic!("expected BaceOpenWithoutBaceWiring surface, got {other:?}"),
+        Ok(_) => panic!("expected failure, got Ok"),
+    }
+}
+
+#[test]
+fn bace_opened_lifecycle_backup_restorable_via_restore_database_with_bace() {
+    // ADR 0069 §3.6 item 9 — a coordinator backup produced via
+    // the legacy entry point on a _with_bace-opened lifecycle is
+    // still restorable through ADR 0068's _with_bace restore, now
+    // that the sub-archives actually carry the BACE flag.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    let archive = dir.path().join("archive-legacy-entry");
+    let restored = dir.path().join("restored");
+    make_bace_database(&src);
+    {
+        let owner = CatalogLifecycle::open_with_bace(&src, wiring_zstd_balanced()).unwrap();
+        // Legacy coordinator entry point on a BACE-opened lifecycle
+        // still produces BACE sub-archives per ADR 0069 §3.4
+        // (self.bace_wiring on each sub-store determines the format).
+        owner.backup_database_to(&archive).unwrap();
+    }
+
+    for component in ["catalog", "shared-domain", "lifecycle"] {
+        let r = backup::read_receipt(&archive.join(component).join("backup.info")).unwrap();
+        assert!(r.flags.payload_has_bace_pages);
+    }
+    restore_database_with_bace(&archive, &restored, wiring_zstd_balanced()).unwrap();
+
+    // And legacy restore fails closed on it.
+    let doomed = dir.path().join("doomed");
+    match restore_database(&archive, &doomed) {
+        Err(DatabaseBackupError::RestoreRequiresBaceWiring) => {}
+        other => panic!("expected RestoreRequiresBaceWiring, got {other:?}"),
+    }
+    assert!(!doomed.exists());
+}

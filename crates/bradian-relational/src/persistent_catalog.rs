@@ -19,8 +19,8 @@ use thiserror::Error;
 use crate::{
     Catalog, CatalogError, DatabaseId, ForeignKeySpec, SchemaId, Table, TableId, TableSpec,
 };
-use crate::row_store::{RowStore, StoreError};
-use crate::runtime_limits::{CatalogLimits, CatalogUsage, ResourceError};
+use crate::row_store::{BaceWiring, RowStore, StoreError};
+use crate::runtime_limits::{CatalogLimits, CatalogUsage, ResourceError, StorageLimits};
 use crate::backup::BackupReceipt;
 
 const MARKER_KEY: &[u8] = b"bradian.catalog.version";
@@ -183,7 +183,34 @@ impl PersistentCatalog {
     pub fn open_with_limits(path: impl AsRef<Path>, limits: CatalogLimits)
         -> PersistentCatalogResult<Self>
     {
-        let journal = RowStore::open(path)?;
+        Self::open_inner(path.as_ref(), limits, None)
+    }
+
+    /// ADR 0069 — open the catalog journal under BACE wiring.
+    pub fn open_with_bace(
+        path: impl AsRef<Path>,
+        wiring: BaceWiring,
+    ) -> PersistentCatalogResult<Self> {
+        Self::open_with_bace_and_limits(path, wiring, CatalogLimits::default())
+    }
+
+    pub fn open_with_bace_and_limits(
+        path: impl AsRef<Path>,
+        wiring: BaceWiring,
+        limits: CatalogLimits,
+    ) -> PersistentCatalogResult<Self> {
+        Self::open_inner(path.as_ref(), limits, Some(wiring))
+    }
+
+    fn open_inner(
+        path: &Path,
+        limits: CatalogLimits,
+        wiring: Option<BaceWiring>,
+    ) -> PersistentCatalogResult<Self> {
+        let journal = match wiring {
+            Some(w) => RowStore::open_with_bace(path, StorageLimits::default(), w)?,
+            None    => RowStore::open(path)?,
+        };
         let mut catalog = Catalog::new();
         let mut revisions = BTreeMap::new();
         let rows = journal.scan();

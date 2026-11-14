@@ -20,8 +20,8 @@ use thiserror::Error;
 
 use crate::{Table, TableId};
 use crate::backup::BackupReceipt;
-use crate::row_store::{RowMutation, RowStore, StoreError};
-use crate::runtime_limits::DomainLimits;
+use crate::row_store::{BaceWiring, RowMutation, RowStore, StoreError};
+use crate::runtime_limits::{DomainLimits, StorageLimits};
 use crate::typed_table::{
     decode_row, encode_key, encode_row, validate_table, TableError, Value,
 };
@@ -81,7 +81,37 @@ impl MultiTableStore {
     /// Open with explicit per-domain decoded-state admission (ADR 0056).
     /// Policies are not persisted; they bound live decoded state only.
     pub fn open_with_limits(root: impl AsRef<Path>, limits: DomainLimits) -> DomainResult<Self> {
-        let storage = RowStore::open(root)?;
+        Self::open_inner(root.as_ref(), limits, None)
+    }
+
+    /// ADR 0069 — open the domain with BACE wiring attached. The
+    /// underlying `RowStore` will decode BRPG v2 pages and emit BACE
+    /// envelopes on checkpoint. A single `BaceWiring` applies to the
+    /// whole domain; per-table wirings are out of scope.
+    pub fn open_with_bace(
+        root: impl AsRef<Path>,
+        wiring: BaceWiring,
+    ) -> DomainResult<Self> {
+        Self::open_with_bace_and_limits(root, wiring, DomainLimits::default())
+    }
+
+    pub fn open_with_bace_and_limits(
+        root: impl AsRef<Path>,
+        wiring: BaceWiring,
+        limits: DomainLimits,
+    ) -> DomainResult<Self> {
+        Self::open_inner(root.as_ref(), limits, Some(wiring))
+    }
+
+    fn open_inner(
+        root: &Path,
+        limits: DomainLimits,
+        wiring: Option<BaceWiring>,
+    ) -> DomainResult<Self> {
+        let storage = match wiring {
+            Some(w) => RowStore::open_with_bace(root, StorageLimits::default(), w)?,
+            None    => RowStore::open(root)?,
+        };
         let (_, entries) = storage.snapshot_with_lsn();
         let mut tables = BTreeMap::new();
         for (key, bytes) in &entries {

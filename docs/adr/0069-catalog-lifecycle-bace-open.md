@@ -1,17 +1,55 @@
-# ADR 0069 — CatalogLifecycle BACE open (implementation; **PROPOSED**)
+# ADR 0069 — CatalogLifecycle BACE open (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 14 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE prerequisite stack (0060–0063), the
-accepted row-store integration (0065), the accepted single-store
-backup carrier (0067), and the accepted coordinator restore
-carrier (0068). This ADR is the first **writer-side** carrier
-after `RowStore::open_with_bace` landed: it threads BACE wiring
-through the G18 `CatalogLifecycle` coordinator so a whole
-G19 database backup emits BACE sub-archives that the ADR 0068
-restore path knows how to consume.
+This is the writer-side unblocker that makes ADRs 0067 and 0068
+restore-side plumbing reachable end-to-end. Three component
+stores (`PersistentCatalog`, `MultiTableStore`, journal
+`RowStore`) now expose `open_with_bace`, and
+`CatalogLifecycle::open_with_bace` threads a single shared
+`BaceWiring` through them. `CatalogLifecycle::backup_database_to`
+(both the legacy entry point and the new
+`backup_database_to_with_bace` alias) now produces coordinator
+archives whose sub-archives all carry
+`flags.payload_has_bace_pages = true`, restorable through ADR
+0068's `restore_database_with_bace`.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+Implementation summary:
+
+- `crates/bradian-relational/src/transaction_domain.rs` —
+  `MultiTableStore::open_with_bace` + `_with_bace_and_limits`.
+- `crates/bradian-relational/src/persistent_catalog.rs` —
+  `PersistentCatalog::open_with_bace` + `_with_bace_and_limits`.
+- `crates/bradian-relational/src/lifecycle.rs` —
+  `CatalogLifecycle::open_with_bace` and
+  `backup_database_to_with_bace`. New `bace_wiring: Option<BaceWiring>`
+  field stored on the coordinator so `backup_database_to` can
+  pass the wiring to `database_backup::backup_database` for its
+  staging-side `restore_backup_with_bace` + `verify_reopened`
+  dispatch.
+- `crates/bradian-relational/src/database_backup.rs` —
+  `backup_database` gained a `bace: Option<&BaceWiring>` arg and
+  threads it through staging-side restores AND through
+  `verify_reopened` (which now calls
+  `CatalogLifecycle::open_with_bace` when wiring is present).
+- `crates/bradian-relational/tests/database_backup.rs` — 5 new
+  integration tests.
+
+961 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
+
+### Scope expansion discovered during implementation
+
+The draft §3.4 said `database_backup::backup_database` was
+unchanged. Implementation surfaced that
+`backup_database` internally re-restores each sub-archive via
+the LEGACY `RowStore::restore_backup` as part of its "staging-
+side verification" dance — which now fails closed on BACE
+sub-archives (ADR 0067 fail-closed invariant). Same with
+`verify_reopened` which calls `CatalogLifecycle::open`
+(legacy). Both had to be threaded with wiring. Scope expansion
+recorded honestly rather than quietly skipped.
 
 ## 1. Context
 

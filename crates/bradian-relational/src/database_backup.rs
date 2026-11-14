@@ -220,8 +220,12 @@ fn receipt_matches(actual: BackupReceipt, expected: ComponentReceipt) -> bool {
 
 fn verify_reopened(
     root: &Path, report: &DatabaseBackupReport,
+    bace: Option<&BaceWiring>,
 ) -> DatabaseBackupResult<()> {
-    let owner = CatalogLifecycle::open(root)?;
+    let owner = match bace {
+        Some(w) => CatalogLifecycle::open_with_bace(root, w.clone())?,
+        None => CatalogLifecycle::open(root)?,
+    };
     let statuses = owner.reconcile()?;
     if statuses.iter().any(|status| status.state != TableLifecycleState::Active) {
         return Err(DatabaseBackupError::Corruption("restored table is not ACTIVE".into()));
@@ -244,6 +248,11 @@ fn verify_reopened(
 /// Called by CatalogLifecycle while holding its operation mutex and the three
 /// native RowStore exclusive locks; component backup operations are therefore
 /// one consistent local logical cut across cooperating clients.
+// The coordinator-backup signature is intrinsic to the G19 contract:
+// four distinct sub-components, one lifecycle status slice, metadata
+// limits, and the ADR 0069 BACE wiring. Grouping these into a struct
+// would obscure the call site more than clarify it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn backup_database(
     source_root: &Path,
     destination: &Path,
@@ -252,6 +261,7 @@ pub(crate) fn backup_database(
     lifecycle: &RowStore,
     statuses: &[TableLifecycleStatus],
     metadata: MetadataLimits,
+    bace: Option<&BaceWiring>,
 ) -> DatabaseBackupResult<DatabaseBackupReport> {
     if statuses.iter().any(|status| status.state != TableLifecycleState::Active) {
         return Err(DatabaseBackupError::Invalid("unreconciled lifecycle state".into()));
@@ -281,12 +291,27 @@ pub(crate) fn backup_database(
     // backup before publishing it.
     // A G10 component backup is itself a directory of RowStore files, not a
     // live database root. Restore each one into an additional temporary root.
+    //
+    // ADR 0069 — when the coordinator was opened with BACE wiring, the
+    // sub-archives carry BACE v2 pages (flag set on each backup.info).
+    // We must restore via `restore_backup_with_bace`; the legacy
+    // `restore_backup` would fire `BackupRestoreRequiresBaceWiring`.
     let verify = staged.join("verified-root");
     fs::create_dir(&verify)?;
     for component in COMPONENTS {
-        RowStore::restore_backup(staged.join(component), verify.join(component))?;
+        match bace {
+            Some(w) => {
+                RowStore::restore_backup_with_bace(
+                    staged.join(component), verify.join(component),
+                    StorageLimits::default(), w.clone(),
+                )?;
+            }
+            None => {
+                RowStore::restore_backup(staged.join(component), verify.join(component))?;
+            }
+        }
     }
-    verify_reopened(&verify, &report)?;
+    verify_reopened(&verify, &report, bace)?;
     fs::remove_dir_all(&verify)?;
     sync_dir(&staged)?;
     if fs::symlink_metadata(&destination).is_ok() {
@@ -397,7 +422,7 @@ fn restore_database_inner(
             ));
         }
     }
-    verify_reopened(&staged, &report)?;
+    verify_reopened(&staged, &report, wiring.as_ref())?;
     sync_dir(&staged)?;
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(DatabaseBackupError::Invalid("destination appeared before restore publication".into()));
