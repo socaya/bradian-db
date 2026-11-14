@@ -270,3 +270,99 @@ fn catalog_journal_truncated_mid_event_fails_closed_without_partial_catalog() {
         Err(other) => panic!("unexpected error after WAL truncation: {other:?}"),
     }
 }
+
+#[test]
+fn wal_frame_with_length_zero_fails_closed() {
+    // Outcome: after a complete frame, a subsequent header declares a body
+    // length of 0. The length-bound check requires 13 <= len <= MAX_WAL_BODY,
+    // so 0 must refuse as Corruption rather than being treated as an
+    // incomplete/empty body.
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.put(b"committed", b"value").unwrap();
+    }
+    let wal = dir.path().join("rows.wal");
+    {
+        let mut file = OpenOptions::new().append(true).open(&wal).unwrap();
+        file.write_all(b"BRWL").unwrap();
+        file.write_all(&0_u32.to_le_bytes()).unwrap(); // declared body length = 0
+        file.write_all(&0_u32.to_le_bytes()).unwrap(); // CRC
+        file.sync_all().unwrap();
+    }
+    match RowStore::open(dir.path()) {
+        Err(StoreError::Corruption(msg)) => {
+            assert!(
+                msg.contains("invalid WAL frame length"),
+                "unexpected corruption message: {msg}",
+            );
+        }
+        other => panic!("expected invalid WAL frame length Corruption, got {other:?}"),
+    }
+}
+
+#[test]
+fn wal_frame_with_length_above_maximum_fails_closed() {
+    // Outcome: after a complete frame, a subsequent header declares a body
+    // length above MAX_WAL_BODY (1 MiB). The length-bound check must refuse
+    // before any attempt to allocate or read the body — a malicious or
+    // corrupted header must not be able to force a huge allocation.
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path());
+        store.put(b"committed", b"value").unwrap();
+    }
+    let wal = dir.path().join("rows.wal");
+    {
+        let mut file = OpenOptions::new().append(true).open(&wal).unwrap();
+        file.write_all(b"BRWL").unwrap();
+        // 1 MiB + 1 byte is exactly one past MAX_WAL_BODY.
+        file.write_all(&((1024 * 1024 + 1) as u32).to_le_bytes()).unwrap();
+        file.write_all(&0_u32.to_le_bytes()).unwrap(); // CRC
+        file.sync_all().unwrap();
+    }
+    match RowStore::open(dir.path()) {
+        Err(StoreError::Corruption(msg)) => {
+            assert!(
+                msg.contains("invalid WAL frame length"),
+                "unexpected corruption message: {msg}",
+            );
+        }
+        other => panic!("expected invalid WAL frame length Corruption, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn deleting_the_rows_lock_path_while_fd_is_held_keeps_the_store_live() {
+    // Outcome (Unix-specific): the rows.lock file is held via an advisory
+    // lock on an open file descriptor. If the path is unlinked while the
+    // fd is still held, the fd's lock survives — writes through the live
+    // RowStore keep working, and a second process attempting to open the
+    // directory gets its own fresh inode without colliding with the
+    // original lock. This documents the real behaviour; it is not a
+    // recommendation to unlink the lock file in production.
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    store.put(b"alice", b"first").unwrap();
+    // Unlink the lock path. The original fd inside `store` is unaffected.
+    fs::remove_file(dir.path().join("rows.lock")).unwrap();
+    // The live store keeps working — the advisory lock is on the fd, not the path.
+    store.put(b"bob", b"second").unwrap();
+    assert_eq!(store.get(b"alice"), Some(b"first".to_vec()));
+    assert_eq!(store.get(b"bob"), Some(b"second".to_vec()));
+    // A fresh open installs a new lock file at the same path. On Unix this
+    // succeeds because it creates a new inode; the original store still
+    // holds its own fd on the original (now path-less) inode.
+    //
+    // Depending on the platform, this may or may not succeed. We do not
+    // assert exclusivity under path manipulation — the production invariant
+    // is only that the live store retains correct behaviour.
+    drop(store);
+    // After drop, the directory may reopen cleanly (the fresh lock file
+    // created by the second open will stay). Confirm the previously
+    // committed rows survive the drop.
+    let reopened = open(dir.path());
+    assert_eq!(reopened.get(b"alice"), Some(b"first".to_vec()));
+    assert_eq!(reopened.get(b"bob"), Some(b"second".to_vec()));
+}
