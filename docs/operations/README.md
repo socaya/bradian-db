@@ -21,22 +21,10 @@ executed-evidence trail see the cited verification report.
 | [SQL_OUTPUT_LIMITS](SQL_OUTPUT_LIMITS.md) | [0049](../adr/0049-bounded-sql-cli-output.md) | Per-line SQL CLI output admission in every mode |
 | [HISTORY_TRANSACTION_ADMISSION](HISTORY_TRANSACTION_ADMISSION.md) | [0050](../adr/0050-historical-transaction-admission.md) | Per-domain active-transaction cap for SQL + fallible native BEGIN |
 | [LOCAL_SQL_CLI](LOCAL_SQL_CLI.md) | [0040](../adr/0040-native-local-sql-cli.md), [0053](../adr/0053-private-root-local-access.md), [0057](../adr/0057-private-root-effective-uid.md) | The canonical `bradian-db` command and private-root enforcement |
-
-## Shipped admission policies without a dedicated operations guide
-
-These admission policies ship with tests, ADRs and verification reports
-but do not yet have a full operator-facing guide. Operators configure
-them through the library API (`RowStore::open_with_policies`,
-`PersistentCatalog::open_with_limits`, `MultiTableStore::open_with_limits`,
-`MvccStore::open_with_limits`). Defaults are safe; see each ADR for
-exact ceilings.
-
-| Policy | ADR | What it bounds |
-|---|---|---|
-| Bounded directory listings | [0051](../adr/0051-bounded-directory-listings.md) | Entries and name-bytes in `RowStore::list_snapshots` and `legacy_migration::source_table_ids` |
-| Decoded persistent-catalog state | [0054](../adr/0054-decoded-catalog-admission.md) | Databases, schemas, tables, revisions, per-event bytes inside `PersistentCatalog` |
-| Decoded multi-table-domain state | [0056](../adr/0056-decoded-domain-admission.md) | Registered tables inside one `MultiTableStore` shared-WAL domain |
-| In-memory MvccStore versions | [0058](../adr/0058-mvcc-store-admission.md) | Distinct keys and total version chain length in the opt-in G20 `MvccStore` |
+| [DIRECTORY_LISTING_LIMITS](DIRECTORY_LISTING_LIMITS.md) | [0051](../adr/0051-bounded-directory-listings.md) | Entries and name-bytes in `RowStore::list_snapshots` and `legacy_migration::source_table_ids` |
+| [CATALOG_LIMITS](CATALOG_LIMITS.md) | [0054](../adr/0054-decoded-catalog-admission.md) | Databases, schemas, tables, revisions, per-event bytes inside `PersistentCatalog` |
+| [DOMAIN_LIMITS](DOMAIN_LIMITS.md) | [0056](../adr/0056-decoded-domain-admission.md) | Registered tables inside one `MultiTableStore` shared-WAL domain |
+| [MVCC_STORE_LIMITS](MVCC_STORE_LIMITS.md) | [0058](../adr/0058-mvcc-store-admission.md) | Distinct keys and total version chain length in the opt-in G20 `MvccStore` |
 
 ## Security and fault documentation
 
