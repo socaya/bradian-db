@@ -1,15 +1,36 @@
-# ADR 0066 — BACE ZSTD codec (implementation; **PROPOSED**)
+# ADR 0066 — BACE ZSTD codec (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 14 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit:
 
-Blocked on the accepted BACE prerequisite stack (0060–0063) and the
-accepted row-store integration (0065). This ADR is the first codec
-that **actually saves space**: RAW (ADR 0061 §5 item 3, shipped in
-Slice Q) is an identity codec; ZSTD is the first compressing codec
-to register.
+- `crates/bradian-relational/src/bace/codec.rs` — `zstd::ZstdCodec`
+  at `CodecId(49)`, `format_version = 1`.
+- `crates/bradian-relational/src/bace/registry.rs` —
+  `BuiltInRegistry::new()` now registers RAW + ZSTD.
+- `crates/bradian-relational/Cargo.toml` — direct `zstd = { workspace = true }`
+  dep added (was already a transitive dep via `dap-storage`).
+- `crates/bradian-relational/tests/row_store_bace.rs` — 4 new
+  integration tests; `src/bace/codec.rs` carries 6 new unit tests
+  covering the §3.6 golden corpus and §3.4 bounded-decode paths.
 
-Owner review required before any code lands per CLAUDE.md §4.9 and
-ADR 0061 §9 item 2 (threat-model review of capability negotiation).
+940 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
+
+### Honesty note on §3.8 item 5 (revised in flight)
+
+The drafted §3.8 test item 5 claimed the ZSTD-wrapped snapshot file
+would be strictly smaller than the Raw baseline. In practice BRPG
+pages are fixed 4 KiB on disk: a 4028-byte plain payload that ZSTD
+compresses to ~30 bytes still occupies a 4096-byte page. Per-page
+compression at a fixed physical page size does not shrink the
+snapshot file on its own. The test actually shipped —
+`zstd_balanced_profile_envelope_encoded_length_is_smaller_than_decoded_on_redundant_data`
+— asserts the honest, observable claim: at the envelope layer,
+every v2 data page emitted under ZSTD carries
+`encoded_length < decoded_length` on redundant input (in fact
+`encoded_length < decoded_length / 10`). Physical snapshot-file
+savings require variable-size pages or multi-logical-page
+coalescing; that work is a separate future ADR.
 
 ## 1. Context
 

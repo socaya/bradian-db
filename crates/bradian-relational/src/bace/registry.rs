@@ -9,6 +9,7 @@
 
 use super::codec::{Codec, CodecCapability, CodecId};
 use super::codec::raw::RawCodec;
+use super::codec::zstd::ZstdCodec;
 
 /// Result of negotiating codec capabilities with a remote peer.
 ///
@@ -98,9 +99,11 @@ pub trait CodecRegistry {
 
 /// The default built-in BACE codec registry.
 ///
-/// Shipped set: `RAW` (ID 48) only in this component. Additional
-/// codecs are added by later implementation ADRs, each one landing
-/// with its own golden-corpus commitment per ADR 0061 §3.7.
+/// Shipped set: `RAW` (ID 48, critical fallback) and `ZSTD` (ID 49,
+/// first compressing codec per ADR 0066). Operators opt in to ZSTD
+/// by passing `allowed_codecs = [ZSTD_ID, RAW_ID]` on the wiring
+/// they hand to `RowStore::open_with_bace`; the default
+/// `PlatformBaseline::allowed_codecs` stays `[RAW_ID]`.
 pub struct BuiltInRegistry {
     codecs: Vec<Box<dyn Codec>>,
     capabilities: Vec<CodecCapability>,
@@ -109,7 +112,7 @@ pub struct BuiltInRegistry {
 impl BuiltInRegistry {
     /// Construct the default shipped registry.
     pub fn new() -> Self {
-        Self::with_codecs(vec![Box::new(RawCodec)])
+        Self::with_codecs(vec![Box::new(RawCodec), Box::new(ZstdCodec)])
     }
 
     /// Construct a registry from an explicit codec set. Test helper.
@@ -144,6 +147,7 @@ mod tests {
     use super::*;
     use super::super::codec::{
         raw::{RawCodec, RAW_ID},
+        zstd::{ZSTD_ID, ZSTD_FORMAT_VERSION},
         CapabilityFlags, CodecCapability, Determinism,
     };
     use super::super::envelope::{
@@ -163,13 +167,21 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_registers_raw_at_id_48() {
+    fn default_registry_registers_raw_and_zstd() {
+        // ADR 0066 §3.5 — BuiltInRegistry::new() ships RAW at 48 and
+        // ZSTD at 49. Operators opt in to ZSTD via allowed_codecs.
         let r = BuiltInRegistry::new();
-        assert_eq!(r.capabilities().len(), 1);
-        let cap = r.capability(RAW_ID).expect("RAW must be registered");
-        assert_eq!(cap.id, RAW_ID);
-        assert_eq!(cap.format_version, 1);
-        assert!(cap.flags.critical, "RAW must be critical — it is the fallback");
+        assert_eq!(r.capabilities().len(), 2);
+        let raw = r.capability(RAW_ID).expect("RAW must be registered");
+        assert_eq!(raw.id, RAW_ID);
+        assert_eq!(raw.format_version, 1);
+        assert!(raw.flags.critical, "RAW must be critical — it is the fallback");
+
+        let z = r.capability(ZSTD_ID).expect("ZSTD must be registered");
+        assert_eq!(z.id, ZSTD_ID);
+        assert_eq!(z.format_version, ZSTD_FORMAT_VERSION);
+        assert!(!z.flags.critical, "ZSTD must be non-critical");
+        assert!(!z.flags.allows_outer_compression, "ZSTD is an outer compressor");
     }
 
     #[test]
@@ -216,7 +228,7 @@ mod tests {
         let remote: Vec<_> = r.capabilities().to_vec();
         let n = r.negotiate(&remote);
         assert!(n.is_viable());
-        assert_eq!(n.agreed, vec![RAW_ID]);
+        assert_eq!(n.agreed, vec![RAW_ID, ZSTD_ID]);
         assert!(n.missing_critical.is_empty());
     }
 

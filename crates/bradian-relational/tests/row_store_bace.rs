@@ -590,3 +590,164 @@ fn recovery_fails_closed_when_envelope_names_an_unregistered_codec() {
         other => panic!("expected BaceCodecUnavailable, got {other:?}"),
     }
 }
+
+// ---------- ADR 0066: ZSTD codec at CodecId(49) ----------
+
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+
+fn wiring_zstd_balanced() -> BaceWiring {
+    // Operator-level opt-in to ZSTD: baseline profile Balanced,
+    // allow-set [ZSTD_ID, RAW_ID]. First-match ordering in
+    // resolve_bace_codec picks ZSTD; RAW stays the fallback.
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![ZSTD_ID, RAW_ID],
+        ..PlatformBaseline::shipped()
+    };
+    BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(
+            baseline,
+            BuiltInRegistry::new(),
+        )),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }
+}
+
+#[test]
+fn zstd_balanced_profile_round_trips_through_checkpoint_and_reopen() {
+    // ADR 0066 §3.8 test item 4 (envelope round-trip via the full
+    // RowStore path). Writes several rows under ZSTD, checkpoints,
+    // reopens with the same wiring, and verifies every row survives
+    // the compress → envelope → disk → envelope → decompress loop.
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(), wiring_zstd_balanced(),
+        ).unwrap();
+        s.put(b"alpha", b"one").unwrap();
+        s.put(b"beta", b"two").unwrap();
+        s.put(b"gamma", b"three").unwrap();
+        s.checkpoint().unwrap();
+    }
+    let s = RowStore::open_with_bace(
+        dir.path(), StorageLimits::default(), wiring_zstd_balanced(),
+    ).unwrap();
+    assert_eq!(s.get(b"alpha"), Some(b"one".to_vec()));
+    assert_eq!(s.get(b"beta"), Some(b"two".to_vec()));
+    assert_eq!(s.get(b"gamma"), Some(b"three".to_vec()));
+    assert_eq!(s.indexed_get(b"alpha").unwrap(), Some(b"one".to_vec()));
+    assert_eq!(s.indexed_get(b"gamma").unwrap(), Some(b"three".to_vec()));
+}
+
+#[test]
+fn zstd_balanced_profile_emits_v2_data_pages_declaring_codec_id_49() {
+    // ADR 0066 §3.7 — pick_codec picks the first registered codec in
+    // the allow-set. With [ZSTD_ID, RAW_ID] that's ZSTD. The emitted
+    // v2 page's envelope header must declare codec_id = 49.
+    let dir = tempdir().unwrap();
+    let s = RowStore::open_with_bace(
+        dir.path(), StorageLimits::default(), wiring_zstd_balanced(),
+    ).unwrap();
+    s.put(b"key", b"value").unwrap();
+    s.checkpoint().unwrap();
+    drop(s);
+
+    // The snapshot file's first data page is page 1 (page 0 is the
+    // metadata page, which stays v1 per ADR 0065 §6 item 7). The v2
+    // envelope header starts at offset 32 inside the page.
+    let bytes = fs::read(dir.path().join("snapshot-1.brp")).unwrap();
+    assert_eq!(&bytes[4096 + 32..4096 + 32 + 4], ENVELOPE_MAGIC);
+    // codec_id field is u16 LE at header-offset 6 (after 4-byte magic,
+    // 1-byte envelope version, 1-byte reserved).
+    let codec_id_le = u16::from_le_bytes([bytes[4096 + 32 + 6], bytes[4096 + 32 + 7]]);
+    assert_eq!(codec_id_le, 49, "ZSTD codec_id must be 49");
+}
+
+#[test]
+fn zstd_balanced_profile_envelope_encoded_length_is_smaller_than_decoded_on_redundant_data() {
+    // ADR 0066 §3.8 test item 5 revised: the honest demonstration
+    // that ZSTD compresses. At the envelope layer, `encoded_length`
+    // is strictly less than `decoded_length` on redundant inputs.
+    //
+    // Physical snapshot-file savings do NOT follow from this at the
+    // RowStore layer alone: BRPG pages are fixed 4 KiB, so a 4028-
+    // byte plain payload compressing to 30 bytes still sits inside a
+    // 4096-byte page. Variable-size pages or multi-logical-page
+    // coalescing is a future ADR; this test proves ONLY that the
+    // compression plumbing works.
+    let redundant_value = vec![b'x'; 2_000];
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(), wiring_zstd_balanced(),
+        ).unwrap();
+        // One large redundant row per page — the plain payload fills
+        // most of the page, so ZSTD has real work to do.
+        for i in 0..20 {
+            s.put(format!("k{i:04}").as_bytes(), &redundant_value).unwrap();
+        }
+        s.checkpoint().unwrap();
+    }
+
+    // Walk every page in the snapshot, look at those with the BACE
+    // envelope flag set (feature_flags byte at page offset 10 bit 0),
+    // and assert encoded_length < decoded_length.
+    let snapshot_path = fs::read_dir(dir.path()).unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.file_name().and_then(|n| n.to_str())
+            .map(|n| n.starts_with("snapshot-") && n.ends_with(".brp")).unwrap_or(false))
+        .expect("checkpoint should have produced a snapshot file");
+    let bytes = fs::read(&snapshot_path).unwrap();
+    let mut compressed_pages = 0usize;
+    for page_idx in 0..(bytes.len() / 4096) {
+        let page_base = page_idx * 4096;
+        let format_version = u16::from_le_bytes([bytes[page_base + 4], bytes[page_base + 5]]);
+        if format_version != 2 { continue; }   // v1 page (metadata page 0, etc.)
+        // v2 envelope header starts at page offset 32.
+        let hdr = page_base + 32;
+        assert_eq!(&bytes[hdr..hdr + 4], ENVELOPE_MAGIC, "v2 data page must carry envelope magic");
+        let codec_id = u16::from_le_bytes([bytes[hdr + 6], bytes[hdr + 7]]);
+        assert_eq!(codec_id, 49, "ZSTD codec_id must be 49");
+        let encoded_length = u32::from_le_bytes(bytes[hdr + 16..hdr + 20].try_into().unwrap());
+        let decoded_length = u32::from_le_bytes(bytes[hdr + 20..hdr + 24].try_into().unwrap());
+        assert!(
+            encoded_length < decoded_length,
+            "page {page_idx}: ZSTD must shrink redundant data \
+             (encoded_length={encoded_length}, decoded_length={decoded_length})"
+        );
+        // Stronger: on highly redundant input the frame should be
+        // dramatically smaller.
+        assert!(
+            encoded_length < decoded_length / 10,
+            "page {page_idx}: expected encoded < decoded/10, got {encoded_length} vs {}",
+            decoded_length / 10
+        );
+        compressed_pages += 1;
+    }
+    assert!(compressed_pages > 0, "at least one v2 ZSTD-compressed page expected");
+}
+
+#[test]
+fn zstd_round_trip_survives_indexed_range_reads() {
+    // Separate assertion that indexed_range (streaming B+tree path)
+    // decodes ZSTD envelopes correctly on every page it touches.
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(), wiring_zstd_balanced(),
+        ).unwrap();
+        for i in 0..20 {
+            s.put(format!("k{i:02}").as_bytes(), format!("v{i:02}").as_bytes()).unwrap();
+        }
+        s.checkpoint().unwrap();
+    }
+    let s = RowStore::open_with_bace(
+        dir.path(), StorageLimits::default(), wiring_zstd_balanced(),
+    ).unwrap();
+    let rows = s.indexed_range(b"k05", b"k10").unwrap();
+    assert_eq!(rows.len(), 5);
+    for (k, v) in rows {
+        assert_eq!(&v, format!("v{}", &std::str::from_utf8(&k).unwrap()[1..]).as_bytes());
+    }
+}
