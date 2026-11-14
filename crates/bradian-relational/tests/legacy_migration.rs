@@ -3,7 +3,11 @@
 use std::fs;
 
 use bradian_relational::domain_sql::DomainSqlEngine;
-use bradian_relational::legacy_migration::{migrate_legacy_sql, MigrationError};
+use bradian_relational::legacy_migration::{
+    migrate_legacy_sql, migrate_legacy_sql_with_policies, MigrationError,
+};
+use bradian_relational::row_store::StoreError;
+use bradian_relational::runtime_limits::{DirectoryLimits, ResourceError};
 use bradian_relational::sql::{SqlEngine, SqlResultSet};
 use bradian_relational::typed_table::Value;
 use tempfile::tempdir;
@@ -289,4 +293,40 @@ fn cannot_reimport_already_shared_source_as_empty_legacy_database() {
     ));
     assert!(!second.exists());
     assert_eq!(select_domain(&shared).len(), 2);
+}
+
+#[test]
+fn directory_admission_refuses_oversized_legacy_tables_listing_without_publishing_destination() {
+    let base = tempdir().unwrap();
+    let source = base.path().join("legacy");
+    let destination = base.path().join("shared");
+    create_legacy(&source);
+    // The legacy fixture publishes three tables; one-entry admission must refuse.
+    let too_tight = DirectoryLimits { max_entries: 1, max_name_bytes: 4 * 1024 * 1024 };
+    let err = migrate_legacy_sql_with_policies(&source, &destination, too_tight).unwrap_err();
+    assert!(matches!(
+        err,
+        MigrationError::Storage(StoreError::Resource(ResourceError::DirectoryLimit {
+            resource: "entries",
+            ..
+        }))
+    ));
+    assert!(!destination.exists(), "refused migration must not publish destination");
+    // The source side's row stores and locks are released when the error unwinds,
+    // leaving it available for a second run with a sufficient policy.
+    let roomy = DirectoryLimits::default();
+    migrate_legacy_sql_with_policies(&source, &destination, roomy).unwrap();
+    assert_eq!(select_domain(&destination).len(), 2);
+}
+
+#[test]
+fn default_migrate_legacy_sql_admits_normal_legacy_tree() {
+    let base = tempdir().unwrap();
+    let source = base.path().join("legacy");
+    let destination = base.path().join("shared");
+    create_legacy(&source);
+    // The default path (no policies argument) carries DirectoryLimits::default()
+    // and must still accept the legacy fixture.
+    migrate_legacy_sql(&source, &destination).unwrap();
+    assert_eq!(select_domain(&destination).len(), 2);
 }

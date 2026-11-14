@@ -28,6 +28,8 @@ pub enum ResourceError {
     HistoryLimit { resource: &'static str, limit: usize },
     #[error("transaction staging {resource} limit exceeded (limit {limit})")]
     StagingLimit { resource: &'static str, limit: usize },
+    #[error("directory listing {resource} limit exceeded (limit {limit})")]
+    DirectoryLimit { resource: &'static str, limit: usize },
     #[error("query cancelled")]
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
@@ -179,9 +181,36 @@ pub struct IndexBuildLimits { pub max_entries: usize, pub max_bytes: usize }
 impl Default for IndexBuildLimits {
     fn default() -> Self { Self { max_entries: 2000000, max_bytes: 512 * 1024 * 1024 } }
 }
+/// Per-listing directory admission; not a global open-descriptor or inode budget.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectoryLimits { pub max_entries: usize, pub max_name_bytes: usize }
+impl Default for DirectoryLimits {
+    fn default() -> Self { Self { max_entries: 65_536, max_name_bytes: 4 * 1024 * 1024 } }
+}
+impl DirectoryLimits {
+    /// Admit one entry by name length. Returns the updated counters on success;
+    /// returns ResourceError::DirectoryLimit with no counter change on refusal.
+    pub(crate) fn admit(&self, entries: usize, name_bytes: usize, name_len: usize)
+        -> Result<(usize, usize), ResourceError>
+    {
+        let entries = entries.checked_add(1)
+            .filter(|n| *n <= self.max_entries)
+            .ok_or(ResourceError::DirectoryLimit { resource: "entries", limit: self.max_entries })?;
+        let name_bytes = name_bytes.checked_add(name_len)
+            .filter(|n| *n <= self.max_name_bytes)
+            .ok_or(ResourceError::DirectoryLimit { resource: "name bytes", limit: self.max_name_bytes })?;
+        Ok((entries, name_bytes))
+    }
+}
+
 /// Process-local native storage policies; none changes persisted bytes.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct StorageLimits { pub rows: RowStoreLimits, pub index: IndexLimits, pub build: IndexBuildLimits }
+pub struct StorageLimits {
+    pub rows: RowStoreLimits,
+    pub index: IndexLimits,
+    pub build: IndexBuildLimits,
+    pub directory: DirectoryLimits,
+}
 
 /// Serialized JSON archive-manifest bytes, independently checked on read and write.
 #[derive(Clone, Copy, Debug)]

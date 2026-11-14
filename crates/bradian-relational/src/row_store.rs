@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use crc32fast::Hasher;
 use thiserror::Error;
 
-use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage, IndexLimits, IndexBuildLimits, StorageLimits};
+use crate::runtime_limits::{ResourceError, RowStoreLimits, RowStoreUsage, IndexLimits, IndexBuildLimits, StorageLimits, DirectoryLimits};
 use crate::page::{Page, PageError, PageKind, MAX_PAYLOAD_SIZE, PAGE_SIZE};
 use crate::btree::{DiskBTree, IndexError, RowPointer};
 use crate::buffer_pool::{CacheError, CacheStats, PageCache};
@@ -109,6 +109,7 @@ pub struct RowStore {
     limits: RowStoreLimits,
     index_limits: IndexLimits,
     build_limits: IndexBuildLimits,
+    directory_limits: DirectoryLimits,
     inner: Mutex<Inner>,
     // Drop after the WAL handle so the exclusive ownership remains in force
     // throughout teardown. The kernel releases the lock automatically.
@@ -129,7 +130,7 @@ impl RowStore {
     }
 
     pub fn open_with_policies(root: impl AsRef<Path>, policies: StorageLimits) -> StoreResult<Self> {
-        let StorageLimits { rows:limits, index:index_limits, build:build_limits } = policies;
+        let StorageLimits { rows:limits, index:index_limits, build:build_limits, directory:directory_limits } = policies;
         let root = root.as_ref();
         fs::create_dir_all(root)?;
         let lock = OpenOptions::new()
@@ -143,7 +144,7 @@ impl RowStore {
             Err(TryLockError::WouldBlock) => return Err(StoreError::Busy),
             Err(TryLockError::Error(error)) => return Err(StoreError::Io(error)),
         }
-        let (checkpoint_lsn, mut rows, mut usage) = read_latest_snapshot(root, limits)?;
+        let (checkpoint_lsn, mut rows, mut usage) = read_latest_snapshot(root, limits, directory_limits)?;
         let mut delta = BTreeMap::new();
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
@@ -177,6 +178,7 @@ impl RowStore {
             limits,
             index_limits,
             build_limits,
+            directory_limits,
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
@@ -194,7 +196,7 @@ impl RowStore {
 
     pub fn resource_usage(&self) -> RowStoreUsage { self.inner.lock().usage }
     pub fn resource_limits(&self) -> RowStoreLimits { self.limits }
-    pub fn storage_limits(&self) -> StorageLimits { StorageLimits { rows:self.limits,index:self.index_limits,build:self.build_limits } }
+    pub fn storage_limits(&self) -> StorageLimits { StorageLimits { rows:self.limits,index:self.index_limits,build:self.build_limits,directory:self.directory_limits } }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.inner.lock().rows.get(key).cloned()
@@ -657,7 +659,7 @@ impl RowStore {
         inner.snapshot_pages = None;
         // Older checkpoints are no longer needed once the newest snapshot is
         // published and WAL truncation is complete. Cleanup is opportunistic.
-        let _ = prune_snapshots(&self.root, lsn);
+        let _ = prune_snapshots(&self.root, lsn, self.directory_limits);
         Ok(lsn)
     }
 }
@@ -880,11 +882,15 @@ fn snapshot_path(root: &Path, lsn: u64) -> PathBuf {
     root.join(format!("snapshot-{lsn}.brp"))
 }
 
-fn list_snapshots(root: &Path) -> StoreResult<Vec<(u64, PathBuf)>> {
+fn list_snapshots(root: &Path, directory_limits: DirectoryLimits) -> StoreResult<Vec<(u64, PathBuf)>> {
     let mut snapshots = Vec::new();
+    let mut entries = 0_usize;
+    let mut name_bytes = 0_usize;
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name();
+        let encoded_len = name.as_encoded_bytes().len();
+        (entries, name_bytes) = directory_limits.admit(entries, name_bytes, encoded_len)?;
         let Some(name) = name.to_str() else { continue };
         let Some(lsn) = name.strip_prefix("snapshot-")
             .and_then(|s| s.strip_suffix(".brp"))
@@ -897,14 +903,17 @@ fn list_snapshots(root: &Path) -> StoreResult<Vec<(u64, PathBuf)>> {
     Ok(snapshots)
 }
 
-fn read_latest_snapshot(root: &Path, limits: RowStoreLimits) -> StoreResult<(u64, RowMap, RowStoreUsage)> {
+fn read_latest_snapshot(root: &Path, limits: RowStoreLimits, directory_limits: DirectoryLimits)
+    -> StoreResult<(u64, RowMap, RowStoreUsage)>
+{
     let manifest = checkpoint_manifest::load(root)?;
     let snapshot = match manifest {
         Some(m) => {
             checkpoint_manifest::check_snapshot(root, m)?;
             Some((m.lsn, snapshot_path(root, m.lsn)))
         }
-        None => list_snapshots(root)?.pop(), // read-only compatibility with pre-manifest stores
+        // Read-only compatibility with pre-manifest stores; admission bounds listing size.
+        None => list_snapshots(root, directory_limits)?.pop(),
     };
     let Some((lsn, path)) = snapshot else {
         return Ok((0, BTreeMap::new(), RowStoreUsage::default()));
@@ -1064,8 +1073,8 @@ fn read_indexed_record(
     Ok(page.payload[offset+ROW_HEADER+key_len..end].to_vec())
 }
 
-fn prune_snapshots(root: &Path, keep: u64) -> StoreResult<()> {
-    for (lsn, path) in list_snapshots(root)? {
+fn prune_snapshots(root: &Path, keep: u64, directory_limits: DirectoryLimits) -> StoreResult<()> {
+    for (lsn, path) in list_snapshots(root, directory_limits)? {
         if lsn < keep {
             fs::remove_file(path)?;
             let index_path = root.join(format!("index-{lsn}.bri"));

@@ -12,7 +12,7 @@ are frozen. Gate 1 is the active kernel implementation gate, not master Gate 44.
 
 | Master gate/task | Remaining gap | Required next evidence |
 |---|---|---|
-| 1 / G1-MEMORY | Query/history/staging, backing/recovery maps, build/metadata buffers, CLI lines and per-domain historical SQL/fallible-native admission are controlled; directory/I/O/cache/decoded state, catalogs, compatibility/cross-domain totals, alternate engines, other output and global admission/cancellation remain incomplete | Global runtime limits and memory-pressure/failure qualification; see [latest evidence](BRADIAN_GATE1_TRANSACTION_ADMISSION_VERIFICATION_2026_11_13.md) |
+| 1 / G1-MEMORY | Query/history/staging, backing/recovery maps, build/metadata buffers, CLI lines, per-domain historical SQL/fallible-native admission and row-store + legacy-migration directory listings are controlled; other directory sites (catalog/domain/lifecycle, user data), I/O/cache/decoded state, compatibility/cross-domain totals, alternate engines, other output and global admission/cancellation remain incomplete | Global runtime limits and memory-pressure/failure qualification; see [latest evidence](BRADIAN_GATE1_DIRECTORY_LIMITS_VERIFICATION_2026_11_14.md) |
 | 1 / G1-LOCAL-ACCESS | Complete OS-owner/ACL/path policy and equivalent library/service enforcement | Threat-reviewed local identity and negative access-path tests |
 | 1 / G1-FAULTS | Failed sync/rename, disk-full and physical/device behavior | Deterministic I/O fault matrix and platform recovery runs |
 | 1 / G1-REFERENCE | Broader SQL/isolation reference and installation qualification | Published conformance corpus and Windows/macOS installer/lock tests |

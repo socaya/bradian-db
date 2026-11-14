@@ -18,6 +18,7 @@ use thiserror::Error;
 use crate::{Table, TableId};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
 use crate::row_store::{RowStore, StoreError};
+use crate::runtime_limits::DirectoryLimits;
 use crate::transaction_domain::{DomainError, MultiTableStore};
 use crate::typed_table::{TableError, TableStore, Value};
 
@@ -101,15 +102,22 @@ fn validate_destination(source: &Path, destination: &Path) -> MigrationResult<(P
     Ok((actual_destination, staging))
 }
 
-fn source_table_ids(tables_dir: &Path) -> MigrationResult<BTreeSet<TableId>> {
+fn source_table_ids(tables_dir: &Path, directory_limits: DirectoryLimits)
+    -> MigrationResult<BTreeSet<TableId>>
+{
     if !tables_dir.exists() { return Ok(BTreeSet::new()); }
     let mut ids = BTreeSet::new();
+    let mut entries = 0_usize;
+    let mut name_bytes = 0_usize;
     for entry in fs::read_dir(tables_dir)? {
         let entry = entry?;
+        let file = entry.file_name();
+        let encoded_len = file.as_encoded_bytes().len();
+        (entries, name_bytes) = directory_limits.admit(entries, name_bytes, encoded_len)
+            .map_err(StoreError::from)?;
         if !entry.file_type()?.is_dir() {
             return Err(MigrationError::Invalid("unexpected file in legacy tables directory".into()));
         }
-        let file = entry.file_name();
         let name = file.to_str()
             .ok_or_else(|| MigrationError::Invalid("non-UTF8 table directory".into()))?;
         let id = name.parse::<u64>()
@@ -147,6 +155,14 @@ pub fn migrate_legacy_sql(
     source_root: impl AsRef<Path>,
     destination_root: impl AsRef<Path>,
 ) -> MigrationResult<MigrationReport> {
+    migrate_legacy_sql_with_policies(source_root, destination_root, DirectoryLimits::default())
+}
+
+pub fn migrate_legacy_sql_with_policies(
+    source_root: impl AsRef<Path>,
+    destination_root: impl AsRef<Path>,
+    directory_limits: DirectoryLimits,
+) -> MigrationResult<MigrationReport> {
     let source_root = fs::canonicalize(source_root.as_ref())?;
     let (destination, staging) = validate_destination(&source_root, destination_root.as_ref())?;
     // A G15/G16 source already has authoritative shared-WAL rows. Treating
@@ -167,7 +183,7 @@ pub fn migrate_legacy_sql(
     let catalog_lsn = catalog.last_lsn();
     let definitions = catalog_snapshot.tables().cloned().collect::<Vec<_>>();
     let known = definitions.iter().map(|table| table.id).collect::<BTreeSet<_>>();
-    let existing = source_table_ids(&source_root.join("tables"))?;
+    let existing = source_table_ids(&source_root.join("tables"), directory_limits)?;
     for id in &existing {
         if !known.contains(id) {
             return Err(MigrationError::Invalid(format!(
