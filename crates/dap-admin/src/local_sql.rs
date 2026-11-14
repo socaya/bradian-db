@@ -2,6 +2,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use bradian_relational::history_sql::HistorySqlEngine;
+use bradian_relational::local_access::{
+    ensure_private_root, LocalAccessError, PrivateRootPolicy,
+};
 use bradian_relational::sql::SqlEngine;
 use bradian_relational::runtime_limits::{ScanControl, ScanLimits, HistoryLimits, StagingLimits, TransactionLimits};
 use clap::Parser;
@@ -112,26 +115,26 @@ fn push_statement<'a>(result: &mut Vec<&'a str>, statement: &'a str) -> Result<(
     Ok(())
 }
 
-#[cfg(unix)]
 fn private_root(root: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    match std::fs::symlink_metadata(root) {
-        Ok(metadata) => {
-            anyhow::ensure!(!metadata.file_type().is_symlink() && metadata.is_dir(), "SQL root must be a real directory, not a symlink");
-            anyhow::ensure!(metadata.permissions().mode() & 0o077 == 0, "SQL root must have no group/other permissions (use a private 0700 directory)");
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true).mode(0o700).create(root)?;
-        },
-        Err(error) => return Err(error.into()),
+    match ensure_private_root(root, PrivateRootPolicy::CreateIfMissing) {
+        Ok(()) => Ok(()),
+        Err(LocalAccessError::Unsupported) => anyhow::bail!(
+            "native local SQL directory permissions are not yet qualified on this platform",
+        ),
+        Err(LocalAccessError::SymlinkedRoot) => anyhow::bail!(
+            "SQL root must be a real directory, not a symlink",
+        ),
+        Err(LocalAccessError::NotADirectory) => anyhow::bail!(
+            "SQL root must be a real directory, not a symlink",
+        ),
+        Err(LocalAccessError::LooseMode { .. }) => anyhow::bail!(
+            "SQL root must have no group/other permissions (use a private 0700 directory)",
+        ),
+        Err(LocalAccessError::NotFound) => anyhow::bail!(
+            "SQL root does not exist and CreateIfMissing was unexpectedly refused",
+        ),
+        Err(LocalAccessError::Io(err)) => Err(err.into()),
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn private_root(_root: &Path) -> Result<()> {
-    anyhow::bail!("native local SQL directory permissions are not yet qualified on this platform")
 }
 
 pub(crate) fn run(args: SqlArgs) -> Result<()> {
