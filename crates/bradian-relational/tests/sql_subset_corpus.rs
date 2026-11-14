@@ -742,3 +742,46 @@ fn update_expression_rejects_arithmetic_on_text_target() {
     }).unwrap();
     assert!(outcome.is_err(), "arithmetic on TEXT target must refuse");
 }
+
+#[test]
+fn update_expression_boundary_at_128_nodes_is_accepted() {
+    // Node accounting: atom (literal/column/unary) and each binary operator
+    // both spend one node. Parentheses spend zero. Construct exactly 128
+    // nodes with `-balance + 1 + ...` where the unary gives 2 nodes and each
+    // `+ 1` term adds 2 nodes (64 operator+atom pairs, 63 terms after the
+    // unary plus the unary itself): 2 + 2 * 63 = 128.
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let repeated = std::iter::repeat_n(" + 1", 63).collect::<String>();
+    let expr = format!(
+        "UPDATE bank.public.accounts SET balance = -balance{repeated} WHERE id=1"
+    );
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute(&expr)?;
+        // Starting balance 1000 => -1000 + 63 = -937.
+        assert_eq!(
+            s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(-937)]] },
+        );
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn update_expression_at_129_nodes_is_refused() {
+    // `balance + 1 + ... (64 times)` = 1 + 2 * 64 = 129 nodes, one past the
+    // published 128-node budget.
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let repeated = std::iter::repeat_n(" + 1", 64).collect::<String>();
+    let expr = format!(
+        "UPDATE bank.public.accounts SET balance = balance{repeated} WHERE id=1"
+    );
+    let outcome = db.with_session(|s| {
+        s.execute("BEGIN")?;
+        Ok(s.execute(&expr))
+    }).unwrap();
+    assert!(outcome.is_err(), "129-node expression must be refused");
+}

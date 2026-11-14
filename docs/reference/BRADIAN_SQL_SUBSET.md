@@ -115,6 +115,8 @@ Budgets: ≤128 nodes, ≤32 nesting depth.
 | Parentheses override precedence | `update_expression_parentheses_override_precedence` |
 | 32-nested-parentheses boundary accepted | `update_expression_boundary_at_32_nested_parentheses_is_accepted` |
 | Nesting beyond 32 refused | `update_expression_rejects_nesting_beyond_published_depth` |
+| 128-node spend boundary accepted | `update_expression_boundary_at_128_nodes_is_accepted` |
+| 129 spends refused | `update_expression_at_129_nodes_is_refused` |
 | Arithmetic on TEXT target refused | `update_expression_rejects_arithmetic_on_text_target` |
 
 ## 10. Schema evolution — `HistorySqlEngine` only
@@ -163,11 +165,10 @@ Budgets: ≤128 nodes, ≤32 nesting depth.
   Rust APIs and the native CLI only.
 - Cross-platform installer, lock-lifecycle and recovery runs on
   Windows / macOS.
-- Range ORDER BY cases, `TimestampTz` and `Uuid` sort behaviour, and
-  the 128-node boundary (as distinct from the 32-depth boundary) of
-  UPDATE expressions — these are exercised by other suites in the crate
-  but are not yet in the single-file corpus. `DESCRIBE TABLE AS OF`,
-  `RELEASE SAVEPOINT`, `INSERT ... DEFAULT` and the 32-depth boundary
-  are now in the corpus (§8 and §9 above).
+- Range ORDER BY cases and `TimestampTz` / `Uuid` sort behaviour are
+  exercised by other suites in the crate but are not yet in the
+  single-file corpus. `DESCRIBE TABLE AS OF`, `RELEASE SAVEPOINT`,
+  `INSERT ... DEFAULT`, the 32-depth nesting boundary, and the
+  128-node spend boundary are now in the corpus (§8 and §9 above).
 
 These remain open items under G1-REFERENCE in the fixed roadmap.
