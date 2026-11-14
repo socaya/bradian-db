@@ -23,9 +23,12 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::row_store::{RowMutation, RowStore, StoreError};
+use crate::runtime_limits::{MvccStoreLimits, ResourceError};
 
 #[derive(Debug, Error)]
 pub enum MvccError {
+    #[error(transparent)]
+    Resource(#[from] ResourceError),
     #[error(transparent)]
     Storage(#[from] StoreError),
     #[error("MVCC write conflict on key; a newer committed version exists")]
@@ -102,10 +105,19 @@ pub struct MvccStats {
 pub struct MvccStore {
     storage: RowStore,
     history: Mutex<History>,
+    limits: MvccStoreLimits,
 }
 
 impl MvccStore {
     pub fn open(root: impl AsRef<Path>) -> MvccResult<Self> {
+        Self::open_with_limits(root, MvccStoreLimits::default())
+    }
+
+    /// Open with explicit in-memory version admission (ADR 0058). Policies
+    /// are not persisted; they bound live decoded history only.
+    pub fn open_with_limits(root: impl AsRef<Path>, limits: MvccStoreLimits)
+        -> MvccResult<Self>
+    {
         let storage = RowStore::open(root)?;
         let (committed_lsn, rows) = storage.snapshot_with_lsn();
         let mut history = History {
@@ -119,9 +131,15 @@ impl MvccStore {
                 lsn: committed_lsn,
                 value: Some(value),
             }]);
+            // Admit after each insert so a refusal leaves the WAL untouched;
+            // we have not yet committed anything from this open.
+            let total: usize = history.versions.values().map(Vec::len).sum();
+            limits.check(history.versions.len(), total)?;
         }
-        Ok(Self { storage, history: Mutex::new(history) })
+        Ok(Self { storage, history: Mutex::new(history), limits })
     }
+
+    pub fn resource_limits(&self) -> MvccStoreLimits { self.limits }
 
     pub fn begin(&self) -> MvccTransaction<'_> {
         let mut state = self.history.lock();
@@ -244,6 +262,15 @@ impl MvccTransaction<'_> {
                 return Err(MvccError::WriteConflict);
             }
         }
+        // Admit the projected post-commit history size BEFORE any WAL write.
+        // A refusal leaves the live state and WAL exactly as they were.
+        let new_distinct = self.pending.keys()
+            .filter(|key| !state.versions.contains_key(*key))
+            .count();
+        let projected_keys = state.versions.len() + new_distinct;
+        let current_total: usize = state.versions.values().map(Vec::len).sum();
+        let projected_versions = current_total + self.pending.len();
+        self.store.limits.check(projected_keys, projected_versions)?;
         // RowStore's actual sequence and our committed history MUST agree.
         // Only this facade is permitted to change this underlying RowStore.
         if self.store.storage.last_lsn() != state.committed_lsn {

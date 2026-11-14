@@ -34,6 +34,8 @@ pub enum ResourceError {
     CatalogLimit { resource: &'static str, limit: usize },
     #[error("transaction domain {resource} limit exceeded (limit {limit})")]
     DomainLimit { resource: &'static str, limit: usize },
+    #[error("in-memory MVCC {resource} limit exceeded (limit {limit})")]
+    MvccLimit { resource: &'static str, limit: usize },
     #[error("query cancelled")]
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
@@ -228,6 +230,38 @@ impl Default for MetadataLimits {
 pub struct TransactionLimits { pub max_active: usize }
 impl Default for TransactionLimits {
     fn default() -> Self { Self { max_active: 128 } }
+}
+
+/// Bounded in-memory version retention for the opt-in G20 MvccStore.
+/// Pinned-reader history retention can grow without bound otherwise; these
+/// caps protect against runaway chains. They are NOT durable budgets: the
+/// disk state is bounded separately by RowStore and checkpoint policy.
+#[derive(Clone, Copy, Debug)]
+pub struct MvccStoreLimits {
+    pub max_distinct_keys: usize,
+    pub max_total_versions: usize,
+}
+impl Default for MvccStoreLimits {
+    fn default() -> Self {
+        Self { max_distinct_keys: 1_000_000, max_total_versions: 4_000_000 }
+    }
+}
+impl MvccStoreLimits {
+    pub fn check(&self, distinct_keys: usize, total_versions: usize)
+        -> Result<(), ResourceError>
+    {
+        if distinct_keys > self.max_distinct_keys {
+            return Err(ResourceError::MvccLimit {
+                resource: "distinct keys", limit: self.max_distinct_keys,
+            });
+        }
+        if total_versions > self.max_total_versions {
+            return Err(ResourceError::MvccLimit {
+                resource: "total versions", limit: self.max_total_versions,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Bounded decoded multi-table-domain state. The catalog cap already bounds
