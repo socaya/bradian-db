@@ -30,6 +30,22 @@ pub struct DomainSqlEngine {
 
 impl DomainSqlEngine {
     pub fn open(root: impl AsRef<Path>) -> SqlResult<Self> {
+        Self::open_with_limits(
+            root,
+            crate::runtime_limits::DomainLimits::default(),
+            crate::runtime_limits::CatalogLimits::default(),
+        )
+    }
+
+    /// Open the shared-domain SQL engine with explicit admission for the
+    /// underlying `MultiTableStore` (ADR 0056) and `PersistentCatalog`
+    /// (ADR 0054). Policies are not persisted; they bound live decoded
+    /// state only. See also `MvccSqlEngine::open_with_limits`.
+    pub fn open_with_limits(
+        root: impl AsRef<Path>,
+        domain_limits: crate::runtime_limits::DomainLimits,
+        catalog_limits: crate::runtime_limits::CatalogLimits,
+    ) -> SqlResult<Self> {
         if root.as_ref().join("history-domain").exists() {
             return Err(SqlError::Unsupported(
                 "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
@@ -45,8 +61,8 @@ impl DomainSqlEngine {
             ));
         }
         fs::create_dir_all(root)?;
-        let catalog = PersistentCatalog::open(root.join("catalog"))?;
-        let domain = MultiTableStore::open(root.join("shared-domain"))?;
+        let catalog = PersistentCatalog::open_with_limits(root.join("catalog"), catalog_limits)?;
+        let domain = MultiTableStore::open_with_limits(root.join("shared-domain"), domain_limits)?;
         Ok(Self { catalog, domain, operation: Mutex::new(()), _root: root.to_owned() })
     }
 

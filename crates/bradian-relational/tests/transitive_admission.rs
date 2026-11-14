@@ -106,3 +106,46 @@ fn mvcc_sql_engine_honors_mvcc_store_limits_from_open_with_limits() {
     );
     assert!(outcome.is_err(), "tight MvccStoreLimits must refuse via MvccSqlEngine::open_with_limits");
 }
+
+#[test]
+fn domain_sql_engine_honors_domain_limits_from_open_with_limits() {
+    use bradian_relational::domain_sql::DomainSqlEngine;
+    use bradian_relational::runtime_limits::DomainLimits;
+    let dir = tempdir().unwrap();
+    seed_two_table_shared_domain(dir.path());
+    // The seeded shared domain has 2 registered tables. max_tables=1 must refuse.
+    let outcome = DomainSqlEngine::open_with_limits(
+        dir.path(),
+        DomainLimits { max_tables: 1 },
+        CatalogLimits::default(),
+    );
+    assert!(outcome.is_err(), "tight DomainLimits must refuse via DomainSqlEngine::open_with_limits");
+}
+
+#[test]
+fn domain_sql_engine_honors_catalog_limits_from_open_with_limits() {
+    use bradian_relational::domain_sql::DomainSqlEngine;
+    use bradian_relational::sql::SqlError;
+    let dir = tempdir().unwrap();
+    seed_two_table_shared_domain(dir.path());
+    // The seeded catalog has 2 tables. CatalogLimits.max_tables=1 must refuse.
+    let outcome = DomainSqlEngine::open_with_limits(
+        dir.path(),
+        bradian_relational::runtime_limits::DomainLimits::default(),
+        CatalogLimits { max_tables: 1, ..CatalogLimits::default() },
+    );
+    assert!(
+        matches!(outcome, Err(SqlError::Catalog(_))),
+        "tight CatalogLimits must refuse via DomainSqlEngine::open_with_limits",
+    );
+}
+
+#[test]
+fn domain_sql_engine_default_open_still_admits_an_ordinary_workload() {
+    use bradian_relational::domain_sql::DomainSqlEngine;
+    // Regression guard: the new open_with_limits path must not alter the
+    // behaviour seen through the existing DomainSqlEngine::open signature.
+    let dir = tempdir().unwrap();
+    seed_two_table_shared_domain(dir.path());
+    DomainSqlEngine::open(dir.path()).unwrap();
+}
