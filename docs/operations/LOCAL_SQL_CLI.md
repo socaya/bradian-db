@@ -112,5 +112,8 @@ COMMIT is durable, so do not automatically retry a script on a lost/broken outpu
 stream. The next command opens and verifies the existing persistent database rather
 than assuming a prior failed command committed nothing.
 
-See [fixed roadmap](../implementation/BRADIAN_MASTER_ROADMAP.md) and
+See [ADR 0040](../adr/0040-native-local-sql-cli.md),
+[ADR 0053](../adr/0053-private-root-local-access.md),
+[ADR 0057](../adr/0057-private-root-effective-uid.md),
+[fixed roadmap](../implementation/BRADIAN_MASTER_ROADMAP.md) and
 [current verification](../implementation/BRADIAN_GATE1_LOCAL_CLI_VERIFICATION_2026_11_13.md).

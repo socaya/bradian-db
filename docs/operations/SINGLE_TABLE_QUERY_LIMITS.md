@@ -62,4 +62,5 @@ bradian-db sql --root ./private-data --table demo.public.items --max-scan-rows 5
 
 No ordering, savepoints, historical syntax or general expressions are added to the
 earlier SQL grammar. Historical behavior is described in [the history scan policy](HISTORY_QUERY_LIMITS.md).
-See [executed verification](../implementation/BRADIAN_GATE1_SINGLE_TABLE_LIMITS_VERIFICATION_2026_11_13.md).
+See [ADR 0042](../adr/0042-bounded-single-table-query-snapshots.md) and
+[executed verification](../implementation/BRADIAN_GATE1_SINGLE_TABLE_LIMITS_VERIFICATION_2026_11_13.md).
