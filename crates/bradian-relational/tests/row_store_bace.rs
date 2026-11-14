@@ -402,3 +402,191 @@ fn decoded_length_above_policy_cap_fails_closed_before_allocation() {
     let reopen = RowStore::open_with_bace(dir.path(), StorageLimits::default(), wiring).unwrap();
     assert_eq!(reopen.get(b"big"), Some(vec![0xab_u8; 1024]));
 }
+
+// ---------- R.4: final matrix (mixed-generation, failure isolation, legacy→bace) ----------
+
+#[test]
+fn mixed_generation_recovery_picks_the_latest_authoritative_generation() {
+    // ADR 0065 §4 item 6 and §3.5 mixed-generation reading. A directory
+    // sees three checkpoints in sequence:
+    //   1. v1 via legacy open                  (lsn = 1, gen 1)
+    //   2. v1 via open_with_bace + Raw         (lsn = 2, gen 2)
+    //   3. v2 via open_with_bace + Balanced    (lsn = 3, gen 3)
+    // The manifest points at gen 3; recovery picks it; every row from
+    // the final generation is visible. Older gens may still exist on
+    // disk until GC but do not affect visibility.
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open(dir.path()).unwrap();
+        s.put(b"a", b"v1_a").unwrap();
+        s.checkpoint().unwrap();
+    }
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(),
+            wiring_with_profile(CompressionProfile::Raw),
+        ).unwrap();
+        s.put(b"b", b"raw_b").unwrap();
+        s.checkpoint().unwrap();
+    }
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(),
+            wiring_with_profile(CompressionProfile::Balanced),
+        ).unwrap();
+        s.put(b"c", b"v2_c").unwrap();
+        s.checkpoint().unwrap();
+    }
+    // Reopen under Balanced; every row must be visible.
+    let reopen = RowStore::open_with_bace(
+        dir.path(), StorageLimits::default(),
+        wiring_with_profile(CompressionProfile::Balanced),
+    ).unwrap();
+    assert_eq!(reopen.get(b"a"), Some(b"v1_a".to_vec()));
+    assert_eq!(reopen.get(b"b"), Some(b"raw_b".to_vec()));
+    assert_eq!(reopen.get(b"c"), Some(b"v2_c".to_vec()));
+    // The indexed path must agree.
+    for (k, v) in [(b"a".as_ref(), b"v1_a".as_ref()),
+                   (b"b".as_ref(), b"raw_b".as_ref()),
+                   (b"c".as_ref(), b"v2_c".as_ref())] {
+        assert_eq!(reopen.indexed_get(k).unwrap(), Some(v.to_vec()));
+    }
+}
+
+#[test]
+fn checkpoint_failure_under_bace_leaves_prior_generation_authoritative() {
+    // ADR 0065 §4 item 11 and §3.3 strict failure. A successful gen-1
+    // checkpoint under Raw establishes a visible generation. A
+    // subsequent gen-2 attempt under a broken BACE policy (allow-set
+    // contains only unregistered codec IDs) fails closed. The gen-1
+    // snapshot stays authoritative; the manifest is unchanged; the
+    // WAL is not truncated by the failed attempt.
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(),
+            wiring_with_profile(CompressionProfile::Raw),
+        ).unwrap();
+        s.put(b"durable", b"gen1").unwrap();
+        s.checkpoint().unwrap();   // lsn = 1
+    }
+    // Snapshot of the authoritative state before the broken attempt.
+    let gen1_bytes = fs::read(dir.path().join("snapshot-1.brp")).unwrap();
+    let gen1_manifest = fs::read(dir.path().join("checkpoint.current")).unwrap();
+
+    // Build a wiring whose allow-set is a single unregistered ID so
+    // any Balanced-profile checkpoint attempt fails closed.
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![CodecId(16)],
+        ..PlatformBaseline::shipped()
+    };
+    let broken = BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(
+            baseline, BuiltInRegistry::new(),
+        )),
+        registry: Arc::new(BuiltInRegistry::new()),
+    };
+    let s = RowStore::open_with_bace(dir.path(), StorageLimits::default(), broken).unwrap();
+    // Add a row to force a non-trivial next checkpoint.
+    s.put(b"extra", b"gen2").unwrap();
+    let err = s.checkpoint().unwrap_err();
+    assert!(matches!(err, StoreError::BaceCodecUnavailable { .. }),
+        "expected BaceCodecUnavailable, got {err:?}");
+
+    // Gen-1 artefacts are byte-identical.
+    assert_eq!(fs::read(dir.path().join("snapshot-1.brp")).unwrap(), gen1_bytes);
+    assert_eq!(fs::read(dir.path().join("checkpoint.current")).unwrap(), gen1_manifest);
+    // No gen-2 snapshot was published.
+    assert!(!dir.path().join("snapshot-2.brp").exists());
+    // The failed attempt did not corrupt visibility.
+    drop(s);
+    let legacy = RowStore::open(dir.path()).unwrap();
+    assert_eq!(legacy.get(b"durable"), Some(b"gen1".to_vec()));
+}
+
+#[test]
+fn open_with_bace_on_a_legacy_v1_only_directory_works() {
+    // ADR 0065 §4 item 12. A directory originally written by the
+    // pre-BACE RowStore (every page is v1) opens cleanly through
+    // open_with_bace. Recovery sees no v2 pages and therefore never
+    // calls into the envelope decoder; every row is visible.
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open(dir.path()).unwrap();
+        s.put(b"x", b"1").unwrap();
+        s.put(b"y", b"2").unwrap();
+        s.checkpoint().unwrap();
+    }
+    // Reopen through open_with_bace with a Balanced-profile wiring.
+    // The policy would call for v2 emissions if we checkpointed, but
+    // we only read here; recovery must not trip BaceOpenWithoutBaceWiring
+    // because every page it finds is v1.
+    let s = RowStore::open_with_bace(
+        dir.path(), StorageLimits::default(),
+        wiring_with_profile(CompressionProfile::Balanced),
+    ).unwrap();
+    assert_eq!(s.get(b"x"), Some(b"1".to_vec()));
+    assert_eq!(s.get(b"y"), Some(b"2".to_vec()));
+    assert_eq!(s.indexed_get(b"x").unwrap(), Some(b"1".to_vec()));
+    assert_eq!(s.indexed_get(b"y").unwrap(), Some(b"2".to_vec()));
+}
+
+#[test]
+fn recovery_fails_closed_when_envelope_names_an_unregistered_codec() {
+    // Remaining fail-closed case from R.3's deferred list: a v2 page
+    // declaring codec_id that is not in the registry fails recovery
+    // with BaceCodecUnavailable. Build the mismatch by hand using
+    // the Page::new_v2 + envelope layer directly.
+    let dir = tempdir().unwrap();
+    {
+        let s = RowStore::open_with_bace(
+            dir.path(), StorageLimits::default(),
+            wiring_with_profile(CompressionProfile::Balanced),
+        ).unwrap();
+        s.put(b"k", b"v").unwrap();
+        s.checkpoint().unwrap();
+    }
+
+    // Craft a well-formed envelope but with an unregistered codec_id.
+    let codec = bradian_relational::bace::codec::raw::RawCodec;
+    let plain = {
+        let mut v = Vec::new();
+        v.extend_from_slice(&1_u16.to_le_bytes());
+        v.extend_from_slice(&1_u32.to_le_bytes());
+        v.extend_from_slice(b"k");
+        v.extend_from_slice(b"v");
+        v
+    };
+    let mut encoded = Vec::new();
+    codec.encode(&plain, &mut encoded).unwrap();
+    let header = EnvelopeHeader {
+        codec_id: CodecId(17),            // unassigned per ADR 0061 P1
+        codec_format_version: 1,
+        flags: EnvelopeFlags { critical: true, ..Default::default() },
+        encoded_length: encoded.len() as u32,
+        decoded_length: plain.len() as u32,
+    };
+    let mut envelope = Vec::new();
+    write_envelope(&mut envelope, &header, &encoded).unwrap();
+
+    use bradian_relational::page::{Page, PageFlags, PageKind};
+    let doctored_page = Page::new_v2(
+        1, 1, PageKind::Data, envelope,
+        PageFlags::empty().with_bace_envelope(true),
+    ).unwrap().encode().unwrap();
+    let path = dir.path().join("snapshot-1.brp");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[4096..8192].copy_from_slice(&doctored_page);
+    fs::write(&path, bytes).unwrap();
+
+    match RowStore::open_with_bace(
+        dir.path(), StorageLimits::default(),
+        wiring_with_profile(CompressionProfile::Balanced),
+    ) {
+        Err(StoreError::BaceCodecUnavailable { codec_id }) => {
+            assert_eq!(codec_id, CodecId(17));
+        }
+        other => panic!("expected BaceCodecUnavailable, got {other:?}"),
+    }
+}
