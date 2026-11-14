@@ -107,7 +107,11 @@ impl BackupReceipt {
     }
 }
 
-fn read_receipt(path:&Path)->StoreResult<BackupReceipt> {
+/// ADR 0068 — exposes the on-disk `backup.info` descriptor so
+/// coordinator backups (database_backup.rs, history_backup.rs) can
+/// probe each sub-archive's `BackupFlags` without reopening the
+/// RowStore.
+pub fn read_receipt(path:&Path)->StoreResult<BackupReceipt> {
     let bytes=crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH>(path).map_err(|e|match e {
         crate::metadata_io::FixedError::Io(e)=>StoreError::Io(e),
         crate::metadata_io::FixedError::Length=>StoreError::Corruption("invalid backup descriptor header".into()),

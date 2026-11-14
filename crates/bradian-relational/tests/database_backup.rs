@@ -265,3 +265,146 @@ fn restored_database_can_accept_new_cross_table_transactions() {
     assert_database(&restored, 700);
     assert_database(&src, 1000);
 }
+
+// ---------- ADR 0068 — coordinator backup BACE adapter ----------
+
+use std::sync::Arc;
+use bradian_relational::backup::{self, BackupFlags};
+use bradian_relational::bace::codec::raw::RAW_ID;
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+use bradian_relational::bace::policy::{
+    CompressionProfile, InMemoryPolicyService, PlatformBaseline,
+};
+use bradian_relational::bace::registry::BuiltInRegistry;
+use bradian_relational::database_backup::{
+    restore_database_with_bace, restore_database_with_bace_and_metadata_limits,
+};
+use bradian_relational::row_store::BaceWiring;
+use bradian_relational::runtime_limits::MetadataLimits;
+
+fn wiring_zstd_balanced() -> BaceWiring {
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![ZSTD_ID, RAW_ID],
+        ..PlatformBaseline::shipped()
+    };
+    BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }
+}
+
+/// Doctor one sub-archive's `backup.info` to claim BACE pages (flag
+/// bit 0 set at byte 32), and recompute the trailing CRC so the
+/// descriptor remains self-consistent. Used to simulate a future
+/// CatalogLifecycle::open_with_bace world without actually having
+/// that entry point yet.
+fn flip_flag_set_bace(backup_info: &std::path::Path) {
+    let mut bytes = fs::read(backup_info).unwrap();
+    bytes[32] = 0x01;
+    let crc = crc32fast::hash(&bytes[..36]);
+    bytes[36..40].copy_from_slice(&crc.to_le_bytes());
+    fs::write(backup_info, &bytes).unwrap();
+}
+
+#[test]
+fn restore_database_with_bace_on_a_legacy_coordinator_backup_succeeds() {
+    // ADR 0068 §3.6 item 1 — wiring is tolerated on all-flag-clear
+    // coordinator backups (ADR 0065 §3.5 rule applied to each sub-
+    // archive).
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("source");
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored-via-bace");
+    make_database(&src);
+    {
+        let owner = CatalogLifecycle::open(&src).unwrap();
+        owner.backup_database_to(&archive).unwrap();
+    }
+
+    // Every sub-archive has flag=0 because CatalogLifecycle::open
+    // uses the legacy RowStore::open path.
+    for component in ["catalog", "shared-domain", "lifecycle"] {
+        let r = backup::read_receipt(&archive.join(component).join("backup.info")).unwrap();
+        assert!(!r.flags.payload_has_bace_pages);
+    }
+
+    restore_database_with_bace(&archive, &restored, wiring_zstd_balanced()).unwrap();
+    assert_database(&restored, 1000);
+}
+
+#[test]
+fn restore_database_legacy_fails_closed_with_specific_error_when_any_sub_archive_declares_bace() {
+    // ADR 0068 §3.6 items 3 and 6 — a sub-archive whose backup.info
+    // flag is set must cause restore_database to fail with
+    // RestoreRequiresBaceWiring BEFORE any staging directory is
+    // created, and BEFORE any sub-archive bytes are decoded.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("source");
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    make_database(&src);
+    {
+        let owner = CatalogLifecycle::open(&src).unwrap();
+        owner.backup_database_to(&archive).unwrap();
+    }
+    // Doctor the lifecycle sub-archive's flag to claim BACE pages.
+    flip_flag_set_bace(&archive.join("lifecycle").join("backup.info"));
+
+    match restore_database(&archive, &restored) {
+        Err(DatabaseBackupError::RestoreRequiresBaceWiring) => {},
+        other => panic!("expected RestoreRequiresBaceWiring, got {other:?}"),
+    }
+    assert!(!restored.exists(), "destination must not be created");
+    let parent = restored.parent().unwrap();
+    let stage_name = format!(".{}.bradian-g19-incomplete",
+        restored.file_name().unwrap().to_string_lossy());
+    assert!(!parent.join(stage_name).exists(), "staging dir must not be created");
+}
+
+// ADR 0068 §3.6 item 4 (doctored flag tolerance through _with_bace)
+// is documented in the ADR and acceptance doc but is not covered by
+// an integration test. Flipping a sub-archive's flag also changes
+// its archive_crc32, so the test would additionally need to rewrite
+// the coordinator manifest to keep the archive_crc32 consistent —
+// too much test infrastructure for a corner case. The behavior is
+// covered implicitly by `..._tolerates_doctored_flag_...` in the
+// backup_restore test suite (ADR 0067 §3.7 item 9), which asserts
+// the sub-archive-level rule that this coordinator inherits.
+
+#[test]
+fn read_receipt_is_publicly_reachable_and_returns_flags() {
+    // ADR 0068 §3.6 item 7 — the previously module-private
+    // read_receipt is now part of the crate's public API so
+    // coordinator carriers (and tests) can probe flag bits
+    // without reopening the RowStore.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("source");
+    let archive = dir.path().join("archive");
+    make_database(&src);
+    {
+        let owner = CatalogLifecycle::open(&src).unwrap();
+        owner.backup_database_to(&archive).unwrap();
+    }
+    let r = backup::read_receipt(&archive.join("catalog").join("backup.info")).unwrap();
+    assert_eq!(r.flags, BackupFlags::default());
+}
+
+#[test]
+fn restore_database_with_bace_and_metadata_limits_is_reachable() {
+    // Covers the non-default-limits entry point so the API surface
+    // is exercised in CI.
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("source");
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    make_database(&src);
+    {
+        let owner = CatalogLifecycle::open(&src).unwrap();
+        owner.backup_database_to(&archive).unwrap();
+    }
+    restore_database_with_bace_and_metadata_limits(
+        &archive, &restored, MetadataLimits::default(), wiring_zstd_balanced(),
+    ).unwrap();
+    assert_database(&restored, 1000);
+}

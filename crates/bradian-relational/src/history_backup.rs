@@ -18,10 +18,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{Table, TableId};
-use crate::backup::BackupReceipt;
+use crate::backup::{self, BackupReceipt};
 use crate::durable_typed::DurableTypedStore;
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
-use crate::row_store::{RowStore, StoreError};
+use crate::row_store::{BaceWiring, RowStore, StoreError};
+use crate::runtime_limits::StorageLimits;
 use crate::transaction_domain::DomainError;
 
 const FORMAT: &str = "BRADIAN-HISTORY-BACKUP-V1";
@@ -44,6 +45,8 @@ pub enum HistoryBackupError {
     Invalid(String),
     #[error("history backup verification failed: {0}")]
     Corruption(String),
+    #[error("history backup carries BACE v2 pages in one or more components; restore_history_database_with_bace is required")]
+    RestoreRequiresBaceWiring,
 }
 pub type HistoryBackupResult<T> = Result<T, HistoryBackupError>;
 
@@ -271,7 +274,42 @@ pub fn restore_history_database_with_limits(
 pub fn restore_history_database_with_policies(
     backup: impl AsRef<Path>, destination: impl AsRef<Path>, limits: HistoryLimits, metadata: MetadataLimits,
 ) -> HistoryBackupResult<HistoryBackupReport> {
-    let backup = fs::canonicalize(backup.as_ref())?;
+    restore_history_database_inner(backup.as_ref(), destination.as_ref(), limits, metadata, None)
+}
+
+/// ADR 0068 §3.1 — BACE-aware history coordinator restore. Required
+/// when any sub-archive's `backup.info` declares BACE pages.
+/// Tolerated on legacy (flag-clear) coordinator backups.
+pub fn restore_history_database_with_bace(
+    backup: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    wiring: BaceWiring,
+) -> HistoryBackupResult<HistoryBackupReport> {
+    restore_history_database_with_bace_and_policies(
+        backup, destination, HistoryLimits::default(), MetadataLimits::default(), wiring,
+    )
+}
+
+pub fn restore_history_database_with_bace_and_policies(
+    backup: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    limits: HistoryLimits,
+    metadata: MetadataLimits,
+    wiring: BaceWiring,
+) -> HistoryBackupResult<HistoryBackupReport> {
+    restore_history_database_inner(
+        backup.as_ref(), destination.as_ref(), limits, metadata, Some(wiring),
+    )
+}
+
+fn restore_history_database_inner(
+    backup: &Path,
+    destination: &Path,
+    limits: HistoryLimits,
+    metadata: MetadataLimits,
+    wiring: Option<BaceWiring>,
+) -> HistoryBackupResult<HistoryBackupReport> {
+    let backup = fs::canonicalize(backup)?;
     let report = read_manifest(&backup,metadata)?;
     for (component, receipt) in [
         (COMPONENTS[0], report.catalog), (COMPONENTS[1], report.history),
@@ -280,12 +318,35 @@ pub fn restore_history_database_with_policies(
             return Err(HistoryBackupError::Corruption(format!("{component} checksum mismatch")));
         }
     }
-    let (dest, stage) = new_destination(destination.as_ref(), &backup)?;
+    // ADR 0068 §3.4 — after manifest/CRC validation, probe each
+    // sub-archive for the ADR 0067 flag and fail closed on the
+    // legacy entry point BEFORE any staging directory exists.
+    let mut any_bace_sub_archive = false;
+    for component in COMPONENTS {
+        let path = backup.join(component).join("backup.info");
+        let receipt = backup::read_receipt(&path).map_err(|e| match e {
+            StoreError::Corruption(msg) => HistoryBackupError::Corruption(
+                format!("{component} backup.info: {msg}"),
+            ),
+            other => HistoryBackupError::Store(other),
+        })?;
+        if receipt.flags.payload_has_bace_pages { any_bace_sub_archive = true; }
+    }
+    if any_bace_sub_archive && wiring.is_none() {
+        return Err(HistoryBackupError::RestoreRequiresBaceWiring);
+    }
+    let (dest, stage) = new_destination(destination, &backup)?;
     fs::create_dir(&stage)?;
     for (component, receipt) in [
         (COMPONENTS[0], report.catalog), (COMPONENTS[1], report.history),
     ] {
-        let actual = RowStore::restore_backup(backup.join(component), stage.join(component))?;
+        let actual = match &wiring {
+            Some(w) => RowStore::restore_backup_with_bace(
+                backup.join(component), stage.join(component),
+                StorageLimits::default(), w.clone(),
+            )?,
+            None => RowStore::restore_backup(backup.join(component), stage.join(component))?,
+        };
         if !receipt_matches(actual, receipt) {
             return Err(HistoryBackupError::Corruption(format!("{component} receipt mismatch")));
         }

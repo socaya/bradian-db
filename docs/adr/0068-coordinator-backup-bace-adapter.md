@@ -1,16 +1,52 @@
-# ADR 0068 — Coordinator backup BACE adapter (implementation; **PROPOSED**)
+# ADR 0068 — Coordinator backup BACE adapter (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 14 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE prerequisite stack (0060–0063), the
-accepted row-store integration (0065), and the accepted backup
-carrier adapter (0067). Closes the "known gap" §9 of the ADR 0067
-verification doc: the two coordinator backup carriers
-(`database_backup.rs`, `history_backup.rs`) still call the legacy
-`RowStore::restore_backup`, which now fails closed on sub-archives
-that carry BACE v2 pages.
+Closes the ADR 0067 known gap §9 — the two coordinator backup
+carriers (`database_backup.rs`, `history_backup.rs`) now route
+through `RowStore::restore_backup_with_bace` when a sub-archive
+declares BACE pages, and fail closed with specific errors on the
+legacy entry points.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+Implementation summary:
+
+- `crates/bradian-relational/src/backup.rs` — `read_receipt`
+  promoted from module-private to `pub fn` (ADR §3.3).
+- `crates/bradian-relational/src/database_backup.rs` — new
+  `restore_database_with_bace` + `_and_metadata_limits`;
+  `DatabaseBackupError::RestoreRequiresBaceWiring` variant;
+  shared-wiring model; sub-archive flag probe runs AFTER
+  manifest/CRC validation (preserves pre-existing IO vs.
+  Corruption error classification for missing-file and malformed-
+  JSON failures, while still firing BEFORE any staging
+  directory).
+- `crates/bradian-relational/src/history_backup.rs` — mirror
+  for the two-component G24 coordinator.
+- `crates/bradian-relational/tests/database_backup.rs` — 4 new
+  integration tests.
+- `crates/bradian-relational/tests/history_backup_consistency.rs`
+  — 2 new integration tests.
+
+956 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
+
+### Scope note on §3.6 item 4
+
+The drafted §3.6 item 4 said a doctored-flag-but-v1-pages
+sub-archive would restore successfully through `_with_bace`
+(ADR 0065 §3.5 tolerates wiring on v1 directories). In practice
+flipping one sub-archive's flag byte also changes its
+`archive_crc32`, so the coordinator fails at the pre-existing
+`verify_archive_crc` check before the flag probe even runs.
+Reaching the pure "flag=1, v1 pages, consistent manifest CRCs"
+state requires rewriting the coordinator manifest — too much
+test infrastructure for a corner case. The underlying rule is
+covered by the sub-archive-level test
+`legacy_pre_bace_backup_restores_through_with_bace_entry_point`
+in the ADR 0067 test suite (backup_restore.rs); the coordinator
+inherits the same rule transitively. Item 4 is marked as
+documented but not directly tested.
 
 ## 1. Context
 

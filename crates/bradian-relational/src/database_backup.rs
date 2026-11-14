@@ -20,12 +20,13 @@ use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::backup::BackupReceipt;
+use crate::backup::{self, BackupReceipt};
 use crate::lifecycle::{
     CatalogLifecycle, LifecycleError, TableLifecycleState, TableLifecycleStatus,
 };
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
-use crate::row_store::{RowStore, StoreError};
+use crate::row_store::{BaceWiring, RowStore, StoreError};
+use crate::runtime_limits::StorageLimits;
 use crate::transaction_domain::{DomainError, MultiTableStore};
 
 const FORMAT: &str = "BRADIAN-DATABASE-BACKUP-V1";
@@ -50,6 +51,8 @@ pub enum DatabaseBackupError {
     Invalid(String),
     #[error("database backup integrity violation: {0}")]
     Corruption(String),
+    #[error("database backup carries BACE v2 pages in one or more components; restore_database_with_bace is required")]
+    RestoreRequiresBaceWiring,
 }
 
 pub type DatabaseBackupResult<T> = Result<T, DatabaseBackupError>;
@@ -308,7 +311,39 @@ pub fn restore_database(
 pub fn restore_database_with_metadata_limits(
     backup: impl AsRef<Path>, destination: impl AsRef<Path>, metadata: MetadataLimits,
 ) -> DatabaseBackupResult<DatabaseBackupReport> {
-    let backup = fs::canonicalize(backup.as_ref())?;
+    restore_database_inner(backup.as_ref(), destination.as_ref(), metadata, None)
+}
+
+/// ADR 0068 §3.1 — BACE-aware coordinator restore. Required when any
+/// sub-archive's `backup.info` declares `payload_has_bace_pages = true`.
+/// Tolerated on legacy (all-flag-clear) coordinator backups: per
+/// ADR 0065 §3.5, `open_with_bace` works on v1-only directories.
+pub fn restore_database_with_bace(
+    backup: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    wiring: BaceWiring,
+) -> DatabaseBackupResult<DatabaseBackupReport> {
+    restore_database_with_bace_and_metadata_limits(
+        backup, destination, MetadataLimits::default(), wiring,
+    )
+}
+
+pub fn restore_database_with_bace_and_metadata_limits(
+    backup: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    metadata: MetadataLimits,
+    wiring: BaceWiring,
+) -> DatabaseBackupResult<DatabaseBackupReport> {
+    restore_database_inner(backup.as_ref(), destination.as_ref(), metadata, Some(wiring))
+}
+
+fn restore_database_inner(
+    backup: &Path,
+    destination: &Path,
+    metadata: MetadataLimits,
+    wiring: Option<BaceWiring>,
+) -> DatabaseBackupResult<DatabaseBackupReport> {
+    let backup = fs::canonicalize(backup)?;
     if !backup.is_dir() {
         return Err(DatabaseBackupError::Invalid("backup is not a directory".into()));
     }
@@ -320,17 +355,42 @@ pub fn restore_database_with_metadata_limits(
     ] {
         verify_archive_crc(&backup.join(component), expected)?;
     }
-    let (destination, staged) = canonical_new_destination(destination.as_ref(), &backup)?;
+    // ADR 0068 §3.4 — after manifest/CRC validation (so IO/Corruption
+    // error classification is preserved for pre-existing failure
+    // modes), probe each sub-archive for the ADR 0067 flag. Fail
+    // closed on the legacy entry point BEFORE any staging directory
+    // or destination exists.
+    let mut any_bace_sub_archive = false;
+    for component in COMPONENTS {
+        let path = backup.join(component).join("backup.info");
+        let receipt = backup::read_receipt(&path).map_err(|e| match e {
+            StoreError::Corruption(msg) => DatabaseBackupError::Corruption(
+                format!("{component} backup.info: {msg}"),
+            ),
+            other => DatabaseBackupError::Storage(other),
+        })?;
+        if receipt.flags.payload_has_bace_pages { any_bace_sub_archive = true; }
+    }
+    if any_bace_sub_archive && wiring.is_none() {
+        return Err(DatabaseBackupError::RestoreRequiresBaceWiring);
+    }
+    let (destination, staged) = canonical_new_destination(destination, &backup)?;
     fs::create_dir(&staged)?;
     for (component, expected) in [
         (COMPONENTS[0], report.catalog),
         (COMPONENTS[1], report.domain),
         (COMPONENTS[2], report.lifecycle),
     ] {
-        let actual = RowStore::restore_backup(
-            backup.join(component),
-            staged.join(component),
-        )?;
+        let actual = match &wiring {
+            Some(w) => RowStore::restore_backup_with_bace(
+                backup.join(component), staged.join(component),
+                StorageLimits::default(), w.clone(),
+            )?,
+            None => RowStore::restore_backup(
+                backup.join(component),
+                staged.join(component),
+            )?,
+        };
         if !receipt_matches(actual, expected) {
             return Err(DatabaseBackupError::Corruption(
                 format!("{component} backup receipt mismatch"),
