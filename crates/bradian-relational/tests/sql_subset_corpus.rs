@@ -605,3 +605,140 @@ fn alter_rejects_drop_column_rename_and_type_change() {
         assert!(db.execute_ddl(ddl).is_err(), "should be rejected: {ddl}");
     }
 }
+
+// ---------- extended corpus (ADR 0055 §14) ----------
+
+#[test]
+fn describe_table_as_of_returns_schema_rows() {
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let lsn = db.last_lsn();
+    let rows = db.with_session(|s| {
+        s.execute("BEGIN")?;
+        let r = s.execute(&format!(
+            "DESCRIBE TABLE bank.public.accounts AS OF {lsn}"
+        ))?;
+        s.execute("ROLLBACK")?;
+        Ok(r)
+    }).unwrap();
+    match rows {
+        SqlResultSet::Rows { columns, rows } => {
+            assert_eq!(columns, vec!["column_name", "data_type", "nullable", "schema_registered_lsn"]);
+            // At least the `id` and `balance` columns must be present.
+            let names: Vec<_> = rows.iter().map(|r| match &r[0] {
+                Value::String(s) => s.clone(),
+                _ => panic!("expected column_name string"),
+            }).collect();
+            assert!(names.contains(&"id".to_string()));
+            assert!(names.contains(&"balance".to_string()));
+        }
+        _ => panic!("expected rows"),
+    }
+}
+
+#[test]
+fn describe_without_as_of_is_rejected() {
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let outcome = db.with_session(|s| {
+        s.execute("BEGIN")?;
+        Ok(s.execute("DESCRIBE TABLE bank.public.accounts"))
+    }).unwrap();
+    assert!(outcome.is_err(), "DESCRIBE without AS OF must be refused");
+}
+
+#[test]
+fn release_savepoint_confirms_prior_work_and_allows_commit() {
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE bank.public.accounts SET balance=1100 WHERE id=1")?;
+        s.execute("SAVEPOINT marker")?;
+        s.execute("UPDATE bank.public.accounts SET balance=1200 WHERE id=1")?;
+        s.execute("RELEASE SAVEPOINT marker")?;
+        s.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        assert_eq!(
+            s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1200)]] },
+        );
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn insert_default_uses_the_column_default_at_the_target_schema() {
+    let (_dir, history) = seed_history();
+    let mut db = HistorySqlEngine::open(&history).unwrap();
+    db.enable_epoch_row_writes().unwrap();
+    db.execute_ddl(
+        "ALTER TABLE bank.public.accounts ADD COLUMN memo TEXT NOT NULL DEFAULT 'none'",
+    ).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("INSERT INTO bank.public.accounts (id,balance,memo) VALUES (99,0,DEFAULT)")?;
+        assert_eq!(
+            s.execute("SELECT memo FROM bank.public.accounts WHERE id=99")?,
+            SqlResultSet::Rows { columns: vec!["memo".into()], rows: vec![vec![Value::String("none".into())]] },
+        );
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn update_expression_boundary_at_32_nested_parentheses_is_accepted() {
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    // 32 open parens + 32 close parens around a single column reference
+    // is at the published nesting-depth boundary.
+    let open = "(".repeat(32);
+    let close = ")".repeat(32);
+    let expr = format!("UPDATE bank.public.accounts SET balance = {open}balance{close} + 1 WHERE id=1");
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute(&expr)?;
+        assert_eq!(
+            s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1001)]] },
+        );
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn update_expression_rejects_nesting_beyond_published_depth() {
+    let (_dir, history) = seed_history();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    // One level past the 32-nesting-depth ceiling must refuse.
+    let open = "(".repeat(33);
+    let close = ")".repeat(33);
+    let expr = format!("UPDATE bank.public.accounts SET balance = {open}balance{close} WHERE id=1");
+    let outcome = db.with_session(|s| {
+        s.execute("BEGIN")?;
+        Ok(s.execute(&expr))
+    }).unwrap();
+    assert!(outcome.is_err(), "nesting beyond the published depth must refuse");
+}
+
+#[test]
+fn update_expression_rejects_arithmetic_on_text_target() {
+    // Arithmetic right-hand side is refused when the target column is TEXT.
+    let (_dir, history) = seed_history();
+    let mut db = HistorySqlEngine::open(&history).unwrap();
+    db.enable_epoch_row_writes().unwrap();
+    db.execute_ddl(
+        "ALTER TABLE bank.public.accounts ADD COLUMN label TEXT NULL",
+    ).unwrap();
+    let outcome = db.with_session(|s| {
+        s.execute("BEGIN")?;
+        Ok(s.execute("UPDATE bank.public.accounts SET label = balance + 1 WHERE id=1"))
+    }).unwrap();
+    assert!(outcome.is_err(), "arithmetic on TEXT target must refuse");
+}

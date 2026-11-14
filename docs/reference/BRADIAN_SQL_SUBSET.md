@@ -90,6 +90,10 @@ syntax on any engine.
 | `BEGIN` snapshot session | `history_begin_commit_round_trip` |
 | `BEGIN TRANSACTION WITH READ VALIDATION` | `history_begin_with_read_validation_is_accepted` |
 | `SAVEPOINT <name>` + `ROLLBACK TO <name>` keeps pre-marker work | `history_savepoint_rollback_to_discards_only_post_marker_work` |
+| `RELEASE SAVEPOINT <name>` confirms prior work and allows COMMIT | `release_savepoint_confirms_prior_work_and_allows_commit` |
+| `DESCRIBE TABLE <t> AS OF <lsn>` returns the schema at that LSN | `describe_table_as_of_returns_schema_rows` |
+| `DESCRIBE TABLE <t>` without `AS OF` refused | `describe_without_as_of_is_rejected` |
+| `INSERT INTO ... VALUES (..., DEFAULT)` uses the column default | `insert_default_uses_the_column_default_at_the_target_schema` |
 
 ## 9. `UPDATE` expressions — `HistorySqlEngine` only
 
@@ -109,6 +113,9 @@ Budgets: ≤128 nodes, ≤32 nesting depth.
 |---|---|
 | `col = col + literal` (BIGINT) | `update_expression_arithmetic_on_bigint` |
 | Parentheses override precedence | `update_expression_parentheses_override_precedence` |
+| 32-nested-parentheses boundary accepted | `update_expression_boundary_at_32_nested_parentheses_is_accepted` |
+| Nesting beyond 32 refused | `update_expression_rejects_nesting_beyond_published_depth` |
+| Arithmetic on TEXT target refused | `update_expression_rejects_arithmetic_on_text_target` |
 
 ## 10. Schema evolution — `HistorySqlEngine` only
 
@@ -156,10 +163,11 @@ Budgets: ≤128 nodes, ≤32 nesting depth.
   Rust APIs and the native CLI only.
 - Cross-platform installer, lock-lifecycle and recovery runs on
   Windows / macOS.
-- `DESCRIBE TABLE AS OF`, `RELEASE SAVEPOINT`, `INSERT ... DEFAULT`,
-  range-only ORDER BY cases, `TimestampTz` and `Uuid` sort behaviour, and
-  the full 128-node / 32-nesting-depth boundary of UPDATE expressions —
-  these are exercised by other suites in the crate but are not yet in the
-  single-file corpus.
+- Range ORDER BY cases, `TimestampTz` and `Uuid` sort behaviour, and
+  the 128-node boundary (as distinct from the 32-depth boundary) of
+  UPDATE expressions — these are exercised by other suites in the crate
+  but are not yet in the single-file corpus. `DESCRIBE TABLE AS OF`,
+  `RELEASE SAVEPOINT`, `INSERT ... DEFAULT` and the 32-depth boundary
+  are now in the corpus (§8 and §9 above).
 
 These remain open items under G1-REFERENCE in the fixed roadmap.
