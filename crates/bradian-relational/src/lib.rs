@@ -7,7 +7,10 @@
 //! Names currently follow a conservative case-insensitive unquoted ASCII profile.
 //! Quoted identifiers, Unicode collations and SQL compatibility remain future work.
 
-#![forbid(unsafe_code)]
+// CLAUDE.md §4.9 allows narrow unsafe in clearly-scoped sites with SAFETY
+// comments. `deny` lets individual call sites opt in with
+// `#[allow(unsafe_code)]`; `forbid` would block them even at the call site.
+#![deny(unsafe_code)]
 
 mod metadata_io;
 mod model;

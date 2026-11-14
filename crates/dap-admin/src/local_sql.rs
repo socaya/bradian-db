@@ -130,6 +130,9 @@ fn private_root(root: &Path) -> Result<()> {
         Err(LocalAccessError::LooseMode { .. }) => anyhow::bail!(
             "SQL root must have no group/other permissions (use a private 0700 directory)",
         ),
+        Err(LocalAccessError::WrongOwner { owner_uid, expected_uid }) => anyhow::bail!(
+            "SQL root must be owned by the current user (uid {expected_uid}); actual owner uid {owner_uid}",
+        ),
         Err(LocalAccessError::NotFound) => anyhow::bail!(
             "SQL root does not exist and CreateIfMissing was unexpectedly refused",
         ),

@@ -1,8 +1,9 @@
-//! Shared POSIX private-root invariants for native local access (ADR 0053).
+//! Shared POSIX private-root invariants for native local access
+//! (ADR 0053, amended by ADR 0057).
 //!
-//! The helper enforces directory-mode invariants ONLY. Effective-UID ownership,
-//! POSIX ACLs, parent-path trust and Windows ACLs are not enforced here and are
-//! documented as open items in the Bradian master roadmap (G1-LOCAL-ACCESS).
+//! The helper enforces directory-mode and effective-UID ownership invariants.
+//! POSIX ACLs, parent-path trust and Windows ACLs are not enforced here and
+//! are documented as open items in the Bradian master roadmap (G1-LOCAL-ACCESS).
 
 use std::path::Path;
 
@@ -28,6 +29,8 @@ pub enum LocalAccessError {
     SymlinkedRoot,
     #[error("root has group or other permission bits set (mode {mode:o}); use a private 0700 directory")]
     LooseMode { mode: u32 },
+    #[error("root is owned by uid {owner_uid}; expected uid {expected_uid}")]
+    WrongOwner { owner_uid: u32, expected_uid: u32 },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -35,23 +38,47 @@ pub enum LocalAccessError {
 /// Enforce the POSIX private-root invariants on `path`. On non-Unix platforms
 /// the helper returns `Unsupported` without touching the filesystem; callers
 /// must decide how to react rather than silently skipping enforcement.
+/// On Unix the expected owner is the effective UID (`geteuid()`).
 pub fn ensure_private_root(path: &Path, policy: PrivateRootPolicy)
     -> Result<(), LocalAccessError>
 {
     #[cfg(unix)]
-    { unix::ensure_private_root(path, policy) }
+    {
+        #[allow(unsafe_code)]
+        // SAFETY: libc::geteuid is a POSIX thread-safe syscall with no
+        // preconditions, no error return, and no side effects beyond
+        // returning the caller's effective UID. It cannot fail or alias.
+        let euid = unsafe { libc::geteuid() };
+        unix::ensure_private_root_owned_by(path, policy, euid)
+    }
     #[cfg(not(unix))]
     { let _ = (path, policy); Err(LocalAccessError::Unsupported) }
+}
+
+/// Test-visible workhorse: enforce the private-root invariants against an
+/// explicit expected-owner UID. On Unix this is the implementation used by
+/// `ensure_private_root` (with `geteuid()` as the expected UID). Non-Unix
+/// targets return `Unsupported` as above. This entry point lets tests prove
+/// the wrong-owner rejection without requiring root (and `chown`).
+#[cfg_attr(not(unix), allow(unused_variables))]
+pub fn ensure_private_root_owned_by(path: &Path, policy: PrivateRootPolicy, expected_uid: u32)
+    -> Result<(), LocalAccessError>
+{
+    #[cfg(unix)]
+    { unix::ensure_private_root_owned_by(path, policy, expected_uid) }
+    #[cfg(not(unix))]
+    { Err(LocalAccessError::Unsupported) }
 }
 
 #[cfg(unix)]
 mod unix {
     use super::{LocalAccessError, PrivateRootPolicy};
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     use std::path::Path;
 
-    pub(super) fn ensure_private_root(path: &Path, policy: PrivateRootPolicy)
-        -> Result<(), LocalAccessError>
+    pub(super) fn ensure_private_root_owned_by(
+        path: &Path, policy: PrivateRootPolicy, expected_uid: u32,
+    ) -> Result<(), LocalAccessError>
     {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => {
@@ -65,6 +92,10 @@ mod unix {
                 if mode & 0o077 != 0 {
                     return Err(LocalAccessError::LooseMode { mode });
                 }
+                let owner_uid = metadata.uid();
+                if owner_uid != expected_uid {
+                    return Err(LocalAccessError::WrongOwner { owner_uid, expected_uid });
+                }
                 Ok(())
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -73,6 +104,14 @@ mod unix {
                     PrivateRootPolicy::CreateIfMissing => {
                         let mut builder = std::fs::DirBuilder::new();
                         builder.recursive(true).mode(0o700).create(path)?;
+                        // The freshly created directory is owned by the
+                        // effective UID that just created it. If the caller
+                        // supplied a non-euid expected value, enforce it.
+                        let metadata = std::fs::symlink_metadata(path)?;
+                        let owner_uid = metadata.uid();
+                        if owner_uid != expected_uid {
+                            return Err(LocalAccessError::WrongOwner { owner_uid, expected_uid });
+                        }
                         Ok(())
                     }
                 }
@@ -167,5 +206,58 @@ mod tests {
         ensure_private_root(&root, PrivateRootPolicy::CreateIfMissing).unwrap();
         let mode = std::fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn effective_uid_check_accepts_own_directory_against_default_entry_point() {
+        // The default ensure_private_root wraps the wrong-owner check with
+        // geteuid() as the expected UID. A directory just created by the
+        // running process is owned by that euid and must be accepted.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ensure_private_root(&root, PrivateRootPolicy::RequireExisting).unwrap();
+    }
+
+    #[test]
+    fn wrong_owner_uid_is_refused_without_touching_the_directory() {
+        // Prove the WrongOwner refusal path without requiring chown: the
+        // tests-visible workhorse accepts an explicit expected UID. A clearly
+        // distinct value (u32::MAX) cannot match any real file owner UID.
+        use super::ensure_private_root_owned_by;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("private");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let before_mode = std::fs::symlink_metadata(&root).unwrap().permissions().mode();
+        match ensure_private_root_owned_by(&root, PrivateRootPolicy::RequireExisting, u32::MAX) {
+            Err(LocalAccessError::WrongOwner { owner_uid, expected_uid }) => {
+                assert_ne!(owner_uid, u32::MAX);
+                assert_eq!(expected_uid, u32::MAX);
+            }
+            other => panic!("expected WrongOwner, got {other:?}"),
+        }
+        // The refused check left the directory mode exactly as it was.
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().permissions().mode(),
+            before_mode,
+        );
+    }
+
+    #[test]
+    fn mode_refusal_takes_precedence_over_uid_mismatch() {
+        // A directory with loose permissions AND the wrong owner should
+        // report LooseMode first, matching the audit ordering: fix the
+        // permissions, then the ownership, not the other way around.
+        use super::ensure_private_root_owned_by;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("loose");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match ensure_private_root_owned_by(&root, PrivateRootPolicy::RequireExisting, u32::MAX) {
+            Err(LocalAccessError::LooseMode { .. }) => {}
+            other => panic!("expected LooseMode first, got {other:?}"),
+        }
     }
 }
