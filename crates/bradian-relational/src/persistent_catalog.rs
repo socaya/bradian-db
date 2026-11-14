@@ -20,6 +20,7 @@ use crate::{
     Catalog, CatalogError, DatabaseId, ForeignKeySpec, SchemaId, Table, TableId, TableSpec,
 };
 use crate::row_store::{RowStore, StoreError};
+use crate::runtime_limits::{CatalogLimits, CatalogUsage, ResourceError};
 use crate::backup::BackupReceipt;
 
 const MARKER_KEY: &[u8] = b"bradian.catalog.version";
@@ -35,6 +36,8 @@ pub enum PersistentCatalogError {
     Storage(#[from] StoreError),
     #[error(transparent)]
     Encoding(#[from] serde_json::Error),
+    #[error(transparent)]
+    Resource(#[from] ResourceError),
     #[error("catalog journal is corrupt: {0}")]
     Corruption(String),
 }
@@ -153,15 +156,33 @@ struct Inner {
     journal: RowStore,
 }
 
+fn usage_of(catalog: &Catalog, revisions: &BTreeMap<TableId, CatalogTableRevision>) -> CatalogUsage {
+    CatalogUsage {
+        databases: catalog.databases().count(),
+        schemas: catalog.schemas().count(),
+        tables: catalog.tables().count(),
+        revisions: revisions.len(),
+    }
+}
+
 /// One exclusively owned durable catalog. Metadata operations are serialized
 /// under a process mutex, then WAL-synced before their new state is published.
 #[derive(Debug)]
 pub struct PersistentCatalog {
     inner: Mutex<Inner>,
+    limits: CatalogLimits,
 }
 
 impl PersistentCatalog {
     pub fn open(path: impl AsRef<Path>) -> PersistentCatalogResult<Self> {
+        Self::open_with_limits(path, CatalogLimits::default())
+    }
+
+    /// Open the catalog with explicit decoded-state and event-byte admission.
+    /// Policies are not persisted; they bound live decoded state only.
+    pub fn open_with_limits(path: impl AsRef<Path>, limits: CatalogLimits)
+        -> PersistentCatalogResult<Self>
+    {
         let journal = RowStore::open(path)?;
         let mut catalog = Catalog::new();
         let mut revisions = BTreeMap::new();
@@ -187,6 +208,7 @@ impl PersistentCatalog {
                         format!("missing, duplicated, or unexpected DDL event at LSN {next_lsn}"),
                     ));
                 }
+                limits.check_event_bytes(value.len())?;
                 let event: Event = serde_json::from_slice(value)
                     .map_err(|err| PersistentCatalogError::Corruption(
                         format!("invalid DDL event at LSN {next_lsn}: {err}"),
@@ -200,6 +222,9 @@ impl PersistentCatalog {
                     .map_err(|err| PersistentCatalogError::Corruption(
                         format!("DDL replay failed at LSN {next_lsn}: {err}"),
                     ))?;
+                // Bound decoded state after each event; refusal preserves the
+                // on-disk journal exactly as it was and never silently prunes.
+                limits.check(usage_of(&catalog, &revisions))?;
                 next_lsn = next_lsn.checked_add(1)
                     .ok_or_else(|| PersistentCatalogError::Corruption(
                         "catalog event sequence overflow".into(),
@@ -211,7 +236,13 @@ impl PersistentCatalog {
                 ));
             }
         }
-        Ok(Self { inner: Mutex::new(Inner { catalog, revisions, journal }) })
+        Ok(Self { inner: Mutex::new(Inner { catalog, revisions, journal }), limits })
+    }
+
+    pub fn resource_limits(&self) -> CatalogLimits { self.limits }
+    pub fn resource_usage(&self) -> CatalogUsage {
+        let inner = self.inner.lock();
+        usage_of(&inner.catalog, &inner.revisions)
     }
 
     /// Return an owned consistent metadata view. A cloned catalog is necessary
@@ -280,7 +311,11 @@ impl PersistentCatalog {
         // Use exactly the replay validator for every operation before WAL publication.
         tentative = inner.catalog.clone();
         event.apply(&mut tentative, &mut pending, next_lsn)?;
+        // Admit decoded state before serializing or journaling. A refusal leaves
+        // the live catalog, revisions and WAL exactly as they were.
+        self.limits.check(usage_of(&tentative, &pending))?;
         let bytes = serde_json::to_vec(&event)?;
+        self.limits.check_event_bytes(bytes.len())?;
         // Oversized DDL definitions must fail before being committed. RowStore
         // enforces the inline record limit and leaves the WAL unmodified.
         let actual = inner.journal.put(event_key(next_lsn).as_bytes(), &bytes)?;

@@ -30,6 +30,8 @@ pub enum ResourceError {
     StagingLimit { resource: &'static str, limit: usize },
     #[error("directory listing {resource} limit exceeded (limit {limit})")]
     DirectoryLimit { resource: &'static str, limit: usize },
+    #[error("persistent catalog {resource} limit exceeded (limit {limit})")]
+    CatalogLimit { resource: &'static str, limit: usize },
     #[error("query cancelled")]
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
@@ -224,4 +226,54 @@ impl Default for MetadataLimits {
 pub struct TransactionLimits { pub max_active: usize }
 impl Default for TransactionLimits {
     fn default() -> Self { Self { max_active: 128 } }
+}
+
+/// Bounded decoded persistent-catalog state and journal-event sizes.
+/// These are per-catalog counts; not a total process-wide memory reservation.
+#[derive(Clone, Copy, Debug)]
+pub struct CatalogLimits {
+    pub max_databases: usize,
+    pub max_schemas: usize,
+    pub max_tables: usize,
+    pub max_revisions: usize,
+    pub max_event_bytes: usize,
+}
+impl Default for CatalogLimits {
+    fn default() -> Self {
+        Self {
+            max_databases: 1024,
+            max_schemas: 4096,
+            max_tables: 65_536,
+            max_revisions: 1024,
+            max_event_bytes: 64 * 1024,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CatalogUsage {
+    pub databases: usize,
+    pub schemas: usize,
+    pub tables: usize,
+    pub revisions: usize,
+}
+impl CatalogLimits {
+    pub fn check(&self, usage: CatalogUsage) -> Result<(), ResourceError> {
+        for (resource, actual, limit) in [
+            ("databases", usage.databases, self.max_databases),
+            ("schemas", usage.schemas, self.max_schemas),
+            ("tables", usage.tables, self.max_tables),
+            ("revisions", usage.revisions, self.max_revisions),
+        ] {
+            if actual > limit {
+                return Err(ResourceError::CatalogLimit { resource, limit });
+            }
+        }
+        Ok(())
+    }
+    pub fn check_event_bytes(&self, actual: usize) -> Result<(), ResourceError> {
+        if actual > self.max_event_bytes {
+            return Err(ResourceError::CatalogLimit { resource: "event bytes", limit: self.max_event_bytes });
+        }
+        Ok(())
+    }
 }
