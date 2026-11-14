@@ -60,7 +60,19 @@ impl TypedMvccStore {
         domain_root: impl AsRef<Path>,
         catalog_tables: &BTreeMap<TableId, Table>,
     ) -> Result<Self, DomainError> {
-        let store = MvccStore::open(domain_root).map_err(map_mvcc)?;
+        Self::open_with_limits(
+            domain_root, catalog_tables, crate::runtime_limits::MvccStoreLimits::default(),
+        )
+    }
+
+    /// Open the typed shared-domain MVCC store with explicit in-memory
+    /// version admission for the underlying MvccStore. See ADR 0058.
+    pub fn open_with_limits(
+        domain_root: impl AsRef<Path>,
+        catalog_tables: &BTreeMap<TableId, Table>,
+        mvcc_limits: crate::runtime_limits::MvccStoreLimits,
+    ) -> Result<Self, DomainError> {
+        let store = MvccStore::open_with_limits(domain_root, mvcc_limits).map_err(map_mvcc)?;
         let mut snapshot = store.begin();
         let records = snapshot.scan();
         snapshot.rollback();

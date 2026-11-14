@@ -50,3 +50,18 @@ No persistent format, wire protocol, SQL grammar or dependency change.
 `MvccStore` is still opt-in — the shipped SQL engines do not route
 through it by default, so the admission adds no cost to the shipped
 default path.
+
+## Amendment — propagation through TypedMvccStore and MvccSqlEngine
+
+`TypedMvccStore::open_with_limits(root, catalog_tables, mvcc_limits)`
+and `MvccSqlEngine::open_with_limits(root, mvcc_limits, catalog_limits)`
+accept explicit `MvccStoreLimits` (and `CatalogLimits` for the SQL
+engine) and thread them to the underlying `MvccStore` and
+`PersistentCatalog`. The default `open` signatures retain the
+previous behaviour and use `MvccStoreLimits::default()` /
+`CatalogLimits::default()`.
+
+Integration tests in `tests/transitive_admission.rs` prove that a
+tight upstream policy refuses via the higher-level entry points
+without modifying the on-disk WAL.
+

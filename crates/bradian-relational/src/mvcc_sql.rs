@@ -29,6 +29,21 @@ pub struct MvccSqlEngine {
 
 impl MvccSqlEngine {
     pub fn open(root: impl AsRef<Path>) -> SqlResult<Self> {
+        Self::open_with_limits(
+            root,
+            crate::runtime_limits::MvccStoreLimits::default(),
+            crate::runtime_limits::CatalogLimits::default(),
+        )
+    }
+
+    /// Open the opt-in G21 MVCC SQL engine with explicit admission for
+    /// the underlying `MvccStore` (ADR 0058) and `PersistentCatalog`
+    /// (ADR 0054). Policies are not persisted.
+    pub fn open_with_limits(
+        root: impl AsRef<Path>,
+        mvcc_limits: crate::runtime_limits::MvccStoreLimits,
+        catalog_limits: crate::runtime_limits::CatalogLimits,
+    ) -> SqlResult<Self> {
         if root.as_ref().join("history-domain").exists() {
             return Err(SqlError::Unsupported(
                 "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
@@ -62,11 +77,13 @@ impl MvccSqlEngine {
                     "G18 lifecycle reconciliation failed: {e}"
                 )))?;
         }
-        let catalog = PersistentCatalog::open(root.join("catalog"))?;
+        let catalog = PersistentCatalog::open_with_limits(root.join("catalog"), catalog_limits)?;
         let definitions = catalog.snapshot().tables()
             .map(|table| (table.id, table.clone()))
             .collect::<BTreeMap<_,_>>();
-        let domain = TypedMvccStore::open(root.join("shared-domain"), &definitions)?;
+        let domain = TypedMvccStore::open_with_limits(
+            root.join("shared-domain"), &definitions, mvcc_limits,
+        )?;
         Ok(Self { catalog, domain, _root: root.to_owned() })
     }
 
