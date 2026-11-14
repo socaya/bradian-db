@@ -173,6 +173,17 @@ impl RowStore {
     }
 
     pub fn open_with_policies(root: impl AsRef<Path>, policies: StorageLimits) -> StoreResult<Self> {
+        Self::open_inner(root, policies, None)
+    }
+
+    /// Shared body for every `open*` entry point. `bace_wiring` is
+    /// consulted during recovery (via `read_latest_snapshot`) so a
+    /// v2 snapshot can be decoded as it is read, not after the fact.
+    fn open_inner(
+        root: impl AsRef<Path>,
+        policies: StorageLimits,
+        bace_wiring: Option<BaceWiring>,
+    ) -> StoreResult<Self> {
         let StorageLimits { rows:limits, index:index_limits, build:build_limits, directory:directory_limits } = policies;
         let root = root.as_ref();
         fs::create_dir_all(root)?;
@@ -187,7 +198,9 @@ impl RowStore {
             Err(TryLockError::WouldBlock) => return Err(StoreError::Busy),
             Err(TryLockError::Error(error)) => return Err(StoreError::Io(error)),
         }
-        let (checkpoint_lsn, mut rows, mut usage) = read_latest_snapshot(root, limits, directory_limits)?;
+        let (checkpoint_lsn, mut rows, mut usage) = read_latest_snapshot(
+            root, limits, directory_limits, bace_wiring.as_ref(),
+        )?;
         let mut delta = BTreeMap::new();
         let wal_path = root.join("rows.wal");
         let mut wal = OpenOptions::new()
@@ -222,7 +235,7 @@ impl RowStore {
             index_limits,
             build_limits,
             directory_limits,
-            bace_wiring: None,
+            bace_wiring,
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
@@ -255,9 +268,7 @@ impl RowStore {
         policies: StorageLimits,
         wiring: BaceWiring,
     ) -> StoreResult<Self> {
-        let mut store = Self::open_with_policies(root, policies)?;
-        store.bace_wiring = Some(wiring);
-        Ok(store)
+        Self::open_inner(root, policies, Some(wiring))
     }
 
     pub fn resource_usage(&self) -> RowStoreUsage { self.inner.lock().usage }
@@ -514,7 +525,7 @@ impl RowStore {
             }
             Some(read_indexed_record(
                 inner.snapshot_pages.as_mut().expect("opened snapshot"),
-                key, pointer,
+                key, pointer, self.bace_wiring.as_ref(),
             )?)
         } else {
             None
@@ -550,7 +561,7 @@ impl RowStore {
         for (key, pointer) in entries {
             let value = read_indexed_record(
                 inner.snapshot_pages.as_mut().expect("nonempty indexed range"),
-                &key, pointer,
+                &key, pointer, self.bace_wiring.as_ref(),
             )?;
             result.insert(key, value);
         }
@@ -969,8 +980,59 @@ fn list_snapshots(root: &Path, directory_limits: DirectoryLimits) -> StoreResult
     Ok(snapshots)
 }
 
-fn read_latest_snapshot(root: &Path, limits: RowStoreLimits, directory_limits: DirectoryLimits)
-    -> StoreResult<(u64, RowMap, RowStoreUsage)>
+/// Decode a snapshot data page's logical payload. For a v1 page
+/// this is the page's own `payload` bytes. For a BRPG v2 page
+/// carrying a BACE envelope (`payload_is_bace_envelope`), decode
+/// the envelope + codec and return the plain bytes.
+///
+/// `page_id` is passed for the `BaceOpenWithoutBaceWiring` error so
+/// the operator can pinpoint which page tripped the fail-closed.
+fn decode_data_page_payload(
+    page: &Page,
+    bace: Option<&BaceWiring>,
+    page_id: u64,
+) -> StoreResult<Vec<u8>> {
+    if !page.flags.payload_is_bace_envelope {
+        return Ok(page.payload.clone());
+    }
+    let Some(w) = bace else {
+        return Err(StoreError::BaceOpenWithoutBaceWiring { page_id });
+    };
+    // ADR 0062 §3.3 pre-allocation cap: use the policy service's
+    // compression.max_decoded_page_bytes. `max_encoded_length` is
+    // the page size because the envelope is embedded in a 4 KiB
+    // page (ADR 0065 §3.4).
+    let scope = ScopeChain::baseline_only();
+    let cap = w.policy_service.resolve(PolicyKey::CompressionMaxDecodedPageBytes, &scope);
+    let max_decoded_length = cap.value.as_u32().ok_or_else(||
+        StoreError::Corruption("policy service returned non-u32 for max_decoded_page_bytes".into())
+    )?;
+    let caps = crate::bace::envelope::EnvelopeCaps {
+        max_decoded_length,
+        max_encoded_length: PAGE_SIZE as u32,
+    };
+    let env = crate::bace::envelope::read_envelope(&page.payload, caps)?;
+    let codec = w.registry.codec(env.header.codec_id)
+        .ok_or(StoreError::BaceCodecUnavailable { codec_id: env.header.codec_id })?;
+    let build_supports = codec.capability().format_version;
+    if build_supports != env.header.codec_format_version {
+        return Err(StoreError::BaceCodecFormatVersionMismatch {
+            codec_id: env.header.codec_id,
+            declared: env.header.codec_format_version,
+            build_supports,
+        });
+    }
+    let mut decoded = Vec::with_capacity(env.header.decoded_length as usize);
+    codec.decode(env.payload, env.header.decoded_length, &mut decoded)?;
+    Ok(decoded)
+}
+
+fn read_latest_snapshot(
+    root: &Path,
+    limits: RowStoreLimits,
+    directory_limits: DirectoryLimits,
+    bace: Option<&BaceWiring>,
+) -> StoreResult<(u64, RowMap, RowStoreUsage)>
 {
     let manifest = checkpoint_manifest::load(root)?;
     let snapshot = match manifest {
@@ -1013,20 +1075,23 @@ fn read_latest_snapshot(root: &Path, limits: RowStoreLimits, directory_limits: D
         if page.kind != PageKind::Data || page.page_id != page_id || page.lsn != lsn {
             return Err(StoreError::Corruption("snapshot data page identity mismatch".into()));
         }
+        // v2 pages carry a BACE envelope; decode to the plain bytes
+        // the v1 path would have seen before applying row offsets.
+        let payload = decode_data_page_payload(&page, bace, page_id)?;
         let mut pos = 0;
-        while pos < page.payload.len() {
-            if page.payload.len() - pos < ROW_HEADER {
+        while pos < payload.len() {
+            if payload.len() - pos < ROW_HEADER {
                 return Err(StoreError::Corruption("truncated snapshot record".into()));
             }
-            let key_len = u16::from_le_bytes(page.payload[pos..pos + 2].try_into().unwrap()) as usize;
-            let value_len = u32::from_le_bytes(page.payload[pos + 2..pos + 6].try_into().unwrap()) as usize;
+            let key_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
+            let value_len = u32::from_le_bytes(payload[pos + 2..pos + 6].try_into().unwrap()) as usize;
             let size = ROW_HEADER.checked_add(key_len).and_then(|n| n.checked_add(value_len))
                 .ok_or_else(|| StoreError::Corruption("snapshot length overflow".into()))?;
-            if size > page.payload.len() - pos || key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE {
+            if size > payload.len() - pos || key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE {
                 return Err(StoreError::Corruption("invalid snapshot row length".into()));
             }
-            let key = &page.payload[pos + ROW_HEADER..pos + ROW_HEADER + key_len];
-            let value = &page.payload[pos + ROW_HEADER + key_len..pos + size];
+            let key = &payload[pos + ROW_HEADER..pos + ROW_HEADER + key_len];
+            let value = &payload[pos + ROW_HEADER + key_len..pos + size];
             if previous.as_ref().is_some_and(|prev| prev.as_slice() >= key) {
                 return Err(StoreError::Corruption("snapshot rows are not strictly ordered".into()));
             }
@@ -1215,26 +1280,32 @@ fn read_indexed_record(
     cache: &mut PageCache,
     expected_key: &[u8],
     pointer: RowPointer,
+    bace: Option<&BaceWiring>,
 ) -> StoreResult<Vec<u8>> {
     let page = cache.read(pointer.page_id)?;
     if page.kind != PageKind::Data {
         return Err(StoreError::Corruption("index points to non-data checkpoint page".into()));
     }
+    // ADR 0065 §3.4: under BACE, the pointer offset references the
+    // decoded (plain) payload. Decode the envelope first. This
+    // happens on every cache hit under BACE; compressed-copy
+    // caching is a future optimization per BACE-FR-ROW-004.
+    let payload = decode_data_page_payload(&page, bace, pointer.page_id)?;
     let offset = pointer.offset as usize;
-    if offset > page.payload.len() || page.payload.len() - offset < ROW_HEADER {
+    if offset > payload.len() || payload.len() - offset < ROW_HEADER {
         return Err(StoreError::Corruption("index points outside a row header".into()));
     }
-    let key_len = u16::from_le_bytes(page.payload[offset..offset+2].try_into().unwrap()) as usize;
-    let value_len = u32::from_le_bytes(page.payload[offset+2..offset+6].try_into().unwrap()) as usize;
+    let key_len = u16::from_le_bytes(payload[offset..offset+2].try_into().unwrap()) as usize;
+    let value_len = u32::from_le_bytes(payload[offset+2..offset+6].try_into().unwrap()) as usize;
     let end = ROW_HEADER.checked_add(key_len).and_then(|n| n.checked_add(value_len))
         .and_then(|n| n.checked_add(offset))
         .ok_or_else(|| StoreError::Corruption("indexed row length overflow".into()))?;
-    if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE || end > page.payload.len()
-        || &page.payload[offset+ROW_HEADER..offset+ROW_HEADER+key_len] != expected_key
+    if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE || end > payload.len()
+        || &payload[offset+ROW_HEADER..offset+ROW_HEADER+key_len] != expected_key
     {
         return Err(StoreError::Corruption("index row pointer or key mismatched".into()));
     }
-    Ok(page.payload[offset+ROW_HEADER+key_len..end].to_vec())
+    Ok(payload[offset+ROW_HEADER+key_len..end].to_vec())
 }
 
 fn prune_snapshots(root: &Path, keep: u64, directory_limits: DirectoryLimits) -> StoreResult<()> {
