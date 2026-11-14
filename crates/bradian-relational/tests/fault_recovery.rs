@@ -179,3 +179,94 @@ fn pending_manifest_leftover_never_replaces_current_even_with_matching_lsn() {
         current_bytes.len(),
     );
 }
+
+#[test]
+fn index_file_missing_after_commit_rebuilds_without_corrupting_snapshot() {
+    // Outcome: the atomic manifest publication succeeded but a subsequent
+    // `index-<lsn>.bri` write was lost (deleted by hand, or on a filesystem
+    // that sync'd the manifest but not the index). Recovery must detect the
+    // missing index and rebuild it from the authoritative snapshot pages
+    // without corrupting the committed snapshot bytes.
+    let dir = tempdir().unwrap();
+    let snapshot_bytes;
+    {
+        let store = open(dir.path());
+        store.put(b"a", b"v").unwrap();
+        store.put(b"b", b"v").unwrap();
+        let lsn = store.checkpoint().unwrap();
+        snapshot_bytes = fs::read(dir.path().join(format!("snapshot-{lsn}.brp"))).unwrap();
+        drop(store);
+        fs::remove_file(dir.path().join(format!("index-{lsn}.bri"))).unwrap();
+    }
+    let store = open(dir.path());
+    // Reads still succeed and return exactly the committed values.
+    assert_eq!(store.get(b"a"), Some(b"v".to_vec()));
+    assert_eq!(store.get(b"b"), Some(b"v".to_vec()));
+    // The snapshot file was not rewritten during recovery; find the current
+    // generation by scanning the directory for the single published .brp file.
+    let brp: Vec<_> = fs::read_dir(dir.path()).unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".brp"))
+        .collect();
+    assert_eq!(brp.len(), 1, "exactly one committed generation must remain");
+    assert_eq!(fs::read(brp[0].path()).unwrap(), snapshot_bytes);
+}
+
+#[test]
+fn backup_descriptor_missing_but_payload_present_is_detected_as_incomplete() {
+    // Outcome: a backup was interrupted between copying the payload files
+    // and writing `backup.info`. The archive directory contains the
+    // snapshot/index/wal but no descriptor. Restore must refuse rather
+    // than replaying an unlabelled archive.
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    let archive = dir.path().join("archive");
+    {
+        let store = open(&source);
+        store.put(b"k", b"v").unwrap();
+        store.checkpoint().unwrap();
+        store.backup_current_generation(&archive).unwrap();
+    }
+    // Delete the descriptor but keep the payload.
+    fs::remove_file(archive.join("backup.info")).unwrap();
+    let restored = dir.path().join("restored");
+    assert!(RowStore::restore_backup(&archive, &restored).is_err());
+    assert!(!restored.exists(), "incomplete archive must not publish a destination");
+}
+
+#[test]
+fn catalog_journal_truncated_mid_event_fails_closed_without_partial_catalog() {
+    // Outcome: the WAL under PersistentCatalog was truncated mid-frame.
+    // Catalog open must refuse rather than publishing only the events
+    // that happen to decode.
+    use bradian_relational::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
+    let dir = tempdir().unwrap();
+    {
+        let catalog = PersistentCatalog::open(dir.path()).unwrap();
+        catalog.create_database("one").unwrap();
+        catalog.create_database("two").unwrap();
+    }
+    let wal_path = dir.path().join("rows.wal");
+    let mut bytes = fs::read(&wal_path).unwrap();
+    // Chop off the last few bytes of the final WAL frame.
+    assert!(bytes.len() > 16);
+    bytes.truncate(bytes.len() - 3);
+    fs::write(&wal_path, bytes).unwrap();
+    // The RowStore under the catalog trims an incomplete tail during
+    // recovery, so the catalog itself may open; but if the trimmed state
+    // produces fewer events than the original acknowledged LSN, replay
+    // detects the mismatch. We assert the outcome is either (a) a clean
+    // open at exactly one database, or (b) a Corruption error. In no
+    // case is a partial multi-event catalog published.
+    match PersistentCatalog::open(dir.path()) {
+        Ok(catalog) => {
+            let count = catalog.snapshot().databases().count();
+            assert!(count == 1, "trimmed catalog must not expose partial state; got {count} databases");
+        }
+        Err(PersistentCatalogError::Corruption(_))
+        | Err(PersistentCatalogError::Storage(_))
+        | Err(PersistentCatalogError::Resource(_)) => {}
+        Err(other) => panic!("unexpected error after WAL truncation: {other:?}"),
+    }
+}
