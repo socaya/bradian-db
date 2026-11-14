@@ -27,8 +27,12 @@ Every object reference **must** be fully qualified: `database.schema.table`.
 | `VARCHAR(n)` | `Value::String(String)` (max length enforced at insert) | `type_int32_and_int64_and_varchar_and_decimal_round_trip` |
 | `DECIMAL(p,s)` / `NUMERIC(p,s)` | `Value::Decimal(i128)` scaled by column `scale` | `type_int32_and_int64_and_varchar_and_decimal_round_trip` |
 
-`TimestampTz` and `Uuid` are enum variants but are not accepted in literal
-syntax on any engine.
+`TimestampTz` and `Uuid` are `Value` variants used internally by the
+typed-table engine but are **not accepted by the SQL parser** in
+`CREATE TABLE`, `INSERT` or any other statement on any of the three
+engines. See `unsupported_data_types_in_create_table_are_rejected`.
+The comparators for these types exist in `select_window.rs` for
+future use; today they are unreachable through SQL.
 
 ## 2. Literal syntax
 
@@ -68,6 +72,7 @@ syntax on any engine.
 | Multiple statements in one `execute(...)` | `rejects_multi_statement_in_a_single_execute` |
 | Partial primary-key predicate | `rejects_partial_primary_key_predicate` |
 | `JOIN`, aggregates, `OR`, range `>`/`<`, column aliases, `DISTINCT`, `UNION` | `rejects_join_aggregate_and_or_and_range_and_alias` |
+| `TIMESTAMPTZ`, `UUID` in `CREATE TABLE` | `unsupported_data_types_in_create_table_are_rejected` |
 
 ## 6. Transactions — `SqlEngine`
 
@@ -165,10 +170,14 @@ Budgets: ≤128 nodes, ≤32 nesting depth.
   Rust APIs and the native CLI only.
 - Cross-platform installer, lock-lifecycle and recovery runs on
   Windows / macOS.
-- Range ORDER BY cases and `TimestampTz` / `Uuid` sort behaviour are
-  exercised by other suites in the crate but are not yet in the
-  single-file corpus. `DESCRIBE TABLE AS OF`, `RELEASE SAVEPOINT`,
-  `INSERT ... DEFAULT`, the 32-depth nesting boundary, and the
-  128-node spend boundary are now in the corpus (§8 and §9 above).
+- Range `ORDER BY` cases beyond the basic `DESC LIMIT OFFSET` shape are
+  not yet in the single-file corpus.
+- `TimestampTz` and `Uuid` are intentionally **not reachable through
+  SQL** (§1 and `unsupported_data_types_in_create_table_are_rejected`).
+  Their presence in the typed-table engine does not constitute SQL
+  support; the §11 `ORDER BY` row only covers the SQL-reachable types.
+- `DESCRIBE TABLE AS OF`, `RELEASE SAVEPOINT`, `INSERT ... DEFAULT`,
+  the 32-depth nesting boundary and the 128-node spend boundary are
+  now in the corpus (§8 and §9 above).
 
 These remain open items under G1-REFERENCE in the fixed roadmap.

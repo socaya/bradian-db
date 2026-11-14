@@ -785,3 +785,25 @@ fn update_expression_at_129_nodes_is_refused() {
     }).unwrap();
     assert!(outcome.is_err(), "129-node expression must be refused");
 }
+
+#[test]
+fn unsupported_data_types_in_create_table_are_rejected() {
+    // TimestampTz and Uuid exist in the typed-table engine but are not in
+    // the shipped SQL profile (sql.rs::data_type). CREATE TABLE must refuse.
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    for sql in [
+        "CREATE DATABASE test",
+        "CREATE SCHEMA test.public",
+    ] { db.execute(sql).unwrap(); }
+    for ddl in [
+        "CREATE TABLE test.public.events (id BIGINT NOT NULL, at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id))",
+        "CREATE TABLE test.public.rows (id UUID NOT NULL, PRIMARY KEY(id))",
+    ] {
+        let err = db.execute(ddl).unwrap_err();
+        assert!(
+            matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+            "should be rejected: {ddl}, got {err:?}",
+        );
+    }
+}
