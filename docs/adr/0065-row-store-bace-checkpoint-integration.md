@@ -1,16 +1,17 @@
-# ADR 0065 — `row_store` BACE checkpoint integration (implementation; **PROPOSED**)
+# ADR 0065 — `row_store` BACE checkpoint integration
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED — 14 November 2026.**
 
-Blocked on **ADR 0064** (accepted 14 November 2026) which provides
-the `Page::new_v2` / `PageFlags` Rust API, plus the four accepted
-BACE prerequisite ADRs (0060–0063). This ADR is the first
-carrier-integration ADR that **produces real BRPG v2 bytes on disk
-in production**: an opt-in `RowStore` entry point that BACE-encodes
-checkpoint pages and decodes them transparently on recovery.
+Owner review completed with the §6 proposed defaults recorded as
+resolved decisions (see §6 below). This is the first carrier-
+integration ADR that **produces real BRPG v2 bytes on disk in
+production**: an opt-in `RowStore::open_with_bace` entry point
+that BACE-encodes checkpoint pages and decodes them transparently
+on recovery. Existing `open` / `open_with_policies` entry points
+stay v1-only.
 
-Owner review required before any code lands, per CLAUDE.md §4.9 and
-ADR 0064 §13 item 4 (which held v2 writes behind this ADR).
+Implementation ships in four sub-slices R.1–R.4 landing in
+sequence, each with its own commit and verification report.
 
 ## 1. Context
 
@@ -354,35 +355,27 @@ expected. Explicit failure + retry is the correct contract.
 
 ## 6. Open design questions (owner review)
 
-1. **New entry point name.** `open_with_bace` is the draft
-   default. Alternatives: `open_with_compression(...)`,
-   `open_compressed(...)`, replace `open_with_policies` with a
-   variant that takes an `Option<BaceWiring>`. Confirm.
-2. **`BaceOpenWithoutBaceWiring` behaviour.** Draft fails closed
-   on the first v2 page observed. Alternative: fail closed at
-   `open()` before any page is read, by inspecting the generation's
-   first page or a manifest field that notes whether v2 pages
-   are present. The first-page approach is simpler but delays
-   the error; a manifest field requires an ADR 0014 extension.
-3. **Checkpoint failure policy.** Draft fails the whole
-   checkpoint on any BACE error. Alternative: emit as v1 and
-   log a warning. Confirm the strict path; it matches the
-   project's existing fail-closed culture.
-4. **`StoreError` variant naming.** Draft uses `BaceCodec*` /
-   `BaceEnvelope` / `BaceDecode` for clear provenance. Alternative:
-   collapse into one `BaceError(Box<dyn Error>)`. The draft
-   preserves match-able specificity.
-5. **Policy service lifecycle.** Draft takes
-   `Arc<dyn PolicyService + Send + Sync>` and consults it on
-   every checkpoint/recovery. Alternative: take a `&PolicyService`
-   borrow at `open` and clone an in-memory snapshot. Live
-   consulting matches ADR 0060 §3.5 atomicity better; confirm.
-6. **GC of a v2 generation.** No change from existing GC: snapshots
-   the manifest no longer references are eligible for deletion.
-   Confirm that compressed snapshots follow the same rule.
-7. **What page kinds carry envelopes?** Draft: `PageKind::Data`
-   only. `PageKind::Metadata` (checkpoint-metadata page zero) and
-   `PageKind::Index` stay v1. Future ADR 0069 handles Index.
+Resolved on 14 November 2026 by accepting the §6 proposed defaults.
+
+1. **Entry point name.** `RowStore::open_with_bace`. Existing
+   `open` and `open_with_policies` stay.
+2. **`BaceOpenWithoutBaceWiring` timing.** Fails closed on the
+   first v2 page observed during recovery. Upfront manifest
+   inspection deferred (would need ADR 0014 extension).
+3. **Checkpoint failure policy.** Strict. Any BACE error aborts
+   the whole checkpoint; `.tmp` is cleaned; manifest is not
+   updated; WAL is not truncated.
+4. **`StoreError` variant naming.** Five per-concern variants:
+   `BaceCodecUnavailable`, `BaceCodecFormatVersionMismatch`,
+   `BaceEnvelope(EnvelopeError)`, `BaceDecode(DecodeError)`,
+   `BaceOpenWithoutBaceWiring { page_id }`.
+5. **Policy service lifecycle.** Live consultation via
+   `Arc<dyn PolicyService + Send + Sync>` stored on the `RowStore`.
+   Snapshot-at-open rejected.
+6. **GC under BACE.** No change from existing GC.
+7. **Page kinds carrying envelopes.** `PageKind::Data` only.
+   `PageKind::Metadata` (page 0) and `PageKind::Index` stay v1 in
+   this ADR.
 
 ## 7. Impact on invariants
 
@@ -443,18 +436,19 @@ the already-accepted `bace::*` surface:
   new `StoreError` variants. All existing methods keep their
   signatures.
 
-## 10. Acceptance evidence required before marking Accepted
+## 10. Acceptance evidence (satisfied)
 
 1. ADR 0064 accepted — **satisfied** (14 November 2026).
 2. ADRs 0060, 0061, 0062, 0063 accepted — **satisfied**.
-3. Owner sign-off on §6 open design questions.
-4. Commitment to the 12-item test matrix in §4.
-5. Explicit statement that opening a directory via the old
-   `open` after a BACE-written checkpoint fails closed with
-   `BaceOpenWithoutBaceWiring`. This is a backward-compatibility
-   trade-off: a store that has ever used BACE cannot be reopened
-   by a BACE-unaware caller. Confirm this is acceptable.
+3. Owner sign-off on §6 decisions — **satisfied** (14 November 2026).
+4. Commitment to the 12-item test matrix in §4 — **satisfied** by
+   sub-slices R.1–R.4.
+5. Backward-compatibility warning acknowledged: a store that has
+   ever used BACE cannot be reopened by the BACE-unaware `open` /
+   `open_with_policies` entry points. This is a one-way door, and
+   deliberate.
 
-Only then can this ADR move from **PROPOSED** to **ACCEPTED**, and
-only then can `row_store.rs` grow the BACE branches that produce
-the first production BRPG v2 bytes on disk.
+`row_store.rs` may now grow the BACE branches that produce the
+first production BRPG v2 bytes on disk. Implementation lands in
+four sub-slices (R.1 scaffolding + errors, R.2 checkpoint writer,
+R.3 recovery reader, R.4 mixed-generation).

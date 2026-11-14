@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crc32fast::Hasher;
@@ -35,6 +36,27 @@ use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 use crate::index_recovery::{self, IndexRecovery};
 use crate::checkpoint_manifest::{self, CheckpointManifest, ManifestError};
 use crate::backup::{self, BackupReceipt};
+use crate::bace::codec::{CodecId, DecodeError};
+use crate::bace::envelope::EnvelopeError;
+use crate::bace::policy::PolicyService;
+use crate::bace::registry::CodecRegistry;
+
+/// BACE wiring handed to `RowStore::open_with_bace` per accepted
+/// ADR 0065 §3.1. The policy service is consulted live on every
+/// checkpoint and recovery; the registry owns the Codec instances.
+/// Both are `Arc`-shared because background threads (admin paths)
+/// may read them concurrently.
+#[derive(Clone)]
+pub struct BaceWiring {
+    pub policy_service: Arc<dyn PolicyService + Send + Sync>,
+    pub registry: Arc<dyn CodecRegistry + Send + Sync>,
+}
+
+impl std::fmt::Debug for BaceWiring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BaceWiring").finish_non_exhaustive()
+    }
+}
 
 /// Consistent owned binary rows returned by a storage snapshot.
 pub type RowSnapshot = Vec<(Vec<u8>, Vec<u8>)>;
@@ -75,6 +97,16 @@ pub enum StoreError {
     Busy,
     #[error("transaction conflict: expected committed LSN {expected}, observed {actual}")]
     Conflict { expected: u64, actual: u64 },
+    #[error("BACE codec {codec_id:?} not registered in this build")]
+    BaceCodecUnavailable { codec_id: CodecId },
+    #[error("BACE codec {codec_id:?} declared format_version {declared}, build supports {build_supports}")]
+    BaceCodecFormatVersionMismatch { codec_id: CodecId, declared: u16, build_supports: u16 },
+    #[error(transparent)]
+    BaceEnvelope(#[from] EnvelopeError),
+    #[error(transparent)]
+    BaceDecode(#[from] DecodeError),
+    #[error("row-store directory contains BRPG v2 pages; open the store via open_with_bace (offending page_id={page_id})")]
+    BaceOpenWithoutBaceWiring { page_id: u64 },
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -110,6 +142,11 @@ pub struct RowStore {
     index_limits: IndexLimits,
     build_limits: IndexBuildLimits,
     directory_limits: DirectoryLimits,
+    /// Opt-in BACE policy + registry wiring (accepted ADR 0065).
+    /// `None` for stores opened via the legacy `open` /
+    /// `open_with_policies` entry points. `Some(..)` for stores
+    /// opened via `open_with_bace`.
+    bace_wiring: Option<BaceWiring>,
     inner: Mutex<Inner>,
     // Drop after the WAL handle so the exclusive ownership remains in force
     // throughout teardown. The kernel releases the lock automatically.
@@ -179,6 +216,7 @@ impl RowStore {
             index_limits,
             build_limits,
             directory_limits,
+            bace_wiring: None,
             _lock: lock,
             inner: Mutex::new(Inner {
                 rows,
@@ -192,6 +230,28 @@ impl RowStore {
                 usage,
             }),
         })
+    }
+
+    /// Open the store with BACE policy + codec-registry wiring per
+    /// accepted ADR 0065. Existing `open` / `open_with_policies`
+    /// entry points stay v1-only; this entry point may emit BRPG v2
+    /// pages on checkpoint when the resolved
+    /// `compression.profile != Raw`, and decodes BACE envelopes on
+    /// recovery when a page carries `payload_is_bace_envelope`.
+    ///
+    /// Backward-compatibility warning: a store that has ever been
+    /// checkpointed through this entry point with a non-Raw profile
+    /// cannot be reopened through `open` / `open_with_policies` —
+    /// those paths fail closed with `BaceOpenWithoutBaceWiring` on
+    /// the first v2 page observed.
+    pub fn open_with_bace(
+        root: impl AsRef<Path>,
+        policies: StorageLimits,
+        wiring: BaceWiring,
+    ) -> StoreResult<Self> {
+        let mut store = Self::open_with_policies(root, policies)?;
+        store.bace_wiring = Some(wiring);
+        Ok(store)
     }
 
     pub fn resource_usage(&self) -> RowStoreUsage { self.inner.lock().usage }
