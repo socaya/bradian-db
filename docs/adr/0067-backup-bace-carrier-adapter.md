@@ -1,16 +1,52 @@
-# ADR 0067 — Backup carrier BACE adapter (implementation; **PROPOSED**)
+# ADR 0067 — Backup carrier BACE adapter (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 14 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE prerequisite stack (0060–0063) and
-the accepted row-store integration (0065). This ADR is the first
-**carrier** that needs an explicit adapter after ADR 0065 landed:
-the row-store checkpoint writer now emits BRPG v2 pages carrying
-BACE envelopes, and `backup.rs` currently cannot verify such a
-backup because its verification path reopens the copied directory
-through the legacy `RowStore::open_with_policies` entry point.
+### Scope expansion discovered during implementation
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+The draft §3.5 said "`verify_checkpoint_index` stays unchanged."
+Implementation surfaced that that function routes through
+`index_recovery::verify_with_limits` → `scan_snapshot`, which
+reads `page.payload` directly without BACE-decoding — so on a
+BACE-opt-in backup it fired `Corruption("snapshot row record
+bounds invalid")`. That was an un-wired gap, not a design
+choice. Resolution:
+
+- `index_recovery::scan_snapshot` now accepts `Option<&BaceWiring>`
+  and routes each data page through
+  `row_store::decode_data_page_payload` (made `pub(crate)`).
+- New public entry points: `verify_with_limits_bace` and
+  `rebuild_missing_with_limits_bace`. The non-`_bace` variants
+  stay for compatibility and forward to `None`.
+- `RowStore::verify_checkpoint_index_with_limits` and
+  `rebuild_missing_checkpoint_index_with_limits` thread
+  `self.bace_wiring.as_ref()` through.
+- The recovery call site in `open_inner` also uses the `_bace`
+  variant so a BACE-opt-in store with a missing index rebuilds
+  correctly on reopen.
+
+Implementation summary:
+
+- `crates/bradian-relational/src/backup.rs` —
+  `BackupFlags { payload_has_bace_pages }` additive field at the
+  previously-reserved bytes 32..36 of the on-disk descriptor;
+  new `restore_backup_with_bace`; `create_backup` and
+  `verify_directory` thread BACE wiring through.
+- `crates/bradian-relational/src/row_store.rs` — new
+  `restore_backup_with_bace` facade; `backup_current_generation`
+  derives the flag and passes `self.bace_wiring` through; new
+  `StoreError::BackupRestoreRequiresBaceWiring` variant;
+  `decode_data_page_payload` promoted to `pub(crate)`.
+- `crates/bradian-relational/src/index_recovery.rs` — BACE-aware
+  entry points (scope expansion above).
+- `crates/bradian-relational/tests/backup_restore.rs` — 10 new
+  tests covering the §3.7 checklist (item 10 revised to a
+  reachable path through doctored flag bytes; the original item
+  10 scenario is no longer public-API-reachable).
+
+950 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
 
 ## 1. Context
 

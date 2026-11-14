@@ -113,6 +113,8 @@ pub enum StoreError {
     BaceDecode(#[from] DecodeError),
     #[error("row-store directory contains BRPG v2 pages; open the store via open_with_bace (offending page_id={page_id})")]
     BaceOpenWithoutBaceWiring { page_id: u64 },
+    #[error("backup carries BACE v2 pages; restore_backup_with_bace is required")]
+    BackupRestoreRequiresBaceWiring,
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -216,7 +218,10 @@ impl RowStore {
         // publication. Rebuild only an absent index from verified pages.
         if snapshot_path(root, checkpoint_lsn).exists() {
             if !index_recovery::index_path(root, checkpoint_lsn).exists() {
-                index_recovery::rebuild_missing_with_limits(root, checkpoint_lsn, index_limits, build_limits)?;
+                index_recovery::rebuild_missing_with_limits_bace(
+                    root, checkpoint_lsn, index_limits, build_limits,
+                    bace_wiring.as_ref(),
+                )?;
             }
             if let Some(manifest) = checkpoint_manifest::load(root)? {
                 checkpoint_manifest::check_index(root, manifest)?;
@@ -350,6 +355,12 @@ impl RowStore {
     /// appended after it, without forcing another checkpoint. The mutation
     /// mutex freezes both physical sources at a single acknowledged LSN.
     /// This is suitable for repeated backups of a busy local RowStore.
+    ///
+    /// ADR 0067 — BACE-opt-in stores with a non-Raw profile emit BRPG v2
+    /// pages. This method passes `self.bace_wiring` to the backup creator
+    /// so staging-side verification can decode those pages. The receipt's
+    /// `flags.payload_has_bace_pages` is derived from whether the backup
+    /// will emit v2 pages (wiring present AND resolved codec is non-None).
     pub fn backup_current_generation(
         &self,
         destination: impl AsRef<Path>,
@@ -359,12 +370,19 @@ impl RowStore {
             return Err(StoreError::Poisoned);
         }
         inner.wal.sync_all()?;
+        let has_bace_pages = self.bace_wiring.as_ref()
+            .map(|w| resolve_bace_codec(Some(w)).ok().flatten().is_some())
+            .unwrap_or(false);
         let receipt = BackupReceipt {
             checkpoint_lsn: inner.checkpoint_lsn,
             last_lsn: inner.lsn,
             rows: inner.rows.len() as u64,
+            flags: backup::BackupFlags { payload_has_bace_pages: has_bace_pages },
         };
-        backup::create_backup(&self.root, destination.as_ref(), receipt, &inner.rows, self.storage_limits())
+        backup::create_backup(
+            &self.root, destination.as_ref(), receipt, &inner.rows,
+            self.storage_limits(), self.bace_wiring.as_ref(),
+        )
     }
 
     /// Restore a verified physical database backup into an absent directory.
@@ -392,6 +410,20 @@ impl RowStore {
         backup: impl AsRef<Path>, destination: impl AsRef<Path>, policies: StorageLimits,
     ) -> StoreResult<BackupReceipt> {
         backup::restore_backup_with_policies(backup.as_ref(), destination.as_ref(), policies)
+    }
+
+    /// ADR 0067 — restore a backup that carries BRPG v2 pages (receipt
+    /// `flags.payload_has_bace_pages = true`). Also tolerated on legacy
+    /// (flag-clear) backups, per ADR 0065 §3.5.
+    pub fn restore_backup_with_bace(
+        backup: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+        policies: StorageLimits,
+        wiring: BaceWiring,
+    ) -> StoreResult<BackupReceipt> {
+        backup::restore_backup_with_bace(
+            backup.as_ref(), destination.as_ref(), policies, wiring,
+        )
     }
 
     /// Sync exactly one replace/insert operation before publishing it.
@@ -605,7 +637,9 @@ impl RowStore {
         if !snapshot_path(&self.root, inner.checkpoint_lsn).exists() {
             return Err(StoreError::Corruption("no published checkpoint to verify".into()));
         }
-        index_recovery::verify_with_limits(&self.root, inner.checkpoint_lsn, limits)
+        index_recovery::verify_with_limits_bace(
+            &self.root, inner.checkpoint_lsn, limits, self.bace_wiring.as_ref(),
+        )
     }
 
     /// Reconstruct a missing derived index from the authoritative checkpoint.
@@ -621,7 +655,10 @@ impl RowStore {
         }
         inner.index = None;
         inner.snapshot_pages = None;
-        index_recovery::rebuild_missing_with_limits(&self.root, inner.checkpoint_lsn, limits, self.build_limits)
+        index_recovery::rebuild_missing_with_limits_bace(
+            &self.root, inner.checkpoint_lsn, limits, self.build_limits,
+            self.bace_wiring.as_ref(),
+        )
     }
 
     /// Publish a complete checkpoint and then truncate the WAL.
@@ -649,7 +686,9 @@ impl RowStore {
                 None => {
                     // Upgrade a verified pre-manifest checkpoint *in place*:
                     // no payload bytes or WAL commits are changed.
-                    let report = index_recovery::verify_with_limits(&self.root, inner.lsn, self.index_limits)?;
+                    let report = index_recovery::verify_with_limits_bace(
+                        &self.root, inner.lsn, self.index_limits, self.bace_wiring.as_ref(),
+                    )?;
                     let snapshot_length = fs::metadata(snapshot_path(&self.root, inner.lsn))?.len();
                     let index_length = fs::metadata(index_recovery::index_path(&self.root, inner.lsn))?.len();
                     if snapshot_length % PAGE_SIZE as u64 != 0 || index_length % PAGE_SIZE as u64 != 0 {
@@ -987,7 +1026,7 @@ fn list_snapshots(root: &Path, directory_limits: DirectoryLimits) -> StoreResult
 ///
 /// `page_id` is passed for the `BaceOpenWithoutBaceWiring` error so
 /// the operator can pinpoint which page tripped the fail-closed.
-fn decode_data_page_payload(
+pub(crate) fn decode_data_page_payload(
     page: &Page,
     bace: Option<&BaceWiring>,
     page_id: u64,

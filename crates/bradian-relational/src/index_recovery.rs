@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::btree::{DiskBTree, LeafEntries, RowPointer};
 use crate::page::{Page, PageKind, PAGE_SIZE};
 use crate::runtime_limits::{IndexLimits, IndexBuildLimits, ResourceError};
-use crate::row_store::{StoreError, StoreResult};
+use crate::row_store::{decode_data_page_payload, BaceWiring, StoreError, StoreResult};
 
 type VerifiedSnapshot = (LeafEntries, u64);
 
@@ -49,9 +49,15 @@ fn admit_entry(entries: usize, bytes: usize, key_len: usize, limits: IndexLimits
 /// Read all physical row pointers, strictly validating the authoritative page
 /// stream first. Values are validated in their page and never cloned into a map;
 /// nothing from the existing derived index is trusted.
+///
+/// ADR 0067 §3.5 — `bace` is consulted when a data page carries the
+/// `payload_is_bace_envelope` flag. Row pointers reference the DECODED
+/// payload position (matches the write-side pointer semantics in
+/// row_store.rs's checkpoint writer).
 fn scan_snapshot(
     root: &Path,
     lsn: u64, limits: IndexLimits,
+    bace: Option<&BaceWiring>,
 ) -> StoreResult<VerifiedSnapshot> {
     let mut file = File::open(snapshot_path(root, lsn))?;
     let length = file.metadata()?.len();
@@ -85,17 +91,18 @@ fn scan_snapshot(
         if page.kind != PageKind::Data || page.page_id != page_id || page.lsn != lsn {
             return Err(StoreError::Corruption("snapshot data page identity mismatch".into()));
         }
+        let payload = decode_data_page_payload(&page, bace, page_id)?;
         let mut offset = 0_usize;
-        while offset < page.payload.len() {
-            let remaining = page.payload.len() - offset;
+        while offset < payload.len() {
+            let remaining = payload.len() - offset;
             if remaining < ROW_HEADER {
                 return Err(StoreError::Corruption("truncated snapshot row header".into()));
             }
             let key_len = u16::from_le_bytes(
-                page.payload[offset..offset + 2].try_into().unwrap()
+                payload[offset..offset + 2].try_into().unwrap()
             ) as usize;
             let value_len = u32::from_le_bytes(
-                page.payload[offset + 2..offset + 6].try_into().unwrap()
+                payload[offset + 2..offset + 6].try_into().unwrap()
             ) as usize;
             let record_len = ROW_HEADER.checked_add(key_len)
                 .and_then(|n| n.checked_add(value_len))
@@ -107,7 +114,7 @@ fn scan_snapshot(
             }
             let key_start = offset + ROW_HEADER;
             let key_end = key_start + key_len;
-            let key = &page.payload[key_start..key_end];
+            let key = &payload[key_start..key_end];
             if last.as_ref().is_some_and(|prev| prev.as_slice() >= key) {
                 return Err(StoreError::Corruption("snapshot row order is not strictly increasing".into()));
             }
@@ -136,7 +143,17 @@ pub fn verify(root: &Path, lsn: u64) -> StoreResult<IndexRecovery> {
 }
 
 pub fn verify_with_limits(root: &Path, lsn: u64, limits: IndexLimits) -> StoreResult<IndexRecovery> {
-    let (entries, pages) = scan_snapshot(root, lsn, limits)?;
+    verify_with_limits_bace(root, lsn, limits, None)
+}
+
+/// ADR 0067 §3.5 — BACE-aware variant. Required when the snapshot's
+/// data pages carry BACE envelopes. Callers that know they are
+/// looking at a non-BACE checkpoint may still use
+/// `verify_with_limits` (equivalent to `bace = None`).
+pub fn verify_with_limits_bace(
+    root: &Path, lsn: u64, limits: IndexLimits, bace: Option<&BaceWiring>,
+) -> StoreResult<IndexRecovery> {
+    let (entries, pages) = scan_snapshot(root, lsn, limits, bace)?;
     let mut index = DiskBTree::open(&index_path(root, lsn), lsn)?;
     if index.len() != entries.len() as u64 {
         return Err(StoreError::Corruption("derived index entry count disagrees with snapshot".into()));
@@ -159,11 +176,18 @@ pub fn verify_with_limits(root: &Path, lsn: u64, limits: IndexLimits) -> StoreRe
 /// Rebuild an *absent* index, using only the published snapshot as authority.
 /// A corrupt existing index must be addressed by an explicit repair procedure;
 /// silently overwriting it would conceal an integrity failure.
-pub(crate) fn rebuild_missing_with_limits(root: &Path, lsn: u64, limits: IndexLimits, build_limits: IndexBuildLimits) -> StoreResult<IndexRecovery> {
+///
+/// ADR 0067 §3.5 — `bace` is required when the checkpoint snapshot
+/// may carry BRPG v2 pages; callers that know their checkpoint is
+/// v1-only may pass `None`.
+pub(crate) fn rebuild_missing_with_limits_bace(
+    root: &Path, lsn: u64, limits: IndexLimits, build_limits: IndexBuildLimits,
+    bace: Option<&BaceWiring>,
+) -> StoreResult<IndexRecovery> {
     if index_path(root, lsn).exists() {
-        return verify_with_limits(root, lsn, limits);
+        return verify_with_limits_bace(root, lsn, limits, bace);
     }
-    let (entries, pages) = scan_snapshot(root, lsn, limits)?;
+    let (entries, pages) = scan_snapshot(root, lsn, limits, bace)?;
     crate::btree::admit_build_keys(entries.iter().map(|(key,_)|key.len()),build_limits)?;
     let tmp = root.join(format!("index-{lsn}.rebuild.tmp"));
     if tmp.exists() {
