@@ -21,6 +21,7 @@ use thiserror::Error;
 use crate::{Table, TableId};
 use crate::backup::BackupReceipt;
 use crate::row_store::{RowMutation, RowStore, StoreError};
+use crate::runtime_limits::DomainLimits;
 use crate::typed_table::{
     decode_row, encode_key, encode_row, validate_table, TableError, Value,
 };
@@ -67,12 +68,19 @@ struct Registered {
 pub struct MultiTableStore {
     storage: RowStore,
     tables: Mutex<BTreeMap<TableId, Registered>>,
+    limits: DomainLimits,
 }
 
 impl MultiTableStore {
     /// Reopen the authoritative store and verify every registered table's
     /// schema and every persisted row against the pinned table identity.
     pub fn open(root: impl AsRef<Path>) -> DomainResult<Self> {
+        Self::open_with_limits(root, DomainLimits::default())
+    }
+
+    /// Open with explicit per-domain decoded-state admission (ADR 0056).
+    /// Policies are not persisted; they bound live decoded state only.
+    pub fn open_with_limits(root: impl AsRef<Path>, limits: DomainLimits) -> DomainResult<Self> {
         let storage = RowStore::open(root)?;
         let (_, entries) = storage.snapshot_with_lsn();
         let mut tables = BTreeMap::new();
@@ -91,6 +99,9 @@ impl MultiTableStore {
             if tables.insert(table.id, Registered { table, pk_positions: positions }).is_some() {
                 return Err(DomainError::Corruption("duplicate metadata table identity".into()));
             }
+            // Admit decoded-state growth after each successful insert so a
+            // quota refusal leaves the WAL exactly as it was.
+            limits.check_tables(tables.len())?;
         }
         // No orphan record is accepted: all data must decode through its
         // exact pinned table and reproduce its physical primary-key bytes.
@@ -104,8 +115,11 @@ impl MultiTableStore {
                 return Err(DomainError::Corruption("physical primary key differs from decoded row".into()));
             }
         }
-        Ok(Self { storage, tables: Mutex::new(tables) })
+        Ok(Self { storage, tables: Mutex::new(tables), limits })
     }
+
+    pub fn resource_limits(&self) -> DomainLimits { self.limits }
+    pub fn registered_table_count(&self) -> usize { self.tables.lock().len() }
 
     /// Pin a catalog-validated schema durably. This operation is idempotent
     /// for identical schemas and rejects reuse of a TableId with new metadata.
@@ -125,6 +139,9 @@ impl MultiTableStore {
             if existing.table != table { return Err(DomainError::SchemaMismatch(table.id.0)); }
             return Ok(self.storage.last_lsn());
         }
+        // A new table would grow decoded state by one. Admit before touching
+        // the WAL so a refusal leaves everything unchanged.
+        self.limits.check_tables(registered.len() + 1)?;
         for _ in 0..MAX_RETRIES {
             let lsn = self.storage.last_lsn();
             // Physical metadata already present is always checked; we never

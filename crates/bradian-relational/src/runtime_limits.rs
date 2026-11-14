@@ -32,6 +32,8 @@ pub enum ResourceError {
     DirectoryLimit { resource: &'static str, limit: usize },
     #[error("persistent catalog {resource} limit exceeded (limit {limit})")]
     CatalogLimit { resource: &'static str, limit: usize },
+    #[error("transaction domain {resource} limit exceeded (limit {limit})")]
+    DomainLimit { resource: &'static str, limit: usize },
     #[error("query cancelled")]
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
@@ -226,6 +228,23 @@ impl Default for MetadataLimits {
 pub struct TransactionLimits { pub max_active: usize }
 impl Default for TransactionLimits {
     fn default() -> Self { Self { max_active: 128 } }
+}
+
+/// Bounded decoded multi-table-domain state. The catalog cap already bounds
+/// table counts globally; this cap bounds how many tables ONE shared-WAL
+/// domain can register. Defaults to the CatalogLimits default.
+#[derive(Clone, Copy, Debug)]
+pub struct DomainLimits { pub max_tables: usize }
+impl Default for DomainLimits {
+    fn default() -> Self { Self { max_tables: 65_536 } }
+}
+impl DomainLimits {
+    pub fn check_tables(&self, actual: usize) -> Result<(), ResourceError> {
+        if actual > self.max_tables {
+            return Err(ResourceError::DomainLimit { resource: "tables", limit: self.max_tables });
+        }
+        Ok(())
+    }
 }
 
 /// Bounded decoded persistent-catalog state and journal-event sizes.
