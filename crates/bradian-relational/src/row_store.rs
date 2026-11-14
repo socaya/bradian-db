@@ -36,10 +36,16 @@ use crate::buffer_pool::{CacheError, CacheStats, PageCache};
 use crate::index_recovery::{self, IndexRecovery};
 use crate::checkpoint_manifest::{self, CheckpointManifest, ManifestError};
 use crate::backup::{self, BackupReceipt};
-use crate::bace::codec::{CodecId, DecodeError};
-use crate::bace::envelope::EnvelopeError;
-use crate::bace::policy::PolicyService;
+use crate::bace::codec::{Codec, CodecId, DecodeError};
+use crate::bace::envelope::{
+    write_envelope, EnvelopeError, EnvelopeFlags, EnvelopeHeader, ENVELOPE_HEADER_SIZE,
+    ENVELOPE_TRAILER_SIZE,
+};
+use crate::bace::policy::{
+    CompressionProfile, PolicyKey, PolicyService, ScopeChain,
+};
 use crate::bace::registry::CodecRegistry;
+use crate::page::PageFlags;
 
 /// BACE wiring handed to `RowStore::open_with_bace` per accepted
 /// ADR 0065 §3.1. The policy service is consulted live on every
@@ -665,7 +671,7 @@ impl RowStore {
         // that file is safe: published .brp snapshots are never overwritten.
         let write_result = (|| -> StoreResult<()> {
             let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&tmp)?;
-            let pointers = write_snapshot(&mut file, lsn, &inner.rows)?;
+            let pointers = write_snapshot(&mut file, lsn, &inner.rows, self.bace_wiring.as_ref())?;
             file.sync_all()?;
             drop(file);
             // Refuse overwriting an existing published snapshot.
@@ -1043,11 +1049,106 @@ fn read_latest_snapshot(root: &Path, limits: RowStoreLimits, directory_limits: D
     Ok((checkpoint, rows, usage))
 }
 
+/// Resolve the BACE codec for this checkpoint, if any. Returns
+/// `None` when the wiring is absent or the resolved profile is
+/// `Raw`. Returns `Some((codec_id, codec))` when the writer should
+/// emit v2 pages wrapping payloads in a BACE envelope.
+///
+/// Policy resolution uses `ScopeChain::baseline_only()` because the
+/// `RowStore` has no database/schema/table context — higher-level
+/// carriers (SQL engines) will pass richer scopes in future
+/// implementation ADRs.
+fn resolve_bace_codec(
+    wiring: Option<&BaceWiring>,
+) -> StoreResult<Option<(CodecId, &dyn Codec)>> {
+    let Some(w) = wiring else { return Ok(None); };
+    let scope = ScopeChain::baseline_only();
+    let profile = w.policy_service.resolve(PolicyKey::CompressionProfile, &scope);
+    if profile.value.as_profile() == Some(CompressionProfile::Raw) {
+        return Ok(None);
+    }
+    let allowed = w.policy_service.resolve(PolicyKey::CompressionAllowedCodecs, &scope);
+    let allowed_set = allowed.value.as_codec_set()
+        .ok_or_else(|| StoreError::Corruption(
+            "policy service returned non-codec-set for allowed_codecs".into()))?;
+    // ADR 0065 §3.2: pick the first codec from the allow-set whose
+    // capability is registered. A later selection-logic ADR replaces
+    // this with the adaptive cost model.
+    for &codec_id in allowed_set {
+        if let Some(codec) = w.registry.codec(codec_id) {
+            return Ok(Some((codec_id, codec)));
+        }
+    }
+    // Every codec in the allow-set is unregistered; fail closed.
+    let first = allowed_set.first().copied().unwrap_or_default();
+    Err(StoreError::BaceCodecUnavailable { codec_id: first })
+}
+
+/// Emit one data-page payload. In v1 mode this is just
+/// `Page::new(..).encode(..)`. In v2/BACE mode the plain bytes are
+/// encoded via the codec, wrapped in an envelope, and emitted as a
+/// BRPG v2 page with `payload_is_bace_envelope` set.
+fn emit_data_page(
+    file: &mut File,
+    page_id: u64,
+    lsn: u64,
+    plain: Vec<u8>,
+    bace: Option<(CodecId, &dyn Codec)>,
+) -> StoreResult<()> {
+    let page_bytes = match bace {
+        None => Page::new(page_id, lsn, PageKind::Data, plain)?.encode()?,
+        Some((codec_id, codec)) => {
+            let decoded_length = u32::try_from(plain.len())
+                .map_err(|_| StoreError::InvalidRow("data-page plain payload exceeds u32::MAX"))?;
+            let mut encoded = Vec::with_capacity(plain.len());
+            codec.encode(&plain, &mut encoded)
+                .map_err(|_| StoreError::BaceCodecUnavailable { codec_id })?;
+            let encoded_length = u32::try_from(encoded.len())
+                .map_err(|_| StoreError::InvalidRow("encoded payload exceeds u32::MAX"))?;
+            let header = EnvelopeHeader {
+                codec_id,
+                codec_format_version: codec.capability().format_version,
+                flags: EnvelopeFlags {
+                    payload_is_raw: codec_id == CodecId::raw(),
+                    critical: codec.capability().flags.critical,
+                    ..EnvelopeFlags::default()
+                },
+                encoded_length,
+                decoded_length,
+            };
+            let mut envelope = Vec::with_capacity(
+                ENVELOPE_HEADER_SIZE + encoded.len() + ENVELOPE_TRAILER_SIZE,
+            );
+            write_envelope(&mut envelope, &header, &encoded)?;
+            Page::new_v2(
+                page_id, lsn, PageKind::Data, envelope,
+                PageFlags::empty().with_bace_envelope(true),
+            )?.encode()?
+        }
+    };
+    file.write_all(&page_bytes)?;
+    Ok(())
+}
+
 fn write_snapshot(
     file: &mut File,
     lsn: u64,
     rows: &BTreeMap<Vec<u8>, Vec<u8>>,
+    bace: Option<&BaceWiring>,
 ) -> StoreResult<Vec<(Vec<u8>, RowPointer)>> {
+    // Resolve BACE emission mode once up front; checkpoint is strict
+    // fail-closed under any BACE error.
+    let bace_codec = resolve_bace_codec(bace)?;
+    // Under BACE, each data page's plain payload must leave room for
+    // the envelope's 36-byte overhead. With RAW codec encoded_length
+    // == plain_length; future compressing codecs may permit larger
+    // plain payloads via trial-and-fit (BACE §5.1), deferred.
+    let plain_capacity = if bace_codec.is_some() {
+        MAX_PAYLOAD_SIZE - ENVELOPE_HEADER_SIZE - ENVELOPE_TRAILER_SIZE
+    } else {
+        MAX_PAYLOAD_SIZE
+    };
+
     // First pass computes exact page count without duplicating the complete
     // table into temporary memory. The write path is serialized, so the map
     // cannot change between passes.
@@ -1056,10 +1157,10 @@ fn write_snapshot(
     for (key, value) in rows {
         validate_row(key, value)?;
         let len = ROW_HEADER + key.len() + value.len();
-        if len > MAX_PAYLOAD_SIZE {
+        if len > plain_capacity {
             return Err(StoreError::InvalidRow("row cannot fit a single physical page"));
         }
-        if used + len > MAX_PAYLOAD_SIZE {
+        if used + len > plain_capacity {
             page_count = page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
             used = 0;
         }
@@ -1069,6 +1170,7 @@ fn write_snapshot(
         page_count = page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
     }
 
+    // The metadata page (page 0) stays v1 per ADR 0065 §6 item 7.
     let mut meta = Vec::with_capacity(META_LENGTH);
     meta.extend_from_slice(&lsn.to_le_bytes());
     meta.extend_from_slice(&(rows.len() as u64).to_le_bytes());
@@ -1077,15 +1179,17 @@ fn write_snapshot(
 
     // Second pass streams physical row pages and retains admitted key/pointer
     // entries for index construction. Admission happened before any file write.
-    let mut buffer = Vec::with_capacity(MAX_PAYLOAD_SIZE);
+    // RowPointer offsets reference the DECODED payload position — with BACE
+    // active, the reader must decode the envelope before applying the offset.
+    let mut buffer = Vec::with_capacity(plain_capacity);
     let mut pointers = Vec::with_capacity(rows.len());
     let mut page_id = 1_u64;
     for (key, value) in rows {
         let len = ROW_HEADER + key.len() + value.len();
-        if buffer.len() + len > MAX_PAYLOAD_SIZE {
-            file.write_all(&Page::new(page_id, lsn, PageKind::Data, std::mem::take(&mut buffer))?.encode()?)?;
+        if buffer.len() + len > plain_capacity {
+            emit_data_page(file, page_id, lsn, std::mem::take(&mut buffer), bace_codec)?;
             page_id = page_id.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
-            buffer = Vec::with_capacity(MAX_PAYLOAD_SIZE);
+            buffer = Vec::with_capacity(plain_capacity);
         }
         pointers.push((key.clone(), RowPointer {
             page_id,
@@ -1097,7 +1201,7 @@ fn write_snapshot(
         buffer.extend_from_slice(value);
     }
     if !buffer.is_empty() {
-        file.write_all(&Page::new(page_id, lsn, PageKind::Data, buffer)?.encode()?)?;
+        emit_data_page(file, page_id, lsn, buffer, bace_codec)?;
         page_id = page_id.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
     }
     if page_id != page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)? {
