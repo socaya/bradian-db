@@ -23,6 +23,8 @@ tests does not accept a complete master requirement or permit skipping its exit 
 | 8 | Cluster-consistent recovery and hardening | Blocked on complete trust, storage and replication designs |
 | 9 | Qualification and external reproducibility | Not accepted; no production or cross-platform certification claimed |
 
+The [comprehensive gaps analysis](BRADIAN_COMPREHENSIVE_GAPS_ANALYSIS.md) cross-references the SRS v1.1 normative MUST clauses, BACE SRS v1.0 and the gap register; use it as the single-pane-of-glass view of release-blocking vs feature-shortfall vs scoped-deviation items.
+
 ## Gate 0 evidence baseline
 
 The [source inventory and compatibility map](BRADIAN_SOURCE_INVENTORY.md),
