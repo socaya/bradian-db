@@ -13,6 +13,7 @@ bradian-core    = { workspace = true }
 bradian-storage = { workspace = true }
 bradian-runtime = { workspace = true }
 bradian-catalog = { workspace = true }
+bradian-relational = { path = "../bradian-relational" }
 serde       = { workspace = true }
 rand        = { workspace = true }
 rand_chacha = { workspace = true }
@@ -27,4 +28,8 @@ harness = false
 
 [[bench]]
 name = "capture_coload"
+harness = false
+
+[[bench]]
+name = "dhis2_like"
 harness = false
