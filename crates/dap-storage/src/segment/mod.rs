@@ -11,4 +11,4 @@ pub use format::{
     SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
 };
 pub use reader::SegmentReader;
-pub use writer::{SegmentWriter, SegmentWriterOptions};
+pub use writer::{SegmentWriter, SegmentWriterOptions, WrittenSegment};

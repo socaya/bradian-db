@@ -22,13 +22,39 @@ use super::writer::FOOTER_MAGIC;
 pub struct SegmentReader {
     file: File,
     footer: SegmentFooter,
+    /// ADR 0076 — present when the reader was opened via
+    /// `open_with_bace`. Controls BACE envelope decode when a
+    /// page's trailer byte indicates a BACE-wrapped body.
+    bace_wiring: Option<bradian_relational::row_store::BaceWiring>,
+    /// ADR 0076 — true if the segment header had
+    /// `FeatureFlags::BACE_PAGE_ENVELOPE` set. Reader stores it
+    /// so per-page reads can decide whether to look for a
+    /// trailer byte without re-parsing the header.
+    _bace_feature_active: bool,
 }
 
 impl SegmentReader {
     pub fn open(path: &Path) -> DapResult<Self> {
         let mut file = File::open(path)?;
-        let footer = read_footer(&mut file)?;
-        Ok(Self { file, footer })
+        let (footer, bace_feature) = read_footer_with_features(&mut file, /*allow_bace=*/false)?;
+        Ok(Self { file, footer, bace_wiring: None, _bace_feature_active: bace_feature })
+    }
+
+    /// ADR 0076 — open a `.derc` segment that may carry BACE-
+    /// wrapped page bodies (v1.1). The wiring is consulted per
+    /// page if the segment's `BACE_PAGE_ENVELOPE` feature flag
+    /// was set at write time. On a v1.0 segment the wiring is
+    /// stored but never consulted (legacy decode path).
+    pub fn open_with_bace(
+        path: &Path,
+        wiring: bradian_relational::row_store::BaceWiring,
+    ) -> DapResult<Self> {
+        let mut file = File::open(path)?;
+        let (footer, bace_feature) = read_footer_with_features(&mut file, /*allow_bace=*/true)?;
+        Ok(Self {
+            file, footer, bace_wiring: Some(wiring),
+            _bace_feature_active: bace_feature,
+        })
     }
 
     pub fn footer(&self) -> &SegmentFooter {
@@ -88,6 +114,27 @@ impl SegmentReader {
             Vec::new()
         };
 
+        // ADR 0076 §3.3 — when the segment carries the
+        // `BACE_PAGE_ENVELOPE` feature flag, one trailer byte
+        // follows each page's (payload || validity). It is NOT
+        // covered by the page CRC32 (preserves v1.0 byte compat);
+        // its single-byte domain constrains tampering to
+        // observable values and each BACE v1 envelope has its own
+        // CRC+header checks.
+        let bace_tag = if self._bace_feature_active {
+            let trailer_offset = if page.validity_len > 0 {
+                page.validity_offset + page.validity_len as u64
+            } else {
+                page.payload_offset + page.payload_len as u64
+            };
+            self.file.seek(SeekFrom::Start(trailer_offset))?;
+            let mut t = [0u8; 1];
+            self.file.read_exact(&mut t)?;
+            t[0]
+        } else {
+            0
+        };
+
         // Verify CRC before decoding.
         let expect = crc32_parts(&[&payload, &validity_bytes]);
         if expect != page.crc32 {
@@ -97,17 +144,51 @@ impl SegmentReader {
             )));
         }
 
-        // Decompress if needed.
-        let inner = if page.compressed {
-            compress::decompress(&payload, page.uncompressed_len as usize)?
-        } else {
-            if payload.len() != page.uncompressed_len as usize {
-                return Err(DapError::corruption(format!(
-                    "uncompressed payload length mismatch on column {}",
-                    col.name
+        // ADR 0076 §3.3 — decode path depends on the trailer byte.
+        // `bace_tag == 1`: BACE v1 envelope wraps the compressed
+        // inner codec output. Decode the envelope via the wiring,
+        // then skip the legacy `compress::decompress` step.
+        // `bace_tag == 0`: legacy path.
+        // `bace_tag == 2`: BACA reserved, unsupported.
+        // `bace_tag >= 3`: corruption.
+        let inner = match bace_tag {
+            0 => {
+                if page.compressed {
+                    compress::decompress(&payload, page.uncompressed_len as usize)?
+                } else {
+                    if payload.len() != page.uncompressed_len as usize {
+                        return Err(DapError::corruption(format!(
+                            "uncompressed payload length mismatch on column {}",
+                            col.name
+                        )));
+                    }
+                    payload
+                }
+            }
+            1 => {
+                let wiring = self.bace_wiring.as_ref().ok_or_else(|| {
+                    DapError::unsupported(format!(
+                        "page in column {} is BACE-wrapped but SegmentReader has no wiring; use SegmentReader::open_with_bace",
+                        col.name,
+                    ))
+                })?;
+                decode_bace_v1_page(&payload, page.uncompressed_len, wiring)
+                    .map_err(|e| DapError::corruption(format!(
+                        "BACE envelope decode failed on column {}: {e}", col.name,
+                    )))?
+            }
+            2 => {
+                return Err(DapError::unsupported(format!(
+                    "page in column {} is BACA-wrapped (reserved for ADR 0075 carrier integration); not supported by ADR 0076 reader",
+                    col.name,
                 )));
             }
-            payload
+            other => {
+                return Err(DapError::corruption(format!(
+                    "page in column {} has unknown BACE envelope tag {other}",
+                    col.name,
+                )));
+            }
         };
 
         // Build validity bitmap.
@@ -191,13 +272,63 @@ fn decimal_scale(col: &ColumnMeta) -> DapResult<u8> {
     }
 }
 
+/// ADR 0076 §3.3 — decode a BACE v1 envelope wrapping the
+/// compressed inner codec output. Returns the inner codec output
+/// that the legacy `decode_page` can then parse. The envelope's
+/// `decoded_length` must equal the page's declared
+/// `uncompressed_len` (anti-swap check).
+fn decode_bace_v1_page(
+    payload: &[u8],
+    uncompressed_len: u32,
+    wiring: &bradian_relational::row_store::BaceWiring,
+) -> Result<Vec<u8>, String> {
+    use bradian_relational::bace::envelope::{read_envelope, EnvelopeCaps};
+    use bradian_relational::bace::policy::{PolicyKey, ScopeChain};
+
+    let scope = ScopeChain::baseline_only();
+    let cap = wiring.policy_service.resolve(PolicyKey::CompressionMaxDecodedPageBytes, &scope);
+    let max_decoded = cap.value.as_u32().ok_or_else(||
+        "policy service returned non-u32 for max_decoded_page_bytes".to_string(),
+    )?;
+    let caps = EnvelopeCaps {
+        max_decoded_length: max_decoded,
+        max_encoded_length: payload.len() as u32,
+    };
+    let env = read_envelope(payload, caps).map_err(|e| e.to_string())?;
+    if env.header.decoded_length != uncompressed_len {
+        return Err(format!(
+            "BACE envelope decoded_length {} disagrees with page uncompressed_len {}",
+            env.header.decoded_length, uncompressed_len,
+        ));
+    }
+    let codec = wiring.registry.codec(env.header.codec_id)
+        .ok_or_else(|| format!("BACE codec {:?} not registered in this build", env.header.codec_id))?;
+    if codec.capability().format_version != env.header.codec_format_version {
+        return Err(format!(
+            "BACE codec {:?} format_version {} disagrees with build {}",
+            env.header.codec_id, env.header.codec_format_version, codec.capability().format_version,
+        ));
+    }
+    let mut out = Vec::with_capacity(uncompressed_len as usize);
+    codec.decode(env.payload, uncompressed_len, &mut out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 fn concat_buffers(_col: &ColumnMeta, _pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
     Err(DapError::unsupported(
         "multi-page column concatenation not implemented in v1 (single-page writer)",
     ))
 }
 
-fn read_footer(file: &mut File) -> DapResult<SegmentFooter> {
+/// ADR 0076 — returns `(footer, bace_feature_active)`. When
+/// `allow_bace` is false (legacy `SegmentReader::open`), a segment
+/// that sets the `BACE_PAGE_ENVELOPE` feature flag is rejected with
+/// the existing unsupported-feature error. When `allow_bace` is true
+/// (`SegmentReader::open_with_bace`), the flag is accepted and
+/// surfaced for per-page decode routing.
+fn read_footer_with_features(
+    file: &mut File, allow_bace: bool,
+) -> DapResult<(SegmentFooter, bool)> {
     let file_len = file.metadata()?.len();
     if file_len < 64 + 8 {
         return Err(DapError::corruption("file too short to be a valid .derc"));
@@ -218,11 +349,17 @@ fn read_footer(file: &mut File) -> DapResult<SegmentFooter> {
     }
     let required = file.read_u64::<LittleEndian>()?;
     let _optional = file.read_u64::<LittleEndian>()?;
-    if !FeatureFlags::is_subset_supported(required) {
+    let subset_ok = if allow_bace {
+        FeatureFlags::is_subset_supported_v1_1(required)
+    } else {
+        FeatureFlags::is_subset_supported(required)
+    };
+    if !subset_ok {
         return Err(DapError::unsupported(format!(
             "segment requires feature bits {required:#x} not supported in v1"
         )));
     }
+    let bace_feature = (required & FeatureFlags::BACE_PAGE_ENVELOPE) != 0;
 
     // Read footer start offset (last 8 bytes).
     file.seek(SeekFrom::End(-8))?;
@@ -246,5 +383,5 @@ fn read_footer(file: &mut File) -> DapResult<SegmentFooter> {
     }
     let footer: SegmentFooter = bincode::deserialize(&payload)
         .map_err(|e| DapError::corruption(format!("footer decode: {e}")))?;
-    Ok(footer)
+    Ok((footer, bace_feature))
 }

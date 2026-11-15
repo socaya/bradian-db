@@ -1,17 +1,40 @@
-# ADR 0076 — `.derc` carrier BACE adapter (implementation; **PROPOSED**)
+# ADR 0076 — `.derc` carrier BACE adapter (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit as
+the R.1–R.4 sub-slices from §3.6.
 
-Blocked on the accepted BACE workstream through ADR 0075. This
-ADR brings the analytical columnar segment format (`.derc`) under
-BACE envelope governance. It is the first ADR in the BACE series
-that touches a **different crate** (`dap-storage`) and the first
-that proposes a `.derc` **format version bump** (v1 → v2).
+First ADR in the BACE series that touches `dap-storage`. `.derc`
+format minor-version bump v1.0 → v1.1. New
+`FeatureFlags::BACE_PAGE_ENVELOPE` plus per-page trailer byte
+infrastructure. Legacy v1.0 segments stay byte-identical; v1.0
+readers reject v1.1 cleanly via the feature-flag check; v1.1
+readers accept both.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
-Especially §4 "Compatibility constraints": `.derc` and the
-`dap-*` crate names are **internal legacy identifiers** that
-must not be bulk-renamed; this ADR explicitly preserves them.
+Implementation summary:
+
+- `crates/dap-storage/Cargo.toml` — direct dep on
+  `bradian-relational` (first cross-crate BACE dep).
+- `crates/dap-storage/src/segment/format.rs` — new
+  `SEGMENT_VERSION_MINOR_V1_1 = 1`, new
+  `FeatureFlags::BACE_PAGE_ENVELOPE = 1 << 5`,
+  `ALL_SUPPORTED_V1_1` superset, `is_subset_supported_v1_1`
+  helper, new `BaceEnvelopeTag` enum.
+- `crates/dap-storage/src/segment/writer.rs` —
+  `SegmentWriter::new_with_bace`, `bace_wiring` field, writer
+  emits BACE v1 envelope (via
+  `bradian_relational::bace::envelope::write_envelope`) when
+  `bace_active`, plus per-page trailer byte.
+- `crates/dap-storage/src/segment/reader.rs` —
+  `SegmentReader::open_with_bace`, `_bace_feature_active` flag,
+  reader reads trailer byte and dispatches on
+  `BaceEnvelopeTag::{None, BaceV1, BacaV1Reserved}` with clean
+  errors for unknown/reserved values.
+- `crates/dap-storage/tests/derc_bace.rs` — 10 new integration
+  tests covering §3.5 compliance.
+
+1005 workspace tests pass (995 → 1005); clippy clean on
+`cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 ## 1. Context
 

@@ -10,6 +10,7 @@ description = ".derc segment format, WAL, manifests, delta, compaction"
 
 [dependencies]
 dap-core    = { workspace = true }
+bradian-relational = { path = "../bradian-relational" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 bincode     = { workspace = true }

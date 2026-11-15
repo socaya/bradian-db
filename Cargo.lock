@@ -842,6 +842,7 @@ dependencies = [
  "ahash",
  "bincode",
  "blake3",
+ "bradian-relational",
  "byteorder",
  "crc32fast",
  "dap-core",

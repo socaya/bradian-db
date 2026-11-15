@@ -57,10 +57,37 @@ pub struct SegmentWriter {
     use_dict: Vec<bool>,
     options: SegmentWriterOptions,
     rows: u64,
+    /// ADR 0076 — present when the writer was constructed via
+    /// `new_with_bace`. Controls whether page bodies are wrapped in
+    /// a BACE envelope and whether the segment header sets the
+    /// `BACE_PAGE_ENVELOPE` feature flag.
+    bace_wiring: Option<bradian_relational::row_store::BaceWiring>,
 }
 
 impl SegmentWriter {
     pub fn new(schema: Schema, options: SegmentWriterOptions) -> Self {
+        Self::new_inner(schema, options, None)
+    }
+
+    /// ADR 0076 — construct a writer that emits `.derc` v1.1
+    /// segments with BACE-wrapped page bodies. See ADR §3.2.
+    /// When the resolved codec is RAW, the writer still emits
+    /// v1.0-shape bytes (no envelope, no trailer byte) to avoid
+    /// paying 36 bytes of envelope overhead per page for no
+    /// compression benefit.
+    pub fn new_with_bace(
+        schema: Schema,
+        options: SegmentWriterOptions,
+        wiring: bradian_relational::row_store::BaceWiring,
+    ) -> Self {
+        Self::new_inner(schema, options, Some(wiring))
+    }
+
+    fn new_inner(
+        schema: Schema,
+        options: SegmentWriterOptions,
+        bace_wiring: Option<bradian_relational::row_store::BaceWiring>,
+    ) -> Self {
         let mut builders = Vec::with_capacity(schema.len());
         let mut use_dict = Vec::with_capacity(schema.len());
         for c in &schema.columns {
@@ -85,6 +112,7 @@ impl SegmentWriter {
             use_dict,
             options,
             rows: 0,
+            bace_wiring,
         }
     }
 
@@ -145,7 +173,12 @@ impl SegmentWriter {
             .write(true)
             .truncate(true)
             .open(&tmp)?;
-        let mut w = SegmentFileWriter::new(file, self.options.clone());
+        let mut w = match &self.bace_wiring {
+            Some(wiring) => SegmentFileWriter::new_with_bace(
+                file, self.options.clone(), wiring.clone(),
+            ),
+            None => SegmentFileWriter::new(file, self.options.clone()),
+        };
 
         w.write_header()?;
         let mut columns_meta = Vec::with_capacity(self.schema.len());
@@ -217,15 +250,115 @@ fn schema_fingerprint(schema: &Schema) -> Fingerprint {
     Fingerprint::of(&json)
 }
 
+/// ADR 0076 §3.2 — encode `inner_payload` under the wiring's
+/// resolved outer codec and wrap it in a BACE v1 envelope. The
+/// resulting bytes are what the writer places on disk as the
+/// page body. The envelope's `codec_id` matches the resolved
+/// codec (ZSTD=49 today).
+fn wrap_page_in_bace_envelope(
+    inner_payload: &[u8],
+    wiring: &bradian_relational::row_store::BaceWiring,
+) -> DapResult<Vec<u8>> {
+    use bradian_relational::bace::codec::raw::RAW_ID;
+    use bradian_relational::bace::codec::CodecId;
+    use bradian_relational::bace::envelope::{
+        write_envelope, EnvelopeFlags, EnvelopeHeader,
+    };
+    use bradian_relational::bace::policy::{PolicyKey, ScopeChain};
+
+    let scope = ScopeChain::baseline_only();
+    let allowed = wiring.policy_service.resolve(PolicyKey::CompressionAllowedCodecs, &scope);
+    let allowed = allowed.value.as_codec_set().ok_or_else(|| DapError::corruption(
+        "BACE wiring policy service returned non-codec-set for allowed_codecs",
+    ))?;
+    // Pick the first registered non-RAW codec.
+    let mut chosen: Option<CodecId> = None;
+    for id in allowed {
+        if *id != RAW_ID && wiring.registry.codec(*id).is_some() {
+            chosen = Some(*id);
+            break;
+        }
+    }
+    let chosen = chosen.ok_or_else(|| DapError::corruption(
+        "BACE wiring has no non-RAW codec available for .derc page wrapping",
+    ))?;
+    let codec = wiring.registry.codec(chosen).expect("registry lookup just succeeded");
+    let mut encoded = Vec::with_capacity(inner_payload.len());
+    codec.encode(inner_payload, &mut encoded).map_err(|e| DapError::corruption(
+        format!("BACE codec encode failed: {e}"),
+    ))?;
+    let header = EnvelopeHeader {
+        codec_id: chosen,
+        codec_format_version: codec.capability().format_version,
+        flags: EnvelopeFlags {
+            payload_is_raw: chosen == RAW_ID,
+            critical: codec.capability().flags.critical,
+            ..EnvelopeFlags::default()
+        },
+        encoded_length: encoded.len() as u32,
+        decoded_length: inner_payload.len() as u32,
+    };
+    let mut buf = Vec::with_capacity(encoded.len() + 36);
+    write_envelope(&mut buf, &header, &encoded).map_err(|e| DapError::corruption(
+        format!("BACE envelope write failed: {e}"),
+    ))?;
+    Ok(buf)
+}
+
+/// ADR 0076 §3.2 — decide whether the writer will wrap pages in a
+/// BACE envelope. Returns `true` iff the wiring's resolved codec is
+/// non-RAW. RAW opts out so the writer doesn't pay 36 bytes of
+/// envelope overhead per page for no compression benefit.
+fn resolve_bace_active(wiring: &bradian_relational::row_store::BaceWiring) -> bool {
+    use bradian_relational::bace::codec::raw::RAW_ID;
+    use bradian_relational::bace::policy::{PolicyKey, ScopeChain};
+    let scope = ScopeChain::baseline_only();
+    let allowed = wiring.policy_service.resolve(PolicyKey::CompressionAllowedCodecs, &scope);
+    let Some(allowed) = allowed.value.as_codec_set() else { return false; };
+    allowed.iter().any(|id| {
+        *id != RAW_ID && wiring.registry.codec(*id).is_some()
+    })
+}
+
 struct SegmentFileWriter {
     file: File,
     pos: u64,
     options: SegmentWriterOptions,
+    /// ADR 0076 — present when the parent `SegmentWriter` carries a
+    /// `BaceWiring`. The wiring is cloned once per segment write so
+    /// `write_column` can consult it per page without reaching back
+    /// to `SegmentWriter`.
+    #[allow(dead_code)]
+    bace_wiring: Option<bradian_relational::row_store::BaceWiring>,
+    /// ADR 0076 — whether the segment header should set
+    /// `BACE_PAGE_ENVELOPE` and whether per-page trailer bytes are
+    /// emitted. Resolved once at writer construction from
+    /// `bace_wiring` + the resolved codec. See `resolve_bace_active`.
+    bace_active: bool,
 }
 
 impl SegmentFileWriter {
     fn new(file: File, options: SegmentWriterOptions) -> Self {
-        Self { file, pos: 0, options }
+        Self {
+            file, pos: 0, options,
+            bace_wiring: None, bace_active: false,
+        }
+    }
+
+    /// ADR 0076 — constructor used by `SegmentWriter::new_with_bace`.
+    /// `bace_active` is true iff the wiring resolves to a non-RAW
+    /// codec; RAW opts out of envelope overhead per §3.2.
+    fn new_with_bace(
+        file: File,
+        options: SegmentWriterOptions,
+        wiring: bradian_relational::row_store::BaceWiring,
+    ) -> Self {
+        let bace_active = resolve_bace_active(&wiring);
+        Self {
+            file, pos: 0, options,
+            bace_wiring: Some(wiring),
+            bace_active,
+        }
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> DapResult<()> {
@@ -238,11 +371,22 @@ impl SegmentFileWriter {
         self.write_all(&SEGMENT_MAGIC)?;
         self.file.write_u16::<LittleEndian>(SEGMENT_VERSION_MAJOR)?;
         self.pos += 2;
-        self.file.write_u16::<LittleEndian>(SEGMENT_VERSION_MINOR)?;
+        // ADR 0076 — emit v1.1 when the writer is going to emit at
+        // least one BACE-wrapped page; v1.0 otherwise for byte-
+        // identical legacy output.
+        let minor = if self.bace_active {
+            crate::segment::format::SEGMENT_VERSION_MINOR_V1_1
+        } else {
+            SEGMENT_VERSION_MINOR
+        };
+        self.file.write_u16::<LittleEndian>(minor)?;
         self.pos += 2;
-        let required = FeatureFlags::COMPRESSED_PAGES
+        let mut required = FeatureFlags::COMPRESSED_PAGES
             | FeatureFlags::DICT_ENCODING
             | FeatureFlags::PAGE_CRC32;
+        if self.bace_active {
+            required |= FeatureFlags::BACE_PAGE_ENVELOPE;
+        }
         self.file.write_u64::<LittleEndian>(required)?;
         self.pos += 8;
         self.file.write_u64::<LittleEndian>(0)?; // optional flags
@@ -297,7 +441,20 @@ impl SegmentFileWriter {
             Vec::new()
         };
 
-        let (payload_bytes, compressed) = if self.options.compress {
+        // ADR 0076 §3.2 — when BACE wiring is active, wrap the
+        // compressed inner codec output in a BACE envelope using
+        // the resolved outer codec (ZSTD today; RAW opted out
+        // via resolve_bace_active). The envelope layer encodes
+        // the payload itself, so we hand it the raw inner bytes;
+        // the legacy `compress::compress` path is used only when
+        // BACE is not active.
+        let (payload_bytes, compressed) = if self.bace_active {
+            let wrapped = wrap_page_in_bace_envelope(
+                &inner_payload,
+                self.bace_wiring.as_ref().expect("bace_active set without wiring"),
+            )?;
+            (wrapped, true)
+        } else if self.options.compress {
             (compress::compress(&inner_payload)?, true)
         } else {
             (inner_payload.clone(), false)
@@ -311,6 +468,13 @@ impl SegmentFileWriter {
         let validity_offset = self.pos;
         if !validity_bytes.is_empty() {
             self.write_all(&validity_bytes)?;
+        }
+        // ADR 0076 §3.2 — per-page trailer byte for v1.1 segments
+        // (gated by `bace_active`). Not covered by the page CRC32
+        // (that would break v1.0 byte compatibility); its single-
+        // byte domain restricts tampering to visible values.
+        if self.bace_active {
+            self.write_all(&[crate::segment::format::BaceEnvelopeTag::BaceV1 as u8])?;
         }
 
         let zone = compute_zone_map(&buf);
