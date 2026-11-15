@@ -286,11 +286,13 @@ dependencies = [
 name = "bradian-relational"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "crc32fast",
  "libc",
  "parking_lot",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "zstd",

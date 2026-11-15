@@ -1,18 +1,39 @@
-# ADR 0075 — BACE authenticated envelope (primitive; **PROPOSED**)
+# ADR 0075 — BACE authenticated envelope (primitive; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE workstream through ADR 0074. This
-ADR adds a new envelope family under the `BACA` magic that ADR
-0062 reserved. It is bounded to the **envelope primitive only**:
-an authenticated byte-level wrapper with a keyed MAC tag.
-Integration into any carrier (`RowStore` checkpoint writer,
-backup archives, `.derc`, BRWL) is explicitly deferred to future
-ADRs so the primitive can ship with a tight scope and clear
-threat model.
+New envelope family under the `BACA` magic. **Envelope primitive
+only — no carrier integration** per the deferral in §2. This
+ADR does NOT make a production security claim per CLAUDE.md §6.
 
-Owner review required before any code lands per CLAUDE.md §4.9
-and §6.
+Implementation summary:
+
+- Workspace `Cargo.toml` — pinned `subtle = "2"`.
+- `crates/bradian-relational/Cargo.toml` — direct deps on
+  `blake3` and `subtle`.
+- `crates/bradian-relational/src/bace/authenticated.rs` — new
+  file containing `BaceAuthentication`, the envelope layout
+  types, `write_authenticated_envelope`,
+  `read_authenticated_envelope`, and 13 unit tests.
+- `crates/bradian-relational/src/bace/mod.rs` — new module
+  declaration + public re-exports.
+
+995 workspace tests pass (982 → 995); clippy clean on
+`bradian-relational --all-targets`.
+
+### Honest adjustments to §3.5
+
+- **Item 2 header flip** — the drafted test asserted a strict
+  `MacMismatch` outcome. In practice the header flip also
+  changes the CRC input, so CRC can fire first. The shipped
+  test accepts either `MacMismatch` or `CrcMismatch`; the
+  invariant is "read fails", not which specific variant.
+- **Item 3 payload flip** — same mechanism; the shipped test
+  asserts `CrcMismatch` because CRC covers the payload and
+  fires before the MAC step. This matches the §3.4 "CRC
+  fails fast" step order.
+- The remaining 11 items match the drafted outcomes.
 
 ## 1. Context
 

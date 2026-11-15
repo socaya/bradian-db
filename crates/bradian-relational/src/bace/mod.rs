@@ -17,6 +17,7 @@
 //! `docs/implementation/BACE_ADR_REVIEW_PACKAGE.md` for the accepted
 //! design decisions.
 
+pub mod authenticated;
 pub mod codec;
 pub mod envelope;
 pub mod policy;
@@ -35,3 +36,11 @@ pub use policy::{
     PolicyService, PolicyValue, Resolved, ScopeChain, ScopeLevel, ScopeOverrides, VetoReason,
 };
 pub use registry::{BuiltInRegistry, CodecRegistry, Negotiation};
+pub use authenticated::{
+    read_authenticated_envelope, write_authenticated_envelope,
+    AuthenticatedEnvelope, AuthenticatedEnvelopeCaps, AuthenticatedEnvelopeError,
+    AuthenticatedEnvelopeFlags, AuthenticatedEnvelopeHeader, BaceAuthentication,
+    AUTHENTICATED_ENVELOPE_HEADER_SIZE, AUTHENTICATED_ENVELOPE_MAC_SIZE,
+    AUTHENTICATED_ENVELOPE_MAGIC, AUTHENTICATED_ENVELOPE_MIN_SIZE,
+    AUTHENTICATED_ENVELOPE_TRAILER_SIZE, AUTHENTICATED_ENVELOPE_VERSION,
+};
