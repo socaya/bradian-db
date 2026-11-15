@@ -960,10 +960,39 @@ fn encode_batch_with_optional_bace(
             + crate::bace::envelope::ENVELOPE_TRAILER_SIZE,
     );
     crate::bace::envelope::write_envelope(&mut envelope, &header, &encoded)?;
-    // Compose v2 frame body: LSN + op=4 + envelope bytes.
+    // ADR 0086 §3.1 — when wiring has authentication, upgrade
+    // from opcode 4 (BACE) to opcode 5 (BACA, authenticated).
+    let (opcode, envelope) = if let Some(auth) = wiring.authentication.as_ref() {
+        let ah = crate::bace::authenticated::AuthenticatedEnvelopeHeader {
+            codec_id,
+            codec_format_version: codec.capability().format_version,
+            flags: crate::bace::authenticated::AuthenticatedEnvelopeFlags {
+                payload_is_raw: codec_id == CodecId::raw(),
+                critical: codec.capability().flags.critical,
+                ..crate::bace::authenticated::AuthenticatedEnvelopeFlags::default()
+            },
+            encoded_length,
+            decoded_length,
+        };
+        let mut auth_env = Vec::with_capacity(
+            crate::bace::authenticated::AUTHENTICATED_ENVELOPE_HEADER_SIZE
+                + encoded.len()
+                + crate::bace::authenticated::AUTHENTICATED_ENVELOPE_TRAILER_SIZE
+                + crate::bace::authenticated::AUTHENTICATED_ENVELOPE_MAC_SIZE,
+        );
+        crate::bace::authenticated::write_authenticated_envelope(
+            &mut auth_env, &ah, &encoded, auth,
+        ).map_err(|e| StoreError::Corruption(format!(
+            "BRWL BACA envelope write failed: {e}"
+        )))?;
+        (5u8, auth_env)
+    } else {
+        (4u8, envelope)
+    };
+    // Compose v2/v3 frame body: LSN + op + envelope bytes.
     let mut body = Vec::with_capacity(LSN_PLUS_OP + envelope.len());
     body.extend_from_slice(&lsn.to_le_bytes());
-    body.push(4);
+    body.push(opcode);
     body.extend_from_slice(&envelope);
     Ok(encode_frame(&body))
 }
@@ -975,9 +1004,10 @@ fn decode_mutations(
     if body.len() < 13 {
         return Err(malformed());
     }
-    // ADR 0077 — opcode dispatch.
+    // ADR 0077 + ADR 0086 — opcode dispatch.
     //   1 = single put, 2 = single delete, 3 = batch,
-    //   4 = BACE-wrapped batch body (v2, since ADR 0077).
+    //   4 = BACE-wrapped batch body (ADR 0077),
+    //   5 = BACA-wrapped batch body (ADR 0086, authenticated).
     let opcode = body[8];
     match opcode {
         1 | 2 => decode_single_mutation(opcode, body, offset),
@@ -992,6 +1022,22 @@ fn decode_mutations(
             )))?;
             let envelope_bytes = &body[9..];
             let decoded = decode_bace_wal_envelope(envelope_bytes, wiring, offset)?;
+            decode_batch_payload(&decoded, offset)
+        }
+        5 => {
+            // ADR 0086 §3.2 — BACA-wrapped batch body. Verify MAC
+            // under the wiring's BaceAuthentication before
+            // decoding.
+            let wiring = bace.ok_or_else(|| StoreError::Corruption(format!(
+                "WAL frame at byte {offset} is BACA-authenticated but RowStore has no wiring; reopen via open_with_bace",
+            )))?;
+            let auth = wiring.authentication.as_ref().ok_or_else(||
+                StoreError::Corruption(format!(
+                    "WAL frame at byte {offset} is BACA-authenticated but wiring has no authentication; supply BaceWiring::authentication",
+                ))
+            )?;
+            let envelope_bytes = &body[9..];
+            let decoded = decode_baca_wal_envelope(envelope_bytes, wiring, auth, offset)?;
             decode_batch_payload(&decoded, offset)
         }
         _ => Err(malformed()),
@@ -1108,6 +1154,50 @@ fn decode_bace_wal_envelope(
     codec.decode(env.payload, env.header.decoded_length, &mut decoded)
         .map_err(|e| StoreError::Corruption(format!(
             "WAL BACE codec decode at byte {offset} failed: {e}",
+        )))?;
+    Ok(decoded)
+}
+
+/// ADR 0086 §3.2 — decode a BACA-wrapped WAL batch body. Verifies
+/// MAC first (via `read_authenticated_envelope`), then decodes via
+/// the registered codec. Uses the same policy-service decoded-page
+/// cap as `decode_bace_wal_envelope`.
+fn decode_baca_wal_envelope(
+    envelope_bytes: &[u8],
+    wiring: &BaceWiring,
+    auth: &crate::bace::authenticated::BaceAuthentication,
+    offset: u64,
+) -> StoreResult<Vec<u8>> {
+    use crate::bace::authenticated::{
+        read_authenticated_envelope, AuthenticatedEnvelopeCaps,
+    };
+    let scope = ScopeChain::baseline_only();
+    let cap = wiring.policy_service.resolve(PolicyKey::CompressionMaxDecodedPageBytes, &scope);
+    let max_decoded_length = cap.value.as_u32().ok_or_else(|| StoreError::Corruption(
+        "policy service returned non-u32 for max_decoded_page_bytes".into(),
+    ))?;
+    let caps = AuthenticatedEnvelopeCaps {
+        max_decoded_length,
+        max_encoded_length: envelope_bytes.len() as u32,
+    };
+    let env = read_authenticated_envelope(envelope_bytes, caps, auth)
+        .map_err(|e| StoreError::Corruption(format!(
+            "WAL BACA envelope at byte {offset} failed MAC verification or decode: {e}"
+        )))?;
+    let codec = wiring.registry.codec(env.header.codec_id).ok_or(
+        StoreError::BaceCodecUnavailable { codec_id: env.header.codec_id },
+    )?;
+    if codec.capability().format_version != env.header.codec_format_version {
+        return Err(StoreError::BaceCodecFormatVersionMismatch {
+            codec_id: env.header.codec_id,
+            declared: env.header.codec_format_version,
+            build_supports: codec.capability().format_version,
+        });
+    }
+    let mut decoded = Vec::with_capacity(env.header.decoded_length as usize);
+    codec.decode(env.payload, env.header.decoded_length, &mut decoded)
+        .map_err(|e| StoreError::Corruption(format!(
+            "WAL BACA codec decode at byte {offset} failed: {e}",
         )))?;
     Ok(decoded)
 }
