@@ -42,6 +42,56 @@ pub fn encode(buf: &ColumnBuffer) -> DapResult<Vec<u8>> {
     }
 }
 
+/// ADR 0083 §3.3 — v1.4 column-dict page encoding. The dict
+/// bytes live once in the column-dict region; each page writes
+/// only (n_rows, n_dict_of_column, indices). `n_dict_of_column`
+/// is stored for cross-checking against the column-dict entry
+/// the reader loads from the region.
+pub fn encode_indices_only(buf: &ColumnBuffer) -> DapResult<Vec<u8>> {
+    match buf {
+        ColumnBuffer::DictIndex32 { indices, dict_offsets, .. } => {
+            let n_rows = indices.len() as u32;
+            let n_dict = (dict_offsets.len() - 1) as u32;
+            let mut out = Vec::with_capacity(8 + indices.len() * 4);
+            out.extend_from_slice(&n_rows.to_le_bytes());
+            out.extend_from_slice(&n_dict.to_le_bytes());
+            for idx in indices {
+                out.extend_from_slice(&idx.to_le_bytes());
+            }
+            Ok(out)
+        }
+        other => Err(DapError::unsupported(format!(
+            "dict codec (indices-only) cannot encode {:?}",
+            other.physical_type()
+        ))),
+    }
+}
+
+/// ADR 0083 §3.4 — v1.4 column-dict page decoding. Returns the
+/// indices and the declared `n_dict_of_column`; the caller must
+/// cross-check against the column-dict region's actual size.
+pub fn decode_indices_only(bytes: &[u8]) -> DapResult<(Vec<u32>, u32)> {
+    if bytes.len() < 8 {
+        return Err(DapError::corruption("dict page (indices-only) too short"));
+    }
+    let n_rows = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let n_dict = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let idx_end = 8 + n_rows * 4;
+    if bytes.len() < idx_end {
+        return Err(DapError::corruption("dict page (indices-only) truncated"));
+    }
+    if bytes.len() != idx_end {
+        return Err(DapError::corruption(
+            "dict page (indices-only) has trailing bytes",
+        ));
+    }
+    let mut indices = Vec::with_capacity(n_rows);
+    for chunk in bytes[8..idx_end].as_chunks::<4>().0.iter() {
+        indices.push(u32::from_le_bytes(*chunk));
+    }
+    Ok((indices, n_dict))
+}
+
 pub fn decode(bytes: &[u8]) -> DapResult<(Vec<u32>, Vec<u32>, Vec<u8>)> {
     if bytes.len() < 8 {
         return Err(DapError::corruption("dict page too short"));

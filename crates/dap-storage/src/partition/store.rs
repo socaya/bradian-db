@@ -293,7 +293,8 @@ impl Partition {
             watermark_ms: max_watermark,
             data_revision: data_rev,
             metadata_revision: inner.manifest.metadata_revision,
-        max_rows_per_page: None,
+            max_rows_per_page: None,
+            use_column_dict: false,
         };
         let mut writer = SegmentWriter::new(self.options.schema.clone(), writer_opts);
         let mut row_count = 0u64;
@@ -509,7 +510,8 @@ impl Partition {
             watermark_ms: watermark,
             data_revision: inner.next_data_revision,
             metadata_revision: inner.manifest.metadata_revision,
-        max_rows_per_page: None,
+            max_rows_per_page: None,
+            use_column_dict: false,
         };
         let data_rev = writer_opts.data_revision;
         inner.next_data_revision += 1;

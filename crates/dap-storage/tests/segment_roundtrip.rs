@@ -73,6 +73,7 @@ fn segment_writer_reader_roundtrip() {
             data_revision: 3,
             metadata_revision: None,
         max_rows_per_page: None,
+        use_column_dict: false,
         },
     );
     for r in &rows {

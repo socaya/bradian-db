@@ -40,6 +40,7 @@ fn opts_with_split(split: Option<usize>) -> SegmentWriterOptions {
         compress: true, dict_cardinality_threshold: 0.5,
         watermark_ms: 0, data_revision: 0, metadata_revision: None,
         max_rows_per_page: split,
+        use_column_dict: false,
     }
 }
 

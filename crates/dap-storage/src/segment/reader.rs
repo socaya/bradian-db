@@ -36,18 +36,24 @@ pub struct SegmentReader {
     bace_dictionaries: std::collections::HashMap<
         String, bradian_relational::bace::BaceDictionary,
     >,
+    /// ADR 0083 — per-column shared dictionaries parsed from the
+    /// v1.4 column-dict region. Key: column name. Value:
+    /// (dict_offsets, dict_data). Empty when the segment has no
+    /// `COLUMN_DICT` feature flag.
+    column_dicts: std::collections::HashMap<String, (Vec<u32>, Vec<u8>)>,
 }
 
 impl SegmentReader {
     pub fn open(path: &Path) -> DapResult<Self> {
         let mut file = File::open(path)?;
-        let (footer, bace_feature, _dict_feature) =
+        let (footer, bace_feature, _dict_feature, _column_dict_feature) =
             read_footer_with_features(&mut file, /*allow_bace=*/false)?;
         Ok(Self {
             file, footer,
             bace_wiring: None,
             _bace_feature_active: bace_feature,
             bace_dictionaries: std::collections::HashMap::new(),
+            column_dicts: std::collections::HashMap::new(),
         })
     }
 
@@ -62,17 +68,35 @@ impl SegmentReader {
         wiring: bradian_relational::row_store::BaceWiring,
     ) -> DapResult<Self> {
         let mut file = File::open(path)?;
-        let (footer, bace_feature, dict_feature) =
+        let (footer, bace_feature, dict_feature, column_dict_feature) =
             read_footer_with_features(&mut file, /*allow_bace=*/true)?;
+
+        // Regions, in file order: [pages][column_dict][dict_pool][footer].
+        // Read backwards from footer_start.
+        file.seek(SeekFrom::End(-8))?;
+        let footer_start = file.read_u64::<LittleEndian>()?;
+        let mut cursor = footer_start;
+
         let bace_dictionaries = if dict_feature {
-            read_dictionary_pool(&mut file)?
+            let (pool, pool_start) = read_dictionary_pool_at(&mut file, cursor)?;
+            cursor = pool_start;
+            pool
         } else {
             std::collections::HashMap::new()
         };
+        let column_dicts = if column_dict_feature {
+            let (region, region_start) = read_column_dict_region_at(&mut file, cursor)?;
+            let _ = region_start;   // cursor would continue here if more regions existed
+            region
+        } else {
+            std::collections::HashMap::new()
+        };
+
         Ok(Self {
             file, footer, bace_wiring: Some(wiring),
             _bace_feature_active: bace_feature,
             bace_dictionaries,
+            column_dicts,
         })
     }
 
@@ -254,7 +278,8 @@ impl SegmentReader {
             Bitmap::all_set(page.row_count as usize)
         };
 
-        decode_page(col, page, &inner, validity)
+        let column_dict = self.column_dicts.get(&col.name);
+        decode_page(col, page, &inner, validity, column_dict)
     }
 }
 
@@ -263,8 +288,38 @@ fn decode_page(
     page: &PageMeta,
     bytes: &[u8],
     validity: Bitmap,
+    column_dict: Option<&(Vec<u32>, Vec<u8>)>,
 ) -> DapResult<ColumnBuffer> {
     use dap_core::PhysicalType;
+
+    // ADR 0083 §3.4 — v1.4 Dictionary page. If the reader has a
+    // column-dict entry for this column, decode the page as
+    // indices-only and attach the shared dict. Cross-check the
+    // page-local n_dict_of_column against the actual dict size.
+    if let (CodecId::Dictionary, Some((dict_offsets, dict_data))) = (page.codec, column_dict) {
+        let (indices, n_dict_declared) = dict_codec::decode_indices_only(bytes)?;
+        let n_dict_actual = (dict_offsets.len() - 1) as u32;
+        if n_dict_declared != n_dict_actual {
+            return Err(DapError::corruption(format!(
+                "column {} v1.4 page declares n_dict={} but column-dict has {}",
+                col.name, n_dict_declared, n_dict_actual,
+            )));
+        }
+        for (i, idx) in indices.iter().enumerate() {
+            if *idx != u32::MAX && *idx >= n_dict_actual {
+                return Err(DapError::corruption(format!(
+                    "column {} v1.4 page row {} index {} out of range (n_dict={})",
+                    col.name, i, idx, n_dict_actual,
+                )));
+            }
+        }
+        return Ok(ColumnBuffer::DictIndex32 {
+            indices,
+            validity,
+            dict_offsets: dict_offsets.clone(),
+            dict_data: dict_data.clone(),
+        });
+    }
 
     match (page.codec, col.physical_type) {
         (CodecId::Plain, PhysicalType::I32) => Ok(ColumnBuffer::I32 {
@@ -577,16 +632,16 @@ fn concat_buffers(_col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> DapResult<Colu
     }
 }
 
-/// ADR 0076 + ADR 0079 — returns
-/// `(footer, bace_feature_active, bace_dictionary_feature_active)`.
+/// ADR 0076 + ADR 0079 + ADR 0083 — returns
+/// `(footer, bace_feature, dict_pool_feature, column_dict_feature)`.
 /// When `allow_bace` is false (legacy `SegmentReader::open`), a
-/// segment that sets any BACE feature flag is rejected with the
-/// existing unsupported-feature error. When `allow_bace` is true,
-/// the flags are accepted and surfaced for per-page decode
-/// routing + optional dictionary-pool parsing.
+/// segment that sets any BACE/column-dict feature flag is rejected
+/// with the existing unsupported-feature error. When `allow_bace`
+/// is true, flags are accepted and surfaced for per-page decode
+/// routing + optional dict-pool / column-dict region parsing.
 fn read_footer_with_features(
     file: &mut File, allow_bace: bool,
-) -> DapResult<(SegmentFooter, bool, bool)> {
+) -> DapResult<(SegmentFooter, bool, bool, bool)> {
     let file_len = file.metadata()?.len();
     if file_len < 64 + 8 {
         return Err(DapError::corruption("file too short to be a valid .derc"));
@@ -608,7 +663,7 @@ fn read_footer_with_features(
     let required = file.read_u64::<LittleEndian>()?;
     let _optional = file.read_u64::<LittleEndian>()?;
     let subset_ok = if allow_bace {
-        FeatureFlags::is_subset_supported_v1_3(required)
+        FeatureFlags::is_subset_supported_v1_4(required)
     } else {
         FeatureFlags::is_subset_supported(required)
     };
@@ -619,6 +674,7 @@ fn read_footer_with_features(
     }
     let bace_feature = (required & FeatureFlags::BACE_PAGE_ENVELOPE) != 0;
     let bace_dict_feature = (required & FeatureFlags::BACE_PAGE_DICTIONARY) != 0;
+    let column_dict_feature = (required & FeatureFlags::COLUMN_DICT) != 0;
 
     // Read footer start offset (last 8 bytes).
     file.seek(SeekFrom::End(-8))?;
@@ -642,7 +698,7 @@ fn read_footer_with_features(
     }
     let footer: SegmentFooter = bincode::deserialize(&payload)
         .map_err(|e| DapError::corruption(format!("footer decode: {e}")))?;
-    Ok((footer, bace_feature, bace_dict_feature))
+    Ok((footer, bace_feature, bace_dict_feature, column_dict_feature))
 }
 
 /// ADR 0080 §3.4 — decode a BACA envelope (authenticated BACE
@@ -728,27 +784,24 @@ fn decode_bace_v1_page_with_dict(
 /// set. The pool sits between the last page and FOOTER_MAGIC;
 /// its length is stored in the 4 bytes immediately before
 /// FOOTER_MAGIC.
-fn read_dictionary_pool(
+fn read_dictionary_pool_at(
     file: &mut File,
-) -> DapResult<std::collections::HashMap<
+    region_end: u64,
+) -> DapResult<(std::collections::HashMap<
     String, bradian_relational::bace::BaceDictionary,
->> {
-    // Re-read the footer start tail. (Reader has already done
-    // this once, but doing it again keeps the helper
-    // self-contained without threading parameters.)
-    file.seek(SeekFrom::End(-8))?;
-    let footer_start = file.read_u64::<LittleEndian>()?;
+>, u64)> {
     // Read the u32 pool length stored immediately before
-    // FOOTER_MAGIC.
-    if footer_start < 4 {
+    // `region_end` (the position of the next region toward
+    // the end of the file; for the pool, that's FOOTER_MAGIC).
+    if region_end < 4 {
         return Err(DapError::corruption("dictionary pool tail out of range"));
     }
-    file.seek(SeekFrom::Start(footer_start - 4))?;
+    file.seek(SeekFrom::Start(region_end - 4))?;
     let pool_len = file.read_u32::<LittleEndian>()? as u64;
-    if pool_len > footer_start - 4 {
+    if pool_len > region_end - 4 {
         return Err(DapError::corruption("dictionary pool length exceeds file"));
     }
-    let pool_start = footer_start - 4 - pool_len;
+    let pool_start = region_end - 4 - pool_len;
     file.seek(SeekFrom::Start(pool_start))?;
     let mut buf = vec![0u8; pool_len as usize];
     file.read_exact(&mut buf)?;
@@ -800,5 +853,97 @@ fn read_dictionary_pool(
     if cursor != buf.len() {
         return Err(DapError::corruption("dict pool trailing bytes"));
     }
-    Ok(pool)
+    Ok((pool, pool_start))
+}
+
+/// ADR 0083 §3.4 — parse the column-dict region. Called only when
+/// the segment header's `COLUMN_DICT` feature flag was set. The
+/// region sits before the dict pool (or FOOTER_MAGIC if no pool);
+/// its length is stored in the 4 bytes immediately before
+/// `region_end`.
+type ColumnDictRegion = std::collections::HashMap<String, (Vec<u32>, Vec<u8>)>;
+
+fn read_column_dict_region_at(
+    file: &mut File,
+    region_end: u64,
+) -> DapResult<(ColumnDictRegion, u64)> {
+    if region_end < 4 {
+        return Err(DapError::corruption("column-dict region tail out of range"));
+    }
+    file.seek(SeekFrom::Start(region_end - 4))?;
+    let region_len = file.read_u32::<LittleEndian>()? as u64;
+    if region_len > region_end - 4 {
+        return Err(DapError::corruption("column-dict region length exceeds file"));
+    }
+    let region_start = region_end - 4 - region_len;
+    file.seek(SeekFrom::Start(region_start))?;
+    let mut buf = vec![0u8; region_len as usize];
+    file.read_exact(&mut buf)?;
+
+    let mut cursor = 0usize;
+    if buf.len() < 4 {
+        return Err(DapError::corruption("column-dict region truncated (no count)"));
+    }
+    let count = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+    cursor += 4;
+    let mut region = std::collections::HashMap::with_capacity(count);
+    for _ in 0..count {
+        if buf.len().saturating_sub(cursor) < 4 {
+            return Err(DapError::corruption("column-dict truncated at name_len"));
+        }
+        let name_len = u32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if buf.len().saturating_sub(cursor) < name_len {
+            return Err(DapError::corruption("column-dict truncated at name"));
+        }
+        let name = std::str::from_utf8(&buf[cursor..cursor + name_len])
+            .map_err(|_| DapError::corruption("column-dict name not utf-8"))?
+            .to_string();
+        cursor += name_len;
+        if buf.len().saturating_sub(cursor) < 8 {
+            return Err(DapError::corruption("column-dict truncated at sizes"));
+        }
+        let offsets_count = u32::from_le_bytes(
+            buf[cursor..cursor + 4].try_into().unwrap(),
+        ) as usize;
+        cursor += 4;
+        let data_len = u32::from_le_bytes(
+            buf[cursor..cursor + 4].try_into().unwrap(),
+        ) as usize;
+        cursor += 4;
+        let entry_body_start = cursor;
+        if buf.len().saturating_sub(cursor) < offsets_count * 4 + data_len + 4 {
+            return Err(DapError::corruption("column-dict truncated at body"));
+        }
+        let mut dict_offsets = Vec::with_capacity(offsets_count);
+        for _ in 0..offsets_count {
+            let o = u32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap());
+            dict_offsets.push(o);
+            cursor += 4;
+        }
+        let dict_data = buf[cursor..cursor + data_len].to_vec();
+        cursor += data_len;
+        let declared_crc = u32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        let entry_body_end = cursor - 4;   // exclude the trailing u32 crc
+        let actual_crc = crc32_parts(&[&buf[entry_body_start..entry_body_end]]);
+        if actual_crc != declared_crc {
+            return Err(DapError::corruption(format!(
+                "column-dict entry for column {name}: crc mismatch \
+                 (expected {declared_crc}, got {actual_crc})",
+            )));
+        }
+        if dict_data.len()
+            != *dict_offsets.last().unwrap_or(&0) as usize
+        {
+            return Err(DapError::corruption(format!(
+                "column-dict entry for column {name}: last offset does not match data len",
+            )));
+        }
+        region.insert(name, (dict_offsets, dict_data));
+    }
+    if cursor != buf.len() {
+        return Err(DapError::corruption("column-dict region trailing bytes"));
+    }
+    Ok((region, region_start))
 }

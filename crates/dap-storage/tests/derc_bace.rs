@@ -68,6 +68,7 @@ fn write_segment(path: &std::path::Path, bace: Option<BaceWiring>) -> dap_storag
         data_revision: 0,
         metadata_revision: None,
         max_rows_per_page: None,
+        use_column_dict: false,
     };
     let mut w = match bace {
         Some(wiring) => SegmentWriter::new_with_bace(schema(), opts, wiring),

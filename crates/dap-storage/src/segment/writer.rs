@@ -40,6 +40,13 @@ pub struct SegmentWriterOptions {
     /// pre-ADR-0081 output. Dict-encoded columns always emit
     /// one page regardless (§2 non-goal).
     pub max_rows_per_page: Option<usize>,
+    /// ADR 0083 §3.3 — opt in to v1.4 column-level shared
+    /// dictionary mode. When `true` and a column lands on the
+    /// Dictionary codec, that column's dict bytes live once in
+    /// a column-dict region between the pages and the dict
+    /// pool / footer; Dictionary pages carry only indices.
+    /// `false` (default) preserves pre-ADR-0083 byte output.
+    pub use_column_dict: bool,
 }
 
 impl Default for SegmentWriterOptions {
@@ -54,6 +61,7 @@ impl Default for SegmentWriterOptions {
             data_revision: 0,
             metadata_revision: None,
             max_rows_per_page: None,
+            use_column_dict: false,
         }
     }
 }
@@ -248,6 +256,12 @@ impl SegmentWriter {
             watermark_ms: self.options.watermark_ms,
             data_revision: self.options.data_revision,
         };
+        // ADR 0083 §3.3 — v1.4 column-dict region. Written before
+        // the dict pool (if any) so the reader can walk regions
+        // from the footer backwards.
+        if w.options.use_column_dict {
+            w.write_column_dict_region()?;
+        }
         // ADR 0079 §3.1 — v1.2 segments embed per-column
         // dictionaries in a pool between the last page and the
         // footer. When no dicts are attached, this is a no-op and
@@ -506,6 +520,12 @@ struct SegmentFileWriter {
     /// pool before the footer.
     bace_dictionaries:
         std::collections::HashMap<String, bradian_relational::bace::BaceDictionary>,
+    /// ADR 0083 §3.3 — per-column shared dictionaries collected
+    /// during `write_column` when `options.use_column_dict` is
+    /// set and a column lands on the Dictionary codec. Written
+    /// once into the column-dict region after all pages. Map
+    /// value: (dict_offsets, dict_data, entry_crc32).
+    column_dicts: std::collections::BTreeMap<String, (Vec<u32>, Vec<u8>, u32)>,
 }
 
 impl SegmentFileWriter {
@@ -514,6 +534,7 @@ impl SegmentFileWriter {
             file, pos: 0, options,
             bace_wiring: None, bace_active: false,
             bace_dictionaries: std::collections::HashMap::new(),
+            column_dicts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -538,6 +559,7 @@ impl SegmentFileWriter {
             bace_wiring: Some(wiring),
             bace_active,
             bace_dictionaries,
+            column_dicts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -563,7 +585,12 @@ impl SegmentFileWriter {
             && self.bace_wiring.as_ref()
                 .and_then(|w| w.authentication.as_ref())
                 .is_some();
-        let minor = if v1_3 {
+        // ADR 0083 — v1.4 wins over earlier minors if operator
+        // opted in. Independent of BACE: column_dict is orthogonal.
+        let v1_4 = self.options.use_column_dict;
+        let minor = if v1_4 {
+            crate::segment::format::SEGMENT_VERSION_MINOR_V1_4
+        } else if v1_3 {
             crate::segment::format::SEGMENT_VERSION_MINOR_V1_3
         } else if v1_2 {
             crate::segment::format::SEGMENT_VERSION_MINOR_V1_2
@@ -585,6 +612,9 @@ impl SegmentFileWriter {
         }
         if v1_3 {
             required |= FeatureFlags::BACE_PAGE_AUTHENTICATED;
+        }
+        if v1_4 {
+            required |= FeatureFlags::COLUMN_DICT;
         }
         self.file.write_u64::<LittleEndian>(required)?;
         self.pos += 8;
@@ -650,6 +680,30 @@ impl SegmentFileWriter {
         } else {
             buf
         };
+
+        // ADR 0083 §3.3 — when the operator opted into v1.4
+        // column-dict mode AND this column landed on the Dictionary
+        // codec, capture the (dict_offsets, dict_data) pair ONCE
+        // into column_dicts. Subsequent slices produce the same
+        // bytes (ADR 0082 §3.1), so pages can be encoded as
+        // indices-only.
+        let column_dict_active = self.options.use_column_dict
+            && matches!(codec, PageCodec::Dictionary)
+            && matches!(&effective_buf, ColumnBuffer::DictIndex32 { .. });
+        if column_dict_active {
+            if let ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } = &effective_buf {
+                let mut offset_bytes = Vec::with_capacity(dict_offsets.len() * 4);
+                for o in dict_offsets {
+                    offset_bytes.extend_from_slice(&o.to_le_bytes());
+                }
+                let entry_crc = crc32_parts(&[&offset_bytes, dict_data]);
+                self.column_dicts.insert(
+                    name.clone(),
+                    (dict_offsets.clone(), dict_data.clone(), entry_crc),
+                );
+            }
+        }
+
         let total_rows = effective_buf.len();
         let page_size = match self.options.max_rows_per_page {
             Some(limit) if limit > 0 && limit < total_rows => limit,
@@ -667,7 +721,7 @@ impl SegmentFileWriter {
                 effective_buf.slice(row_cursor, slice_end)
             };
             let (page_meta, page_zone) = self.emit_one_page(
-                &name, col, page_buf, codec,
+                &name, col, page_buf, codec, column_dict_active,
             )?;
             merged_zone = merged_zone.merge(&page_zone);
             pages.push(page_meta);
@@ -688,8 +742,15 @@ impl SegmentFileWriter {
         col: &dap_core::Column,
         buf: ColumnBuffer,
         codec: PageCodec,
+        column_dict_active: bool,
     ) -> DapResult<(PageMeta, ZoneMap)> {
-        let (inner_payload, row_count) = encode_page(&buf, codec)?;
+        let (inner_payload, row_count) = if column_dict_active {
+            // ADR 0083 §3.3 — Dictionary page carries only indices.
+            let bytes = crate::codec::dict::encode_indices_only(&buf)?;
+            (bytes, buf.len() as u32)
+        } else {
+            encode_page(&buf, codec)?
+        };
         // Writer policy: for nullable columns we always write the validity bitmap. For
         // non-nullable columns we omit it entirely (validity_len = 0). CRC must cover exactly
         // the bytes the reader will see on disk.
@@ -796,6 +857,60 @@ impl SegmentFileWriter {
     /// (NOT including the u32 itself). Reader finds the pool by
     /// seeking `footer_start - 4` for the length and
     /// `footer_start - 4 - pool_len` for the pool start.
+    /// ADR 0083 §3.3 — write the column-dict region between the
+    /// last page and the dict pool / footer. Followed by a u32
+    /// region length so the reader finds it by seeking backwards
+    /// from the dict pool / footer.
+    ///
+    /// Region layout:
+    ///   u32 entry_count
+    ///   N × (u32 name_len + name_bytes
+    ///       + u32 dict_offsets_count
+    ///       + u32 dict_data_len
+    ///       + dict_offsets_count × u32 offset
+    ///       + dict_data_bytes
+    ///       + u32 entry_crc32)
+    ///
+    /// After the region, a u32 holds the region length in bytes
+    /// (NOT including the trailing u32 itself). Writing an empty
+    /// region (count=0) when `use_column_dict` is set but no
+    /// column actually used Dictionary coding is intentional: the
+    /// reader sees the flag and parses count=0.
+    fn write_column_dict_region(&mut self) -> DapResult<()> {
+        let region_start = self.pos;
+        let count = self.column_dicts.len() as u32;
+        self.file.write_u32::<LittleEndian>(count)?;
+        self.pos += 4;
+        // Clone entries up front to release the borrow on
+        // `self.column_dicts` for the mutable `write_all` calls.
+        // BTreeMap already gives deterministic name ordering.
+        let entries: Vec<(String, Vec<u32>, Vec<u8>, u32)> = self.column_dicts
+            .iter()
+            .map(|(k, (o, d, c))| (k.clone(), o.clone(), d.clone(), *c))
+            .collect();
+        for (name, offsets, data, entry_crc) in &entries {
+            let name_bytes = name.as_bytes();
+            self.file.write_u32::<LittleEndian>(name_bytes.len() as u32)?;
+            self.pos += 4;
+            self.write_all(name_bytes)?;
+            self.file.write_u32::<LittleEndian>(offsets.len() as u32)?;
+            self.pos += 4;
+            self.file.write_u32::<LittleEndian>(data.len() as u32)?;
+            self.pos += 4;
+            for o in offsets {
+                self.file.write_u32::<LittleEndian>(*o)?;
+                self.pos += 4;
+            }
+            self.write_all(data)?;
+            self.file.write_u32::<LittleEndian>(*entry_crc)?;
+            self.pos += 4;
+        }
+        let region_len = (self.pos - region_start) as u32;
+        self.file.write_u32::<LittleEndian>(region_len)?;
+        self.pos += 4;
+        Ok(())
+    }
+
     fn write_dictionary_pool(&mut self) -> DapResult<()> {
         let pool_start = self.pos;
         let count = self.bace_dictionaries.len() as u32;

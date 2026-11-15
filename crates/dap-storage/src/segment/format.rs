@@ -22,6 +22,13 @@ pub const SEGMENT_VERSION_MINOR_V1_2: u16 = 2;
 /// v1.1 and v1.2 readers reject v1.3 via the feature-flag
 /// superset check.
 pub const SEGMENT_VERSION_MINOR_V1_3: u16 = 3;
+/// ADR 0083 — writer emits minor=4 when any column uses the new
+/// column-level shared dictionary shape (dict bytes stored once in
+/// a column-dict region between the pages and the footer; each
+/// Dictionary page carries only indices). v1.0 through v1.3
+/// readers reject v1.4 segments via the feature-flag superset
+/// check.
+pub const SEGMENT_VERSION_MINOR_V1_4: u16 = 4;
 
 /// Required feature flags (bit positions).
 #[derive(Clone, Copy, Debug)]
@@ -50,6 +57,14 @@ impl FeatureFlags {
     /// reserved). v1.0/v1.1/v1.2 readers reject v1.3 via the
     /// feature-flag superset check.
     pub const BACE_PAGE_AUTHENTICATED: u64 = 1 << 7;
+    /// ADR 0083 — v1.4. Segment carries a per-column shared
+    /// dictionary region before the dictionary pool (if any) and
+    /// before the footer. Each entry stores the full
+    /// (dict_offsets, dict_data) pair plus a CRC32; Dictionary-
+    /// coded pages for these columns carry only indices. v1.0
+    /// through v1.3 readers reject v1.4 segments via the feature-
+    /// flag superset check.
+    pub const COLUMN_DICT: u64 = 1 << 8;
 
     pub const ALL_SUPPORTED_V1: u64 =
         Self::COMPRESSED_PAGES | Self::DICT_ENCODING | Self::PAGE_CRC32;
@@ -65,6 +80,10 @@ impl FeatureFlags {
     /// ADR 0080 — the superset a v1.3 reader can parse.
     pub const ALL_SUPPORTED_V1_3: u64 =
         Self::ALL_SUPPORTED_V1_2 | Self::BACE_PAGE_AUTHENTICATED;
+
+    /// ADR 0083 — the superset a v1.4 reader can parse.
+    pub const ALL_SUPPORTED_V1_4: u64 =
+        Self::ALL_SUPPORTED_V1_3 | Self::COLUMN_DICT;
 
     pub fn is_subset_supported(required: u64) -> bool {
         required & !Self::ALL_SUPPORTED_V1 == 0
@@ -87,6 +106,12 @@ impl FeatureFlags {
     /// plus the new `BACE_PAGE_AUTHENTICATED` bit.
     pub fn is_subset_supported_v1_3(required: u64) -> bool {
         required & !Self::ALL_SUPPORTED_V1_3 == 0
+    }
+
+    /// ADR 0083 — v1.4 reader's superset check. Accepts v1.3 bits
+    /// plus the new `COLUMN_DICT` bit.
+    pub fn is_subset_supported_v1_4(required: u64) -> bool {
+        required & !Self::ALL_SUPPORTED_V1_4 == 0
     }
 }
 
