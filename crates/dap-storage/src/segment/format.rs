@@ -16,6 +16,12 @@ pub const SEGMENT_VERSION_MINOR_V1_1: u16 = 1;
 /// embedded dictionary pool entry. v1.0 and v1.1 readers reject
 /// v1.2 segments via the feature-flag superset check.
 pub const SEGMENT_VERSION_MINOR_V1_2: u16 = 2;
+/// ADR 0080 — writer emits minor=3 when BaceWiring.authentication
+/// is set and non-dict BACE pages are produced. The segment emits
+/// BACA envelopes (trailer 2) instead of BACE (trailer 1). v1.0,
+/// v1.1 and v1.2 readers reject v1.3 via the feature-flag
+/// superset check.
+pub const SEGMENT_VERSION_MINOR_V1_3: u16 = 3;
 
 /// Required feature flags (bit positions).
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +44,12 @@ impl FeatureFlags {
     /// readers reject segments with this bit set via their
     /// respective `is_subset_supported*` checks.
     pub const BACE_PAGE_DICTIONARY: u64 = 1 << 6;
+    /// ADR 0080 — v1.3. Segment's non-dict BACE pages are
+    /// authenticated (BACA envelopes) using an operator-held
+    /// 32-byte key. Pages use trailer byte `2` (previously
+    /// reserved). v1.0/v1.1/v1.2 readers reject v1.3 via the
+    /// feature-flag superset check.
+    pub const BACE_PAGE_AUTHENTICATED: u64 = 1 << 7;
 
     pub const ALL_SUPPORTED_V1: u64 =
         Self::COMPRESSED_PAGES | Self::DICT_ENCODING | Self::PAGE_CRC32;
@@ -49,6 +61,10 @@ impl FeatureFlags {
     /// ADR 0079 — the superset a v1.2 reader can parse.
     pub const ALL_SUPPORTED_V1_2: u64 =
         Self::ALL_SUPPORTED_V1_1 | Self::BACE_PAGE_DICTIONARY;
+
+    /// ADR 0080 — the superset a v1.3 reader can parse.
+    pub const ALL_SUPPORTED_V1_3: u64 =
+        Self::ALL_SUPPORTED_V1_2 | Self::BACE_PAGE_AUTHENTICATED;
 
     pub fn is_subset_supported(required: u64) -> bool {
         required & !Self::ALL_SUPPORTED_V1 == 0
@@ -65,6 +81,12 @@ impl FeatureFlags {
     /// plus the new `BACE_PAGE_DICTIONARY` bit.
     pub fn is_subset_supported_v1_2(required: u64) -> bool {
         required & !Self::ALL_SUPPORTED_V1_2 == 0
+    }
+
+    /// ADR 0080 — v1.3 reader's superset check. Accepts v1.2 bits
+    /// plus the new `BACE_PAGE_AUTHENTICATED` bit.
+    pub fn is_subset_supported_v1_3(required: u64) -> bool {
+        required & !Self::ALL_SUPPORTED_V1_3 == 0
     }
 }
 
@@ -86,8 +108,11 @@ pub enum BaceEnvelopeTag {
     None = 0,
     /// BACE v1 envelope wrapping the inner codec output.
     BaceV1 = 1,
-    /// Reserved for BACA (ADR 0075). Not produced by ADR 0076.
-    BacaV1Reserved = 2,
+    /// ADR 0080 — BACA v1 envelope (authenticated BACE variant)
+    /// wrapping the inner codec output. The reader verifies the
+    /// MAC against the wiring's `BaceAuthentication` before
+    /// decoding.
+    BacaV1 = 2,
     /// ADR 0079 — BACE v1 envelope whose payload was compressed
     /// against this column's embedded dictionary. The reader
     /// resolves the dictionary from the segment's dictionary

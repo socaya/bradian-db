@@ -1,18 +1,38 @@
-# ADR 0080 — BACA carrier integration for `.derc` (implementation; **PROPOSED**)
+# ADR 0080 — BACA carrier integration for `.derc` (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with
+**explicit sign-off on the §10 threat-model + evidence table**
+(not a defensive accept). The ADR ships a narrow local
+integrity primitive reachable from the `.derc` carrier; it is
+NOT a full production security feature.
 
-**This ADR touches security surface.** Per CLAUDE.md §6,
-"every production security claim needs evidence of isolation,
-revocation, audit integrity, key rotation, backup protection
-and incident response." This ADR does NOT pretend to meet all
-six. §10 enumerates what IS shipped and what remains deferred;
-**owner sign-off on §10 is required before acceptance**.
+Implementation summary:
 
-The ADR adds authenticated-envelope (BACA) write + read paths
-to the `.derc` carrier that ADR 0076 and ADR 0079 already
-wrap in BACE envelopes. It does NOT add BACA to BRWL, backup,
-RowStore, or any other carrier — those stay in future ADRs.
+- `crates/bradian-relational/src/row_store.rs` —
+  `BaceWiring::authentication: Option<BaceAuthentication>`
+  (new field). All 14 existing `BaceWiring { ... }`
+  construction sites across the workspace updated to the
+  new field with `None`.
+- `crates/dap-storage/src/segment/format.rs` —
+  `SEGMENT_VERSION_MINOR_V1_3 = 3`, `BACE_PAGE_AUTHENTICATED
+  = 1 << 7`, `ALL_SUPPORTED_V1_3`, `is_subset_supported_v1_3`,
+  `BaceEnvelopeTag::BacaV1 = 2` (activated from `BacaV1Reserved`).
+- `crates/dap-storage/src/segment/writer.rs` — four-way BACE
+  write-path dispatch: dict (ADR 0079 trailer 3, ignores auth),
+  BACE + auth (ADR 0080 trailer 2 = BACA), BACE no auth (ADR
+  0076 trailer 1), legacy. `wrap_page_in_baca_envelope` helper
+  using `bace::authenticated::write_authenticated_envelope`.
+- `crates/dap-storage/src/segment/reader.rs` — v1.3 feature-
+  flag superset accepted; trailer 2 dispatches to
+  `decode_baca_page` using
+  `bace::authenticated::read_authenticated_envelope`. Missing
+  wiring, missing authentication, and MAC mismatch all fail
+  closed with specific error messages.
+- `crates/dap-storage/tests/derc_baca.rs` — 10 §3.5
+  integration tests.
+
+1046 workspace tests pass (1036 → 1046); clippy clean on
+`cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 ## 1. Context
 

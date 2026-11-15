@@ -197,10 +197,27 @@ impl SegmentReader {
                     )))?
             }
             2 => {
-                return Err(DapError::unsupported(format!(
-                    "page in column {} is BACA-wrapped (reserved for ADR 0075 carrier integration); not supported by ADR 0076 reader",
-                    col.name,
-                )));
+                // ADR 0080 §3.4 — BACA-wrapped page. Verify MAC
+                // under the wiring's BaceAuthentication before
+                // decoding. Fail closed if authentication is
+                // absent or verification fails.
+                let wiring = self.bace_wiring.as_ref().ok_or_else(|| {
+                    DapError::unsupported(format!(
+                        "page in column {} is BACA-authenticated but SegmentReader has no wiring; use SegmentReader::open_with_bace",
+                        col.name,
+                    ))
+                })?;
+                let auth = wiring.authentication.as_ref().ok_or_else(|| {
+                    DapError::unsupported(format!(
+                        "page in column {} is BACA-authenticated but BaceWiring has no authentication; supply BaceWiring::authentication",
+                        col.name,
+                    ))
+                })?;
+                decode_baca_page(&payload, page.uncompressed_len, wiring, auth)
+                    .map_err(|e| DapError::corruption(format!(
+                        "BACA MAC verification failed on column {} (wrong key or tampered segment): {e}",
+                        col.name,
+                    )))?
             }
             3 => {
                 // ADR 0079 §3.3 — BACE envelope whose payload was
@@ -390,7 +407,7 @@ fn read_footer_with_features(
     let required = file.read_u64::<LittleEndian>()?;
     let _optional = file.read_u64::<LittleEndian>()?;
     let subset_ok = if allow_bace {
-        FeatureFlags::is_subset_supported_v1_2(required)
+        FeatureFlags::is_subset_supported_v1_3(required)
     } else {
         FeatureFlags::is_subset_supported(required)
     };
@@ -425,6 +442,54 @@ fn read_footer_with_features(
     let footer: SegmentFooter = bincode::deserialize(&payload)
         .map_err(|e| DapError::corruption(format!("footer decode: {e}")))?;
     Ok((footer, bace_feature, bace_dict_feature))
+}
+
+/// ADR 0080 §3.4 — decode a BACA envelope (authenticated BACE
+/// variant). Verifies MAC under the supplied
+/// `BaceAuthentication` before decoding. Returns the inner codec
+/// output (same shape as the ADR 0076 non-auth BACE decode).
+fn decode_baca_page(
+    payload: &[u8],
+    uncompressed_len: u32,
+    wiring: &bradian_relational::row_store::BaceWiring,
+    auth: &bradian_relational::bace::BaceAuthentication,
+) -> Result<Vec<u8>, String> {
+    use bradian_relational::bace::authenticated::{
+        read_authenticated_envelope, AuthenticatedEnvelopeCaps,
+    };
+    use bradian_relational::bace::policy::{PolicyKey, ScopeChain};
+
+    let scope = ScopeChain::baseline_only();
+    let cap = wiring.policy_service.resolve(PolicyKey::CompressionMaxDecodedPageBytes, &scope);
+    let max_decoded = cap.value.as_u32().ok_or_else(|| {
+        "policy service returned non-u32 for max_decoded_page_bytes".to_string()
+    })?;
+    let caps = AuthenticatedEnvelopeCaps {
+        max_decoded_length: max_decoded,
+        max_encoded_length: payload.len() as u32,
+    };
+    let env = read_authenticated_envelope(payload, caps, auth)
+        .map_err(|e| e.to_string())?;
+    if env.header.decoded_length != uncompressed_len {
+        return Err(format!(
+            "BACA envelope decoded_length {} disagrees with page uncompressed_len {}",
+            env.header.decoded_length, uncompressed_len,
+        ));
+    }
+    let codec = wiring.registry.codec(env.header.codec_id).ok_or_else(|| {
+        format!("BACA codec {:?} not registered in this build", env.header.codec_id)
+    })?;
+    if codec.capability().format_version != env.header.codec_format_version {
+        return Err(format!(
+            "BACA codec {:?} format_version {} disagrees with build {}",
+            env.header.codec_id, env.header.codec_format_version,
+            codec.capability().format_version,
+        ));
+    }
+    let mut out = Vec::with_capacity(uncompressed_len as usize);
+    codec.decode(env.payload, uncompressed_len, &mut out)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 /// ADR 0079 §3.3 — decode a BACE envelope whose payload was

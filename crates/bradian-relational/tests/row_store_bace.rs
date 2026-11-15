@@ -27,6 +27,7 @@ fn wiring_default() -> BaceWiring {
             BuiltInRegistry::new(),
         )),
         registry: Arc::new(BuiltInRegistry::new()),
+        authentication: None,
     }
 }
 
@@ -108,6 +109,7 @@ fn wiring_with_profile(profile: CompressionProfile) -> BaceWiring {
             BuiltInRegistry::new(),
         )),
         registry: Arc::new(BuiltInRegistry::new()),
+        authentication: None,
     }
 }
 
@@ -205,6 +207,7 @@ fn checkpoint_fails_closed_when_allowed_codec_set_contains_only_unregistered_ids
             BuiltInRegistry::new(),
         )),
         registry: Arc::new(BuiltInRegistry::new()),
+        authentication: None,
     };
     let s = RowStore::open_with_bace(dir.path(), StorageLimits::default(), wiring).unwrap();
     s.put(b"k", b"v").unwrap();
@@ -392,6 +395,7 @@ fn decoded_length_above_policy_cap_fails_closed_before_allocation() {
             BuiltInRegistry::new(),
         )),
         registry: Arc::new(BuiltInRegistry::new()),
+        authentication: None,
     };
     // Note: the policy's clamp forces max_decoded_page_bytes to the
     // declared minimum (4096). A 1024-byte payload fits under that.
@@ -486,6 +490,7 @@ fn checkpoint_failure_under_bace_leaves_prior_generation_authoritative() {
             baseline, BuiltInRegistry::new(),
         )),
         registry: Arc::new(BuiltInRegistry::new()),
+        authentication: None,
     };
     let s = RowStore::open_with_bace(dir.path(), StorageLimits::default(), broken).unwrap();
     // Add a row to force a non-trivial next checkpoint.
@@ -610,6 +615,7 @@ fn wiring_zstd_balanced() -> BaceWiring {
             BuiltInRegistry::new(),
         )),
         registry: Arc::new(BuiltInRegistry::new()),
+        authentication: None,
     }
 }
 

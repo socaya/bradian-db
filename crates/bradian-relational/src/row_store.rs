@@ -56,6 +56,13 @@ use crate::page::PageFlags;
 pub struct BaceWiring {
     pub policy_service: Arc<dyn PolicyService + Send + Sync>,
     pub registry: Arc<dyn CodecRegistry + Send + Sync>,
+    /// ADR 0080 — operator-held authentication key for BACA
+    /// envelopes. Default `None` preserves every pre-ADR-0080
+    /// call site. When `Some(_)`, carriers that opt in (`.derc`
+    /// v1.3) emit BACA envelopes instead of BACE envelopes on
+    /// their non-dict pages. The key is NEVER serialized to disk
+    /// by any ADR 0060–0080 code path.
+    pub authentication: Option<crate::bace::BaceAuthentication>,
 }
 
 impl std::fmt::Debug for BaceWiring {

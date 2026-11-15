@@ -345,6 +345,63 @@ fn wrap_page_in_bace_envelope(
     Ok(buf)
 }
 
+/// ADR 0080 §3.3 — encode `inner_payload` via the wiring's
+/// resolved outer codec (ZSTD today), then wrap the output in a
+/// BACA v1 envelope with the operator-held authentication key.
+/// The MAC covers the authenticated envelope header + the
+/// encoded payload (ADR 0075). `codec_id` names ZSTD so the
+/// reader can decode after MAC verification.
+fn wrap_page_in_baca_envelope(
+    inner_payload: &[u8],
+    wiring: &bradian_relational::row_store::BaceWiring,
+    auth: &bradian_relational::bace::BaceAuthentication,
+) -> DapResult<Vec<u8>> {
+    use bradian_relational::bace::authenticated::{
+        write_authenticated_envelope, AuthenticatedEnvelopeFlags,
+        AuthenticatedEnvelopeHeader,
+    };
+    use bradian_relational::bace::codec::raw::RAW_ID;
+    use bradian_relational::bace::codec::CodecId;
+    use bradian_relational::bace::policy::{PolicyKey, ScopeChain};
+
+    let scope = ScopeChain::baseline_only();
+    let allowed = wiring.policy_service.resolve(PolicyKey::CompressionAllowedCodecs, &scope);
+    let allowed = allowed.value.as_codec_set().ok_or_else(|| DapError::corruption(
+        "BACE wiring policy service returned non-codec-set for allowed_codecs",
+    ))?;
+    let mut chosen: Option<CodecId> = None;
+    for id in allowed {
+        if *id != RAW_ID && wiring.registry.codec(*id).is_some() {
+            chosen = Some(*id);
+            break;
+        }
+    }
+    let chosen = chosen.ok_or_else(|| DapError::corruption(
+        "BACE wiring has no non-RAW codec available for .derc BACA wrapping",
+    ))?;
+    let codec = wiring.registry.codec(chosen).expect("registry lookup just succeeded");
+    let mut encoded = Vec::with_capacity(inner_payload.len());
+    codec.encode(inner_payload, &mut encoded).map_err(|e|
+        DapError::corruption(format!("BACA codec encode failed: {e}")),
+    )?;
+    let header = AuthenticatedEnvelopeHeader {
+        codec_id: chosen,
+        codec_format_version: codec.capability().format_version,
+        flags: AuthenticatedEnvelopeFlags {
+            payload_is_raw: false,
+            critical: codec.capability().flags.critical,
+            ..Default::default()
+        },
+        encoded_length: encoded.len() as u32,
+        decoded_length: inner_payload.len() as u32,
+    };
+    let mut buf = Vec::with_capacity(encoded.len() + 52);
+    write_authenticated_envelope(&mut buf, &header, &encoded, auth).map_err(|e|
+        DapError::corruption(format!("BACA envelope write failed: {e}")),
+    )?;
+    Ok(buf)
+}
+
 /// ADR 0079 §3.3 — encode `inner_payload` with the supplied BACE
 /// dictionary (via ADR 0078's `encode_zstd_with_dictionary`) and
 /// wrap the result in a BACE v1 envelope with `codec_id = ZSTD_ID`.
@@ -466,14 +523,21 @@ impl SegmentFileWriter {
         self.write_all(&SEGMENT_MAGIC)?;
         self.file.write_u16::<LittleEndian>(SEGMENT_VERSION_MAJOR)?;
         self.pos += 2;
-        // ADR 0076 + ADR 0079 — minor version & feature flag set
-        // based on what the writer will actually emit:
-        //   v1.0 (no BACE) → minor 0, no feature bits
-        //   v1.1 (BACE no-dict) → minor 1, BACE_PAGE_ENVELOPE
-        //   v1.2 (BACE + at least one dict-equipped column) →
-        //     minor 2, BACE_PAGE_ENVELOPE + BACE_PAGE_DICTIONARY
+        // ADR 0076 + ADR 0079 + ADR 0080 — minor version & feature
+        // flags based on what the writer will actually emit:
+        //   v1.0 — no BACE
+        //   v1.1 — BACE no-dict no-auth
+        //   v1.2 — BACE + dict (auth ignored on dict path)
+        //   v1.3 — BACE + auth (no dict-aware pages)
         let v1_2 = self.bace_active && !self.bace_dictionaries.is_empty();
-        let minor = if v1_2 {
+        let v1_3 = self.bace_active
+            && !v1_2
+            && self.bace_wiring.as_ref()
+                .and_then(|w| w.authentication.as_ref())
+                .is_some();
+        let minor = if v1_3 {
+            crate::segment::format::SEGMENT_VERSION_MINOR_V1_3
+        } else if v1_2 {
             crate::segment::format::SEGMENT_VERSION_MINOR_V1_2
         } else if self.bace_active {
             crate::segment::format::SEGMENT_VERSION_MINOR_V1_1
@@ -490,6 +554,9 @@ impl SegmentFileWriter {
         }
         if v1_2 {
             required |= FeatureFlags::BACE_PAGE_DICTIONARY;
+        }
+        if v1_3 {
+            required |= FeatureFlags::BACE_PAGE_AUTHENTICATED;
         }
         self.file.write_u64::<LittleEndian>(required)?;
         self.pos += 8;
@@ -545,22 +612,24 @@ impl SegmentFileWriter {
             Vec::new()
         };
 
-        // ADR 0076 + ADR 0079 — three BACE write paths:
-        //   dict-equipped column → ADR 0079 trailer=3 path
-        //   plain BACE column    → ADR 0076 trailer=1 path
+        // ADR 0076 + ADR 0079 + ADR 0080 — four BACE write paths:
+        //   dict-equipped column → ADR 0079 trailer=3 (dict ignores auth)
+        //   plain BACE + auth    → ADR 0080 trailer=2 (BACA)
+        //   plain BACE no auth   → ADR 0076 trailer=1 (BACE)
         //   no BACE              → legacy v1.0 path, no trailer
         let dict_for_column = if self.bace_active {
             self.bace_dictionaries.get(&name).cloned()
         } else {
             None
         };
+        let wiring_opt = self.bace_wiring.as_ref();
         let (payload_bytes, compressed, trailer_tag) = if let Some(dict) = &dict_for_column {
-            // ADR 0079 — dict-aware encode via ADR 0078 helper;
-            // then wrap in a BACE envelope so the carrier format
-            // is uniform with the non-dict path.
+            // ADR 0079 — dict-aware encode. §2 non-goal: dict + BACA
+            // is out of scope for ADR 0080; dict pages stay trailer 3
+            // even when wiring.authentication is set.
             let wrapped = wrap_page_in_bace_envelope_with_dict(
                 &inner_payload,
-                self.bace_wiring.as_ref().expect("bace_active set without wiring"),
+                wiring_opt.expect("bace_active set without wiring"),
                 dict,
             )?;
             (
@@ -568,14 +637,25 @@ impl SegmentFileWriter {
                 Some(crate::segment::format::BaceEnvelopeTag::BaceV1WithDict as u8),
             )
         } else if self.bace_active {
-            let wrapped = wrap_page_in_bace_envelope(
-                &inner_payload,
-                self.bace_wiring.as_ref().expect("bace_active set without wiring"),
-            )?;
-            (
-                wrapped, true,
-                Some(crate::segment::format::BaceEnvelopeTag::BaceV1 as u8),
-            )
+            let wiring = wiring_opt.expect("bace_active set without wiring");
+            if let Some(auth) = wiring.authentication.as_ref() {
+                // ADR 0080 — BACA envelope wrapping the inner codec
+                // output; MAC verified at read time.
+                let wrapped = wrap_page_in_baca_envelope(
+                    &inner_payload, wiring, auth,
+                )?;
+                (
+                    wrapped, true,
+                    Some(crate::segment::format::BaceEnvelopeTag::BacaV1 as u8),
+                )
+            } else {
+                // ADR 0076 — unauthenticated BACE envelope.
+                let wrapped = wrap_page_in_bace_envelope(&inner_payload, wiring)?;
+                (
+                    wrapped, true,
+                    Some(crate::segment::format::BaceEnvelopeTag::BaceV1 as u8),
+                )
+            }
         } else if self.options.compress {
             (compress::compress(&inner_payload)?, true, None)
         } else {
