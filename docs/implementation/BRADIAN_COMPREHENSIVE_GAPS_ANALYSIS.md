@@ -387,7 +387,7 @@ infrastructure. Each is a single vertical slice.
 |---|---|
 | `DomainSqlEngine::open_with_limits` wrapper | Follow-up to Slice L; thread `MultiTableStore::open_with_limits` + `CatalogLimits` through the SQL frontend. |
 | Observational `resource_usage()` aggregator | Report combined counts across catalog + domain + MVCC. No admission; operator diagnostics only. |
-| Expand fault-recovery matrix | Lock-file deletion mid-session, WAL header-only-no-body, parallel-open race under the existing lock. |
+| Expand fault-recovery matrix | **Shipped** 2026-11-15 via `crates/bradian-relational/tests/fault_recovery_extension.rs`: parallel-open race (2 tests), WAL header-only + body truncation (2 tests), lock-file deletion POSIX-foot-gun honest boundary (1 test). |
 | Range `ORDER BY` positive corpus | Only possible if we accept range predicates; today they're correctly rejected. So this is **not** achievable — flagged honestly in `BRADIAN_SQL_SUBSET.md` §14. |
 | Cross-engine isolation proofs | Additional citations in `BRADIAN_ISOLATION_LEVELS.md` from `durable_mvcc` and `history_sql` schedules. |
 
