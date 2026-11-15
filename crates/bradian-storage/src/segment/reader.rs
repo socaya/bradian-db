@@ -254,6 +254,21 @@ impl SegmentReader {
         // `bace_tag == 0`: legacy path.
         // `bace_tag == 2`: BACA reserved, unsupported.
         // `bace_tag >= 3`: corruption.
+        // ADR 0092 §2 — strict-authenticated mode: when the
+        // wiring is strict + has auth, reject trailers 0 and 1
+        // (unauthenticated BACE / legacy v1.0) in favor of
+        // trailer 2 (BACA). Trailer 3 (BACE-with-dict) remains
+        // accepted because it has no BACA alternative today.
+        let strict_auth = self.bace_wiring.as_ref().is_some_and(|w| {
+            w.strict_authenticated && w.authentication.is_some()
+        });
+        if strict_auth && self._bace_feature_active && (bace_tag == 0 || bace_tag == 1) {
+            return Err(BradianError::corruption(format!(
+                "strict mode: .brcs trailer {bace_tag} rejected on column {} under authenticated wiring (ADR 0092)",
+                col.name,
+            )));
+        }
+
         let inner = match bace_tag {
             0 => {
                 if page.compressed {

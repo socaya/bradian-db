@@ -1022,13 +1022,17 @@ fn decode_mutations(
         1 | 2 => decode_single_mutation(opcode, body, offset),
         3 => decode_batch_payload(&body[9..], offset),
         4 => {
-            // ADR 0077 §3.3 — BACE-wrapped batch body. The payload
-            // at body[9..] is a BACE envelope whose decoded bytes
-            // are the same count+records layout as a v1 batch
-            // payload-after-opcode.
+            // ADR 0077 §3.3 — BACE-wrapped batch body.
             let wiring = bace.ok_or_else(|| StoreError::Corruption(format!(
                 "WAL frame at byte {offset} is BACE-wrapped but RowStore has no wiring; reopen via open_with_bace",
             )))?;
+            // ADR 0092 §2 — strict rejects opcode 4; opcode 5 (BACA)
+            // is the authenticated alternative.
+            if wiring.strict_authenticated && wiring.authentication.is_some() {
+                return Err(StoreError::Corruption(format!(
+                    "strict mode: WAL frame at byte {offset} is opcode 4 (BACE batch); opcode 5 (BACA) required under authenticated wiring (ADR 0092)",
+                )));
+            }
             let envelope_bytes = &body[9..];
             let decoded = decode_bace_wal_envelope(envelope_bytes, wiring, offset)?;
             decode_batch_payload(&decoded, offset)
@@ -1351,6 +1355,13 @@ pub(crate) fn decode_data_page_payload(
         return Ok(decoded);
     }
     // Default BACE path (ADR 0065).
+    // ADR 0092 §2 — strict rejects bit-0 BACE pages; bit-1 (BACA)
+    // is the authenticated alternative.
+    if w.strict_authenticated && w.authentication.is_some() {
+        return Err(StoreError::Corruption(format!(
+            "strict mode: BRPG page {page_id} has bit-0 (BACE); bit-1 (BACA) required under authenticated wiring (ADR 0092)",
+        )));
+    }
     let caps = crate::bace::envelope::EnvelopeCaps {
         max_decoded_length,
         max_encoded_length: PAGE_SIZE as u32,
