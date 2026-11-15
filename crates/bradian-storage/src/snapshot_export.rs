@@ -178,6 +178,8 @@ mod tests {
                 primary_key_columns: vec!["ou".into()],
                 flush_rows: 1024,
                 flush_bytes: 1 << 24,
+            max_rows_per_page: None,
+            use_column_dict: false,
             },
         )
         .unwrap()
@@ -231,6 +233,8 @@ mod tests {
                 primary_key_columns: vec!["ou".into()],
                 flush_rows: 1024,
                 flush_bytes: 1 << 24,
+            max_rows_per_page: None,
+            use_column_dict: false,
             },
         )
         .unwrap();

@@ -77,6 +77,17 @@ struct ExportSnapshotArgs {
     /// `timestamp`.
     #[arg(long)]
     schema: String,
+    /// ADR 0081/0085 — rows per page in emitted `.derc` segments.
+    /// Default (omit): one page per column (pre-ADR-0081 shape).
+    /// Small values (8–128) improve BACE dict-pool amortization.
+    /// Zero is rejected.
+    #[arg(long)]
+    max_rows_per_page: Option<usize>,
+    /// ADR 0083/0085 — enable the v1.4 column-level shared dict
+    /// format. Combined with a small `--max-rows-per-page`, cuts
+    /// dict-heavy workload size by ~82% (ADR 0083 §3.5 item 10).
+    #[arg(long)]
+    use_column_dict: bool,
 }
 
 #[derive(Parser)]
@@ -131,6 +142,14 @@ struct CompactArgs {
     primary_key: String,
     #[arg(long)]
     schema: String,
+    /// ADR 0081/0085 — rows per page in the compacted `.derc`
+    /// segment. See `export-snapshot --max-rows-per-page`.
+    #[arg(long)]
+    max_rows_per_page: Option<usize>,
+    /// ADR 0083/0085 — enable v1.4 column-dict format. See
+    /// `export-snapshot --use-column-dict`.
+    #[arg(long)]
+    use_column_dict: bool,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -211,6 +230,9 @@ async fn do_fetch_dhis2(a: FetchDhis2Args) -> anyhow::Result<()> {
 fn do_export(a: ExportSnapshotArgs) -> anyhow::Result<()> {
     let schema = parse_schema(&a.schema)?;
     let pk = split_csv(&a.primary_key);
+    if let Some(0) = a.max_rows_per_page {
+        anyhow::bail!("--max-rows-per-page must be > 0");
+    }
     let opts = bradian_storage::PartitionOptions {
         dataset_id: a.dataset,
         partition_id: a.partition,
@@ -218,6 +240,8 @@ fn do_export(a: ExportSnapshotArgs) -> anyhow::Result<()> {
         primary_key_columns: pk,
         flush_rows: 1024,
         flush_bytes: 16 * 1024 * 1024,
+        max_rows_per_page: a.max_rows_per_page,
+        use_column_dict: a.use_column_dict,
     };
     let part = bradian_storage::Partition::open(&a.root, opts)?;
     let header = bradian_storage::export_snapshot(&part, &a.out)?;
@@ -256,6 +280,9 @@ fn do_load_dhis2(a: LoadDhis2Args) -> anyhow::Result<()> {
 fn do_compact(a: CompactArgs) -> anyhow::Result<()> {
     let schema = parse_schema(&a.schema)?;
     let pk = split_csv(&a.primary_key);
+    if let Some(0) = a.max_rows_per_page {
+        anyhow::bail!("--max-rows-per-page must be > 0");
+    }
     let opts = bradian_storage::PartitionOptions {
         dataset_id: a.dataset,
         partition_id: a.partition,
@@ -263,6 +290,8 @@ fn do_compact(a: CompactArgs) -> anyhow::Result<()> {
         primary_key_columns: pk,
         flush_rows: 1024,
         flush_bytes: 16 * 1024 * 1024,
+        max_rows_per_page: a.max_rows_per_page,
+        use_column_dict: a.use_column_dict,
     };
     let part = bradian_storage::Partition::open(&a.root, opts)?;
     match part.compact_all_segments()? {

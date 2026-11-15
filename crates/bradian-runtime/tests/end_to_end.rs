@@ -60,6 +60,8 @@ fn scan_filter_aggregate_matches_oracle() {
             primary_key_columns: vec!["ou".into(), "period".into(), "de".into()],
             flush_rows: 1024,
             flush_bytes: 1 << 24,
+            max_rows_per_page: None,
+            use_column_dict: false,
         },
     )
     .unwrap();
@@ -141,6 +143,8 @@ fn delta_rows_visible_to_scan_before_flush() {
             primary_key_columns: vec!["ou".into(), "period".into(), "de".into()],
             flush_rows: 1024,
             flush_bytes: 1 << 24,
+            max_rows_per_page: None,
+            use_column_dict: false,
         },
     )
     .unwrap();
@@ -180,6 +184,8 @@ fn delta_tombstone_removes_segment_row_from_scan() {
             primary_key_columns: vec!["ou".into(), "period".into(), "de".into()],
             flush_rows: 1024,
             flush_bytes: 1 << 24,
+            max_rows_per_page: None,
+            use_column_dict: false,
         },
     )
     .unwrap();

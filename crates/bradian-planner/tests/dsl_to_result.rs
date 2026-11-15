@@ -77,6 +77,8 @@ fn seed_partition(root: &std::path::Path) -> Arc<Partition> {
             primary_key_columns: vec!["ou".into(), "period".into(), "de".into()],
             flush_rows: 1024,
             flush_bytes: 1 << 24,
+            max_rows_per_page: None,
+            use_column_dict: false,
         },
     )
     .unwrap();

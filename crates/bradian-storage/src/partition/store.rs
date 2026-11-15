@@ -30,6 +30,37 @@ pub struct PartitionOptions {
     pub flush_rows: usize,
     /// Flush the delta when it exceeds this many bytes (approx).
     pub flush_bytes: usize,
+    /// ADR 0085 — propagated to `SegmentWriterOptions`. `None`
+    /// (default) emits a single page per column, preserving
+    /// pre-ADR-0081 byte output. `Some(N)` splits non-dict and
+    /// dict columns into `ceil(rows / N)` pages.
+    pub max_rows_per_page: Option<usize>,
+    /// ADR 0085 — propagated to `SegmentWriterOptions`. `false`
+    /// (default) emits v1.3 per-page dict output. `true` emits
+    /// v1.4 column-level shared dict (ADR 0083), usually combined
+    /// with a small `max_rows_per_page` for maximum size win.
+    pub use_column_dict: bool,
+}
+
+impl PartitionOptions {
+    /// ADR 0085 — convenience constructor preserving pre-ADR-0085
+    /// defaults. Used by tests and callers that don't care about
+    /// the new knobs.
+    pub fn with_defaults(
+        dataset_id: String,
+        partition_id: String,
+        schema: Schema,
+        primary_key_columns: Vec<String>,
+        flush_rows: usize,
+        flush_bytes: usize,
+    ) -> Self {
+        Self {
+            dataset_id, partition_id, schema, primary_key_columns,
+            flush_rows, flush_bytes,
+            max_rows_per_page: None,
+            use_column_dict: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -293,8 +324,8 @@ impl Partition {
             watermark_ms: max_watermark,
             data_revision: data_rev,
             metadata_revision: inner.manifest.metadata_revision,
-            max_rows_per_page: None,
-            use_column_dict: false,
+            max_rows_per_page: self.options.max_rows_per_page,
+            use_column_dict: self.options.use_column_dict,
         };
         let mut writer = SegmentWriter::new(self.options.schema.clone(), writer_opts);
         let mut row_count = 0u64;
@@ -510,8 +541,8 @@ impl Partition {
             watermark_ms: watermark,
             data_revision: inner.next_data_revision,
             metadata_revision: inner.manifest.metadata_revision,
-            max_rows_per_page: None,
-            use_column_dict: false,
+            max_rows_per_page: self.options.max_rows_per_page,
+            use_column_dict: self.options.use_column_dict,
         };
         let data_rev = writer_opts.data_revision;
         inner.next_data_revision += 1;

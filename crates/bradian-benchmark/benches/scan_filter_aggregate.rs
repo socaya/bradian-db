@@ -30,6 +30,8 @@ fn setup(rows: usize) -> Bench {
             primary_key_columns: vec!["ou".into(), "period".into(), "de".into(), "coc".into()],
             flush_rows: usize::MAX,
             flush_bytes: usize::MAX,
+            max_rows_per_page: None,
+            use_column_dict: false,
         },
     )
     .unwrap();
