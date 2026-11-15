@@ -1300,21 +1300,48 @@ pub(crate) fn decode_data_page_payload(
     bace: Option<&BaceWiring>,
     page_id: u64,
 ) -> StoreResult<Vec<u8>> {
-    if !page.flags.payload_is_bace_envelope {
+    if !page.flags.payload_is_bace_envelope && !page.flags.payload_is_baca_envelope {
         return Ok(page.payload.clone());
     }
     let Some(w) = bace else {
         return Err(StoreError::BaceOpenWithoutBaceWiring { page_id });
     };
-    // ADR 0062 §3.3 pre-allocation cap: use the policy service's
-    // compression.max_decoded_page_bytes. `max_encoded_length` is
-    // the page size because the envelope is embedded in a 4 KiB
-    // page (ADR 0065 §3.4).
     let scope = ScopeChain::baseline_only();
     let cap = w.policy_service.resolve(PolicyKey::CompressionMaxDecodedPageBytes, &scope);
     let max_decoded_length = cap.value.as_u32().ok_or_else(||
         StoreError::Corruption("policy service returned non-u32 for max_decoded_page_bytes".into())
     )?;
+    if page.flags.payload_is_baca_envelope {
+        // ADR 0090 §3.3 — BACA page. MAC-verify before decoding.
+        let auth = w.authentication.as_ref().ok_or_else(||
+            StoreError::Corruption(format!(
+                "BRPG page {page_id} is BACA-authenticated but wiring has no authentication; supply BaceWiring::authentication",
+            ))
+        )?;
+        let caps = crate::bace::authenticated::AuthenticatedEnvelopeCaps {
+            max_decoded_length,
+            max_encoded_length: PAGE_SIZE as u32,
+        };
+        let env = crate::bace::authenticated::read_authenticated_envelope(
+            &page.payload, caps, auth,
+        ).map_err(|e| StoreError::Corruption(format!(
+            "BRPG page {page_id} BACA MAC verification or decode failed: {e}"
+        )))?;
+        let codec = w.registry.codec(env.header.codec_id)
+            .ok_or(StoreError::BaceCodecUnavailable { codec_id: env.header.codec_id })?;
+        let build_supports = codec.capability().format_version;
+        if build_supports != env.header.codec_format_version {
+            return Err(StoreError::BaceCodecFormatVersionMismatch {
+                codec_id: env.header.codec_id,
+                declared: env.header.codec_format_version,
+                build_supports,
+            });
+        }
+        let mut decoded = Vec::with_capacity(env.header.decoded_length as usize);
+        codec.decode(env.payload, env.header.decoded_length, &mut decoded)?;
+        return Ok(decoded);
+    }
+    // Default BACE path (ADR 0065).
     let caps = crate::bace::envelope::EnvelopeCaps {
         max_decoded_length,
         max_encoded_length: PAGE_SIZE as u32,
@@ -1467,6 +1494,7 @@ fn emit_data_page(
     lsn: u64,
     plain: Vec<u8>,
     bace: Option<(CodecId, &dyn Codec)>,
+    auth: Option<&crate::bace::authenticated::BaceAuthentication>,
 ) -> StoreResult<()> {
     let page_bytes = match bace {
         None => Page::new(page_id, lsn, PageKind::Data, plain)?.encode()?,
@@ -1478,25 +1506,55 @@ fn emit_data_page(
                 .map_err(|_| StoreError::BaceCodecUnavailable { codec_id })?;
             let encoded_length = u32::try_from(encoded.len())
                 .map_err(|_| StoreError::InvalidRow("encoded payload exceeds u32::MAX"))?;
-            let header = EnvelopeHeader {
-                codec_id,
-                codec_format_version: codec.capability().format_version,
-                flags: EnvelopeFlags {
-                    payload_is_raw: codec_id == CodecId::raw(),
-                    critical: codec.capability().flags.critical,
-                    ..EnvelopeFlags::default()
-                },
-                encoded_length,
-                decoded_length,
-            };
-            let mut envelope = Vec::with_capacity(
-                ENVELOPE_HEADER_SIZE + encoded.len() + ENVELOPE_TRAILER_SIZE,
-            );
-            write_envelope(&mut envelope, &header, &encoded)?;
-            Page::new_v2(
-                page_id, lsn, PageKind::Data, envelope,
-                PageFlags::empty().with_bace_envelope(true),
-            )?.encode()?
+            // ADR 0090 §3.2 — BACA path when auth is set; BACE otherwise.
+            if let Some(auth) = auth {
+                let ah = crate::bace::authenticated::AuthenticatedEnvelopeHeader {
+                    codec_id,
+                    codec_format_version: codec.capability().format_version,
+                    flags: crate::bace::authenticated::AuthenticatedEnvelopeFlags {
+                        payload_is_raw: codec_id == CodecId::raw(),
+                        critical: codec.capability().flags.critical,
+                        ..crate::bace::authenticated::AuthenticatedEnvelopeFlags::default()
+                    },
+                    encoded_length,
+                    decoded_length,
+                };
+                let mut envelope = Vec::with_capacity(
+                    crate::bace::authenticated::AUTHENTICATED_ENVELOPE_HEADER_SIZE
+                        + encoded.len()
+                        + crate::bace::authenticated::AUTHENTICATED_ENVELOPE_TRAILER_SIZE
+                        + crate::bace::authenticated::AUTHENTICATED_ENVELOPE_MAC_SIZE,
+                );
+                crate::bace::authenticated::write_authenticated_envelope(
+                    &mut envelope, &ah, &encoded, auth,
+                ).map_err(|e| StoreError::Corruption(format!(
+                    "BRPG BACA envelope write failed: {e}"
+                )))?;
+                Page::new_v2(
+                    page_id, lsn, PageKind::Data, envelope,
+                    PageFlags::empty().with_baca_envelope(true),
+                )?.encode()?
+            } else {
+                let header = EnvelopeHeader {
+                    codec_id,
+                    codec_format_version: codec.capability().format_version,
+                    flags: EnvelopeFlags {
+                        payload_is_raw: codec_id == CodecId::raw(),
+                        critical: codec.capability().flags.critical,
+                        ..EnvelopeFlags::default()
+                    },
+                    encoded_length,
+                    decoded_length,
+                };
+                let mut envelope = Vec::with_capacity(
+                    ENVELOPE_HEADER_SIZE + encoded.len() + ENVELOPE_TRAILER_SIZE,
+                );
+                write_envelope(&mut envelope, &header, &encoded)?;
+                Page::new_v2(
+                    page_id, lsn, PageKind::Data, envelope,
+                    PageFlags::empty().with_bace_envelope(true),
+                )?.encode()?
+            }
         }
     };
     file.write_all(&page_bytes)?;
@@ -1512,12 +1570,22 @@ fn write_snapshot(
     // Resolve BACE emission mode once up front; checkpoint is strict
     // fail-closed under any BACE error.
     let bace_codec = resolve_bace_codec(bace)?;
+    // ADR 0090 §3.2 — when wiring has authentication, emit BACA
+    // pages (16 extra bytes MAC overhead per page).
+    let auth = bace.and_then(|w| w.authentication.as_ref());
     // Under BACE, each data page's plain payload must leave room for
     // the envelope's 36-byte overhead. With RAW codec encoded_length
     // == plain_length; future compressing codecs may permit larger
     // plain payloads via trial-and-fit (BACE §5.1), deferred.
     let plain_capacity = if bace_codec.is_some() {
-        MAX_PAYLOAD_SIZE - ENVELOPE_HEADER_SIZE - ENVELOPE_TRAILER_SIZE
+        if auth.is_some() {
+            MAX_PAYLOAD_SIZE
+                - crate::bace::authenticated::AUTHENTICATED_ENVELOPE_HEADER_SIZE
+                - crate::bace::authenticated::AUTHENTICATED_ENVELOPE_TRAILER_SIZE
+                - crate::bace::authenticated::AUTHENTICATED_ENVELOPE_MAC_SIZE
+        } else {
+            MAX_PAYLOAD_SIZE - ENVELOPE_HEADER_SIZE - ENVELOPE_TRAILER_SIZE
+        }
     } else {
         MAX_PAYLOAD_SIZE
     };
@@ -1560,7 +1628,7 @@ fn write_snapshot(
     for (key, value) in rows {
         let len = ROW_HEADER + key.len() + value.len();
         if buffer.len() + len > plain_capacity {
-            emit_data_page(file, page_id, lsn, std::mem::take(&mut buffer), bace_codec)?;
+            emit_data_page(file, page_id, lsn, std::mem::take(&mut buffer), bace_codec, auth)?;
             page_id = page_id.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
             buffer = Vec::with_capacity(plain_capacity);
         }
@@ -1574,7 +1642,7 @@ fn write_snapshot(
         buffer.extend_from_slice(value);
     }
     if !buffer.is_empty() {
-        emit_data_page(file, page_id, lsn, buffer, bace_codec)?;
+        emit_data_page(file, page_id, lsn, buffer, bace_codec, auth)?;
         page_id = page_id.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
     }
     if page_id != page_count.checked_add(1).ok_or(StoreError::SequenceExhausted)? {

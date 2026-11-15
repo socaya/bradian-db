@@ -32,6 +32,7 @@
 use crc32fast::Hasher;
 use thiserror::Error;
 
+use crate::bace::authenticated::AUTHENTICATED_ENVELOPE_MAGIC;
 use crate::bace::envelope::ENVELOPE_MAGIC;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -74,11 +75,17 @@ impl TryFrom<u8> for PageKind {
 pub struct PageFlags {
     /// Bit 0 — payload is exactly one BACE v1 envelope (ADR 0062).
     pub payload_is_bace_envelope: bool,
+    /// Bit 1 — ADR 0090 — payload is exactly one BACA v1
+    /// authenticated envelope. Mutually exclusive with bit 0.
+    pub payload_is_baca_envelope: bool,
 }
 
 impl PageFlags {
     pub const fn empty() -> Self {
-        Self { payload_is_bace_envelope: false }
+        Self {
+            payload_is_bace_envelope: false,
+            payload_is_baca_envelope: false,
+        }
     }
 
     pub const fn with_bace_envelope(mut self, on: bool) -> Self {
@@ -86,26 +93,39 @@ impl PageFlags {
         self
     }
 
+    /// ADR 0090 §3.1 — mutually exclusive with `with_bace_envelope`.
+    pub const fn with_baca_envelope(mut self, on: bool) -> Self {
+        self.payload_is_baca_envelope = on;
+        self
+    }
+
     /// True iff any flag is set. The writer uses this to decide v1 vs
     /// v2 on-disk format (ADR 0064 §3.5).
     pub const fn is_empty(&self) -> bool {
-        !self.payload_is_bace_envelope
+        !self.payload_is_bace_envelope && !self.payload_is_baca_envelope
     }
 
     pub const fn to_byte(self) -> u8 {
         let mut b = 0_u8;
         if self.payload_is_bace_envelope { b |= 1 << 0; }
+        if self.payload_is_baca_envelope { b |= 1 << 1; }
         b
     }
 
-    /// Decode a v2 `feature_flags` byte. Any reserved bit (1–7) set
+    /// Decode a v2 `feature_flags` byte. Any reserved bit (2–7) set
     /// fails closed with `UnsupportedFeatureFlag` per ADR 0063 §3.3.
+    /// Bits 0 and 1 are mutually exclusive — both set is also a
+    /// corruption error.
     pub fn from_byte(b: u8) -> Result<Self, PageError> {
-        if b & 0b1111_1110 != 0 {
+        if b & 0b1111_1100 != 0 {
+            return Err(PageError::UnsupportedFeatureFlag(b));
+        }
+        if b & 0b0000_0011 == 0b0000_0011 {
             return Err(PageError::UnsupportedFeatureFlag(b));
         }
         Ok(Self {
             payload_is_bace_envelope: (b & (1 << 0)) != 0,
+            payload_is_baca_envelope: (b & (1 << 1)) != 0,
         })
     }
 }
@@ -193,6 +213,11 @@ impl Page {
         {
             return Err(PageError::BaceEnvelopeMagicMismatch { kind });
         }
+        if flags.payload_is_baca_envelope
+            && !payload.starts_with(&AUTHENTICATED_ENVELOPE_MAGIC)
+        {
+            return Err(PageError::BaceEnvelopeMagicMismatch { kind });
+        }
         Ok(Self { page_id, lsn, kind, payload, flags })
     }
 
@@ -212,6 +237,11 @@ impl Page {
         }
         if self.flags.payload_is_bace_envelope
             && !self.payload.starts_with(&ENVELOPE_MAGIC)
+        {
+            return Err(PageError::BaceEnvelopeMagicMismatch { kind: self.kind });
+        }
+        if self.flags.payload_is_baca_envelope
+            && !self.payload.starts_with(&AUTHENTICATED_ENVELOPE_MAGIC)
         {
             return Err(PageError::BaceEnvelopeMagicMismatch { kind: self.kind });
         }
@@ -351,16 +381,15 @@ mod adr0064_tests {
     #[test]
     fn v2_reserved_feature_flag_bits_fail_closed() {
         let mut page = Page::new(1, 1, PageKind::Data, b"x".to_vec()).unwrap().encode().unwrap();
-        // Rewrite the header to look like a v2 page with bit 1 set.
+        // ADR 0090 claimed bit 1 (baca); bit 2+ remain reserved.
+        // Rewrite the header to look like a v2 page with bit 2 set.
         page[4..6].copy_from_slice(&PAGE_VERSION_V2.to_le_bytes());
-        page[7] = 0b0000_0010; // reserved bit 1
-        // Zero the CRC and recompute to isolate the flags check from
-        // CRC detection.
+        page[7] = 0b0000_0100; // reserved bit 2
         page[28..32].copy_from_slice(&0_u32.to_le_bytes());
         let crc = checksum(&page);
         page[28..32].copy_from_slice(&crc.to_le_bytes());
         match Page::decode(&page) {
-            Err(PageError::UnsupportedFeatureFlag(b)) => assert_eq!(b, 0b0000_0010),
+            Err(PageError::UnsupportedFeatureFlag(b)) => assert_eq!(b, 0b0000_0100),
             other => panic!("expected UnsupportedFeatureFlag, got {other:?}"),
         }
     }
@@ -500,7 +529,8 @@ mod adr0064_tests {
 
     #[test]
     fn page_flags_from_byte_refuses_every_reserved_bit() {
-        for bit in 1..=7_u8 {
+        // ADR 0090 claims bit 1 (baca). Reserved bits are now 2..=7.
+        for bit in 2..=7_u8 {
             let b = 1_u8 << bit;
             assert!(matches!(PageFlags::from_byte(b), Err(PageError::UnsupportedFeatureFlag(got)) if got == b));
         }
