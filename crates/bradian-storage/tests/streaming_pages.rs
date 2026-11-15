@@ -1,4 +1,4 @@
-//! ADR 0088 — streaming page iterator for `.derc` columns.
+//! ADR 0088 — streaming page iterator for `.brcs` columns.
 //!
 //! §3.5 checklist: correct page count, per-page row counts,
 //! concat equals read_column, iterator stops on error, v1.4
@@ -46,7 +46,7 @@ fn opts(split: Option<usize>, column_dict: bool) -> SegmentWriterOptions {
 #[test]
 fn item_1_iter_pages_yields_exact_page_count() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("count.derc");
+    let path = dir.path().join("count.brcs");
     let schema = Schema::new(vec![
         Column::new("id", LogicalType::I64).required(),
     ]).unwrap();
@@ -67,7 +67,7 @@ fn item_1_iter_pages_yields_exact_page_count() {
 #[test]
 fn item_2_per_page_row_counts_match_declared() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("rowcount.derc");
+    let path = dir.path().join("rowcount.brcs");
     let schema = Schema::new(vec![
         Column::new("id", LogicalType::I64).required(),
     ]).unwrap();
@@ -89,7 +89,7 @@ fn item_2_per_page_row_counts_match_declared() {
 #[test]
 fn item_3_streaming_concat_equals_read_column_output() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("concat_eq.derc");
+    let path = dir.path().join("concat_eq.brcs");
     let schema = Schema::new(vec![
         Column::new("id", LogicalType::I64).required(),
         Column::new("note", LogicalType::Utf8),
@@ -127,7 +127,7 @@ fn item_3_streaming_concat_equals_read_column_output() {
 #[test]
 fn item_5_v14_dict_column_pages_are_dictindex32() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_stream.derc");
+    let path = dir.path().join("v14_stream.brcs");
     let schema = Schema::new(vec![
         Column::new("tag", LogicalType::Uid).required(),
     ]).unwrap();
@@ -151,7 +151,7 @@ fn item_5_v14_dict_column_pages_are_dictindex32() {
 #[test]
 fn item_6_non_dict_pages_yield_expected_variants() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("non_dict_stream.derc");
+    let path = dir.path().join("non_dict_stream.brcs");
     let schema = Schema::new(vec![
         Column::new("v", LogicalType::F64),
     ]).unwrap();
@@ -170,7 +170,7 @@ fn item_6_non_dict_pages_yield_expected_variants() {
 #[test]
 fn item_7_single_page_column_yields_one_page() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("single.derc");
+    let path = dir.path().join("single.brcs");
     let schema = Schema::new(vec![
         Column::new("v", LogicalType::I64).required(),
     ]).unwrap();
@@ -189,7 +189,7 @@ fn item_7_single_page_column_yields_one_page() {
 #[test]
 fn item_8_reader_usable_after_abandoning_iterator() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("abandon.derc");
+    let path = dir.path().join("abandon.brcs");
     let schema = Schema::new(vec![
         Column::new("v", LogicalType::I64).required(),
     ]).unwrap();
@@ -213,7 +213,7 @@ fn item_8_reader_usable_after_abandoning_iterator() {
 #[test]
 fn item_10_unknown_column_name_errors_before_iteration() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("unknown.derc");
+    let path = dir.path().join("unknown.brcs");
     let schema = Schema::new(vec![
         Column::new("v", LogicalType::I64).required(),
     ]).unwrap();

@@ -11,7 +11,7 @@ Fourth BACE implementation step against accepted ADR 0060.
 reaches disk. The BACE module is now **feature-complete at the
 module level**: codec, envelope, registry and policy service are
 all implemented and composed. Carrier integration (BRPG v2,
-row_store, `.derc`, WAL, backup) remains untouched.
+row_store, `.brcs`, WAL, backup) remains untouched.
 
 | Executed check | Result |
 |---|---|
@@ -114,7 +114,7 @@ New submodule `crates/bradian-relational/src/bace/policy.rs`:
 - §3.6 audit — the veto reasons are carried on `Resolved`. Writing
   them to `tracing` is a sibling slice; the data is in place.
 - §5 resolved decisions — profiles are fixed enum (item 2),
-  persistence deferred (item 3), `.derc` left alone (item 4),
+  persistence deferred (item 3), `.brcs` left alone (item 4),
   first subsystem = `backup` (item 5), SQL deferred (item 6),
   audit via `tracing` (item 7).
 
@@ -155,7 +155,7 @@ The standalone `bace` module implements the accepted ADRs 0060,
 0061 and 0062 at the module level. **No production path writes a
 BACE envelope to disk; no carrier has been integrated.** The
 module exposes a clean seam that future carrier ADRs (BRPG v2 page
-integration, backup adapter, `.derc` adapter, WAL adapter) can
+integration, backup adapter, `.brcs` adapter, WAL adapter) can
 pick up.
 
 Further implementation past this point requires new ADRs per the

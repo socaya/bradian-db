@@ -73,13 +73,13 @@ current capability boundaries are maintained in the gap register.
 
 ## Original audit baseline
 
-The repository contains a proprietary analytical column format (`.derc`), WAL-backed analytical partitions, vectorized operators, DHIS2 semantic modules, an Axum analytical API, a React analytics administration interface, and test suites. It does **not** contain a verified independent general-purpose authoritative relational database with complete SQL DDL/DML, B+tree row pages, ACID/MVCC transactions, cross-shard atomic commits, distributed consensus, or strongly consistent HTAP projections.
+The repository contains a proprietary analytical column format (`.brcs`), WAL-backed analytical partitions, vectorized operators, DHIS2 semantic modules, an Axum analytical API, a React analytics administration interface, and test suites. It does **not** contain a verified independent general-purpose authoritative relational database with complete SQL DDL/DML, B+tree row pages, ACID/MVCC transactions, cross-shard atomic commits, distributed consensus, or strongly consistent HTAP projections.
 
 Existing DAP traceability DONE statuses refer to analytical requirements only; they do not fulfill Bradian v1.1 transactional and enterprise requirements.
 
 ## Phase 0: secure and rename product-facing identity
 
-Preserve legacy `dap-*` crates, Rust imports, `.derc` on-disk identifiers, DHIS2 wire compatibility and previously persisted objects. Present the product as **Bradian Database Systems**, CLI as `bradian-db`, and administration as **Bradian Studio**. Introduce a fail-closed, **loopback-only** bootstrap API administrator token. This is *not* full end-user authorization. Native TLS/mTLS, scoped principals and Studio login are release blockers.
+Preserve legacy `dap-*` crates, Rust imports, `.brcs` on-disk identifiers, DHIS2 wire compatibility and previously persisted objects. Present the product as **Bradian Database Systems**, CLI as `bradian-db`, and administration as **Bradian Studio**. Introduce a fail-closed, **loopback-only** bootstrap API administrator token. This is *not* full end-user authorization. Native TLS/mTLS, scoped principals and Studio login are release blockers.
 
 **Proof required:** all protected API paths reject missing/invalid tokens; liveness remains public; full workspace tests, Rust lint and frontend typecheck pass before merge. Always re-test integrations because unauthenticated DHIS2 clients are intentionally rejected until their credentials are configured.
 

@@ -71,7 +71,7 @@ fail-closed semantics, and the bounded-decompression contract.
   feature-flag page). The envelope is a self-contained byte sequence
   that pages, WAL frames, backup archives and column segments will
   carry inside their own existing envelopes.
-- **How the envelope is embedded in `.derc` segments.** Follow-up.
+- **How the envelope is embedded in `.brcs` segments.** Follow-up.
 - **How the envelope is embedded in BRWL WAL frames.** Follow-up.
 - **Dictionary-reference resolution semantics.** The envelope carries
   codec parameters but not the dictionary bytes themselves. Dictionary
@@ -325,12 +325,12 @@ in via the BRD-SEC-003 workstream and need their own ADR entry.
 - Freeze an authenticated / encrypted envelope.
 - Specify dictionary-reference storage, scope or lifecycle.
 - Specify how pages / WAL / segments carry the envelope. ADR 0063
-  covers BRPG v2; `.derc` embedding and BRWL embedding are
+  covers BRPG v2; `.brcs` embedding and BRWL embedding are
   follow-ups.
 - Specify replication / federation wire framing.
 - Choose codec identifier numbers (ADR 0061 §5 Q1).
 - Implement any codec.
-- Modify `.derc`, BRPG, BRWL, or any existing on-disk format today.
+- Modify `.brcs`, BRPG, BRWL, or any existing on-disk format today.
 - Introduce any `BACE*` admission or `ResourceError` variant.
 - Modify any existing ADR.
 

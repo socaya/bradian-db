@@ -1,6 +1,6 @@
-//! DAP storage: native columnar segments (`.derc`), WAL, manifests, delta, compaction.
+//! DAP storage: native columnar segments (`.brcs`), WAL, manifests, delta, compaction.
 //!
-//! Format spec: `docs/adr/0002-derc-segment-format.md`.
+//! Format spec: `docs/adr/0002-brcs-segment-format.md`.
 //!
 //! Hot paths avoid `unsafe`. The one place we work with raw bytes (page codecs) stays within
 //! documented bounds-checked slices.

@@ -1,4 +1,4 @@
-//! ADR 0083 — `.derc` v1.4 column-level shared dictionary format.
+//! ADR 0083 — `.brcs` v1.4 column-level shared dictionary format.
 //!
 //! §3.5 checklist: default byte-identical output, v1.4 flag and
 //! region, round-trip, CRC32 reject, legacy-open rejection,
@@ -76,8 +76,8 @@ fn item_1_default_options_preserve_v1_3_shape() {
     // use_column_dict=false → no v1.4 flag, no region, byte-
     // identical to pre-ADR-0083 output on the same workload.
     let dir = tempdir().unwrap();
-    let path_a = dir.path().join("a.derc");
-    let path_b = dir.path().join("b.derc");
+    let path_a = dir.path().join("a.brcs");
+    let path_b = dir.path().join("b.brcs");
     let rows = dict_rows(200, 4);
 
     let mut w1 = SegmentWriter::new(dict_schema(), base_opts(None, false));
@@ -101,7 +101,7 @@ fn item_1_default_options_preserve_v1_3_shape() {
 #[test]
 fn item_2_use_column_dict_emits_v1_4_flag_and_region_on_single_page() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14.derc");
+    let path = dir.path().join("v14.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), base_opts(None, true));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -128,7 +128,7 @@ fn item_2_use_column_dict_emits_v1_4_flag_and_region_on_single_page() {
 #[test]
 fn item_3_use_column_dict_four_page_dict_column_round_trips() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_4pages.derc");
+    let path = dir.path().join("v14_4pages.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), base_opts(Some(50), true));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -155,7 +155,7 @@ fn item_3_use_column_dict_four_page_dict_column_round_trips() {
 #[test]
 fn item_4_v1_4_concat_still_returns_dictindex32() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_concat.derc");
+    let path = dir.path().join("v14_concat.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), base_opts(Some(50), true));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -172,7 +172,7 @@ fn item_4_v1_4_concat_still_returns_dictindex32() {
 #[test]
 fn item_5_legacy_open_rejects_v1_4_segment() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_legacy_reject.derc");
+    let path = dir.path().join("v14_legacy_reject.brcs");
     let rows = dict_rows(50, 4);
     let mut w = SegmentWriter::new(dict_schema(), base_opts(None, true));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -191,7 +191,7 @@ fn item_5_legacy_open_rejects_v1_4_segment() {
 #[test]
 fn item_6_column_dict_crc_mismatch_is_hard_fail() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_crc_bad.derc");
+    let path = dir.path().join("v14_crc_bad.brcs");
     let rows = dict_rows(50, 4);
     let mut w = SegmentWriter::new(dict_schema(), base_opts(None, true));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -233,7 +233,7 @@ fn item_6_column_dict_crc_mismatch_is_hard_fail() {
 #[test]
 fn item_7_v1_4_with_bace_envelope_round_trips() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_bace.derc");
+    let path = dir.path().join("v14_bace.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new_with_bace(
         dict_schema(), base_opts(Some(50), true), wiring_zstd_balanced(),
@@ -258,7 +258,7 @@ fn item_7_v1_4_with_bace_envelope_round_trips() {
 fn item_8_v1_4_with_baca_round_trips_under_matching_key() {
     let key = [11u8; 32];
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v14_baca.derc");
+    let path = dir.path().join("v14_baca.brcs");
     // ADR 0080 scope: Non-dict pages are BACA-wrapped. Dict
     // pages (v1.4) remain trailer=1 BACE, since the dict-aware
     // path is separate. Use a plain Utf8 (non-dict) column plus
@@ -328,8 +328,8 @@ fn item_10_v1_4_strictly_smaller_than_v1_3_on_high_dup_workload() {
     ]).collect();
 
     let dir = tempdir().unwrap();
-    let path_v13 = dir.path().join("v13.derc");
-    let path_v14 = dir.path().join("v14.derc");
+    let path_v13 = dir.path().join("v13.brcs");
+    let path_v14 = dir.path().join("v14.brcs");
 
     let mut w13 = SegmentWriter::new(dict_schema(), base_opts(Some(8), false));
     for r in &rows { w13.append_row(r).unwrap(); }

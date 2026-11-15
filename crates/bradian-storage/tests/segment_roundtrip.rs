@@ -1,4 +1,4 @@
-//! End-to-end `.derc` v1 roundtrip tests: writer → file → reader → equality with the
+//! End-to-end `.brcs` v1 roundtrip tests: writer → file → reader → equality with the
 //! originating builders.
 
 use bradian_core::{Column, LogicalType, Schema, Value};
@@ -57,7 +57,7 @@ fn sample_rows() -> Vec<Vec<Value>> {
 #[test]
 fn segment_writer_reader_roundtrip() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("test.derc");
+    let path = dir.path().join("test.brcs");
 
     let schema = sample_schema();
     let rows = sample_rows();
@@ -110,7 +110,7 @@ fn segment_writer_reader_roundtrip() {
 #[test]
 fn reject_unsupported_major_version() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("bad.derc");
+    let path = dir.path().join("bad.brcs");
 
     let schema = sample_schema();
     let w = SegmentWriter::new(schema, SegmentWriterOptions::default());
@@ -129,7 +129,7 @@ fn reject_unsupported_major_version() {
 #[test]
 fn detect_payload_corruption() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("corrupt.derc");
+    let path = dir.path().join("corrupt.brcs");
 
     let schema = Schema::new(vec![Column::new("v", LogicalType::I64)]).unwrap();
     let mut w = SegmentWriter::new(schema, SegmentWriterOptions::default());
@@ -152,7 +152,7 @@ fn detect_payload_corruption() {
 #[test]
 fn detect_footer_corruption() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("footer_corrupt.derc");
+    let path = dir.path().join("footer_corrupt.brcs");
     let schema = sample_schema();
     let mut w = SegmentWriter::new(schema, SegmentWriterOptions::default());
     for r in sample_rows() {
@@ -173,7 +173,7 @@ fn detect_footer_corruption() {
 #[test]
 fn dict_encoding_selected_for_low_cardinality_utf8() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict.derc");
+    let path = dir.path().join("dict.brcs");
 
     let schema = Schema::new(vec![
         Column::new("category", LogicalType::Utf8).required(),

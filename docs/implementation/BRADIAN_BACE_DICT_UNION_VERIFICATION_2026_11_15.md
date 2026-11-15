@@ -101,12 +101,12 @@ tests that construct differing-dict inputs by hand.
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (v1.1) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (v1.1) | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | 0078 | BACE dictionary primitive | ACCEPTED |
-| 0079 | `.derc` dictionary carrier (v1.2) | ACCEPTED |
-| 0080 | `.derc` BACA carrier (v1.3) | ACCEPTED |
-| 0081 | `.derc` multi-page writer | ACCEPTED |
+| 0079 | `.brcs` dictionary carrier (v1.2) | ACCEPTED |
+| 0080 | `.brcs` BACA carrier (v1.3) | ACCEPTED |
+| 0081 | `.brcs` multi-page writer | ACCEPTED |
 | 0082 | Multi-page DictIndex32 columns | ACCEPTED |
 | 0083 | Column-level shared dict (v1.4) | ACCEPTED |
 | **0084** | **Dict-union concat (forward-compat)** | **ACCEPTED** |
@@ -116,4 +116,4 @@ tests that construct differing-dict inputs by hand.
 Baseline: `e040449` (ADR 0083 ACCEPTED).
 Implementation commit: assigned by this commit.
 
-See [ADR 0084](../adr/0084-derc-dict-union-concat.md).
+See [ADR 0084]-brcs-dict-union-concat.md).

@@ -308,7 +308,7 @@ impl Partition {
 
         // Write the merged segment through the writer so it follows the same atomic
         // publish path as a normal flush.
-        let segment_id = format!("seg-{:08}.derc", inner.next_segment_id);
+        let segment_id = format!("seg-{:08}.brcs", inner.next_segment_id);
         inner.next_segment_id += 1;
         let path = self.dir.join("segments").join(&segment_id);
 
@@ -528,7 +528,7 @@ impl Partition {
         let next_lsn_before_flush = inner.next_lsn;
 
         // Build a segment by writing each non-tombstone row through SegmentWriter.
-        let segment_id = format!("seg-{:08}.derc", inner.next_segment_id);
+        let segment_id = format!("seg-{:08}.brcs", inner.next_segment_id);
         inner.next_segment_id += 1;
         let path = self.dir.join("segments").join(&segment_id);
 

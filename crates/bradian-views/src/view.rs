@@ -1,5 +1,5 @@
 //! Materialized view manifest. v1 stores the full result as a single in-memory
-//! `RecordBatch` plus its freshness stamp. Persistence to `.derc` segments and incremental
+//! `RecordBatch` plus its freshness stamp. Persistence to `.brcs` segments and incremental
 //! refresh are deferred to a later gate.
 
 use bradian_runtime::batch::RecordBatch;

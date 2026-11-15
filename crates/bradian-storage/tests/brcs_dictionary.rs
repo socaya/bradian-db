@@ -1,4 +1,4 @@
-//! ADR 0079 — `.derc` dictionary carrier integration tests.
+//! ADR 0079 — `.brcs` dictionary carrier integration tests.
 //!
 //! Covers the §3.5 checklist: v1.2 writer emission, round-trip,
 //! cross-version reject paths, missing-pool-entry fail-closed,
@@ -103,7 +103,7 @@ fn assert_round_trip(reader: &mut SegmentReader) {
 #[test]
 fn item_1_v1_2_writer_emits_minor_2_and_both_feature_flags() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v12.derc");
+    let path = dir.path().join("v12.brcs");
     let mut dicts = HashMap::new();
     dicts.insert("tag".to_string(), train_tag_dict());
     write(&path, dicts);
@@ -121,7 +121,7 @@ fn item_1_v1_2_writer_emits_minor_2_and_both_feature_flags() {
 #[test]
 fn item_2_round_trip_through_open_with_bace() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("rt.derc");
+    let path = dir.path().join("rt.brcs");
     let mut dicts = HashMap::new();
     dicts.insert("tag".to_string(), train_tag_dict());
     write(&path, dicts);
@@ -133,7 +133,7 @@ fn item_2_round_trip_through_open_with_bace() {
 fn item_5_v1_2_reader_reads_v1_1_segment_unchanged() {
     // Writer with BACE wiring but EMPTY dict map → v1.1 shape.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v11.derc");
+    let path = dir.path().join("v11.brcs");
     write(&path, HashMap::new());
     let mut r = SegmentReader::open_with_bace(&path, wiring_zstd_balanced()).unwrap();
     assert_round_trip(&mut r);
@@ -143,7 +143,7 @@ fn item_5_v1_2_reader_reads_v1_1_segment_unchanged() {
 fn item_6_v1_2_reader_reads_v1_0_segment_unchanged() {
     // Legacy writer, no BACE at all.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v10.derc");
+    let path = dir.path().join("v10.brcs");
     let mut w = SegmentWriter::new(schema(), opts());
     for r in &rows() { w.append_row(r).unwrap(); }
     w.finish_to_path(&path).unwrap();
@@ -156,7 +156,7 @@ fn item_10_column_without_dict_falls_back_to_v1_1_trailer() {
     // Only "id" is NOT in the dict map; "tag" IS. The writer must
     // emit trailer=1 for id's page and trailer=3 for tag's page.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("mixed.derc");
+    let path = dir.path().join("mixed.brcs");
     let mut dicts = HashMap::new();
     dicts.insert("tag".to_string(), train_tag_dict());
     write(&path, dicts);
@@ -169,7 +169,7 @@ fn item_10_column_without_dict_falls_back_to_v1_1_trailer() {
 #[test]
 fn item_11_empty_dict_map_produces_v1_1_shape_no_dict_flag() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("empty.derc");
+    let path = dir.path().join("empty.brcs");
     write(&path, HashMap::new());
     let bytes = std::fs::read(&path).unwrap();
     let minor = u16::from_le_bytes([bytes[10], bytes[11]]);
@@ -184,7 +184,7 @@ fn item_11_empty_dict_map_produces_v1_1_shape_no_dict_flag() {
 #[test]
 fn item_3_v1_0_reader_rejects_v1_2_segment() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v12.derc");
+    let path = dir.path().join("v12.brcs");
     let mut dicts = HashMap::new();
     dicts.insert("tag".to_string(), train_tag_dict());
     write(&path, dicts);
@@ -215,7 +215,7 @@ fn item_7_trailer_3_without_pool_entry_fails_closed() {
     // pool's single entry name to something that doesn't match
     // any column.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("orphan.derc");
+    let path = dir.path().join("orphan.brcs");
     let mut dicts = HashMap::new();
     dicts.insert("tag".to_string(), train_tag_dict());
     write(&path, dicts);
@@ -255,7 +255,7 @@ fn item_8_fingerprint_mismatch_fails_closed() {
     // fingerprint will no longer match. The reader recomputes
     // and rejects.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("fpmismatch.derc");
+    let path = dir.path().join("fpmismatch.brcs");
     let mut dicts = HashMap::new();
     dicts.insert("tag".to_string(), train_tag_dict());
     write(&path, dicts);
@@ -291,8 +291,8 @@ fn item_9_v1_2_segment_strictly_smaller_than_v1_1_on_redundant_payload() {
     // cost isn't paying for itself; ADR 0079 should be
     // reconsidered rather than accepted defensively.
     let dir = tempdir().unwrap();
-    let v11_path = dir.path().join("v11.derc");
-    let v12_path = dir.path().join("v12.derc");
+    let v11_path = dir.path().join("v11.brcs");
+    let v12_path = dir.path().join("v12.brcs");
 
     // Big enough payload that the dict pool overhead
     // (~hundreds of bytes) is amortized across many pages.

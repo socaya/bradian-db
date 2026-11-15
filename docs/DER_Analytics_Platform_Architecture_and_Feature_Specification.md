@@ -105,7 +105,7 @@ analytics_root/
   ingest_journal/          # durable analytical changes/checkpoints
   datasets/<id>/partitions/<id>/
     manifest               # committed live segment generation
-    segments/<id>.derc      # proprietary DER columnar segment
+    segments/<id>.brcs      # proprietary DER columnar segment
     primary_index/         # stable source record IDs and versions
     secondary_indexes/     # selected page/bitmap/bloom structures
     delete_vectors/        # tombstones and superseded rows
@@ -115,7 +115,7 @@ analytics_root/
   quarantine/              # malformed inputs and repair diagnostics
 ```
 
-### 3.2 Native segment format `.derc`
+### 3.2 Native segment format `.brcs`
 
 Define and version a portable binary specification with: magic header; format major/minor; dataset/partition/segment IDs; schema and metadata fingerprints; row count; row groups; column metadata; typed pages; codec IDs; null/validity bitmap; dictionary metadata; zone maps; compressed buffers; payload offsets; per-page checksums; authentication/encryption metadata and optional feature flags. Persist manifests with an atomic commit protocol and validate before making a generation query-visible. Unknown critical features must fail closed rather than corrupt storage.
 
@@ -486,7 +486,7 @@ Claude must inspect the current DER repository and existing Analytics implementa
 |---|---|---|
 | 0 | Repo/source audit, gap matrix, ADRs, migration plan | Verified architecture inventory and requirement traceability |
 | 1 | Semantics, types, metadata catalog, scalar oracle, query API slice | Correct end-to-end query over existing records |
-| 2 | Native `.derc` storage, WAL, manifests, delta, revisions and compaction | Rebuild, crash and checksum tests |
+| 2 | Native `.brcs` storage, WAL, manifests, delta, revisions and compaction | Rebuild, crash and checksum tests |
 | 3 | Vectorized scan, filters, grouping, sort, memory and spill | Oracle equality + benchmark baseline |
 | 4 | Journal ingest, materialized views, retractions and freshness | Offline updates and correction convergence |
 | 5 | Indexing, stats, CBO, joins, view rewrites, parallelism | Measured speedup without accuracy regression |

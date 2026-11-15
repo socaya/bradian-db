@@ -19,7 +19,7 @@ BACE SRS v1.0 §4.1 requires:
 BACE §6 adds:
 
 > The relational BRPG page and BRWL log are distinct formats and
-> cannot be migrated implicitly as a side effect of `.derc`
+> cannot be migrated implicitly as a side effect of `.brcs`
 > upgrades.
 
 BACE-FMT-004 (§6) requires rollback-safe upgrades:
@@ -63,7 +63,7 @@ between v1 and v2, and the relationship to ADR 0062 (envelope).
 - **Multi-envelope pages** (one BRPG page carrying several BACE
   envelopes). v2.0 carries exactly one envelope per page when the
   flag is set.
-- **`.derc` column segments** — a different format with its own
+- **`.brcs` column segments** — a different format with its own
   envelope story. Follow-up.
 - **BRWL WAL frames** — same note.
 - **Compaction / recompression lifecycle** (BACE-FR-BKP-003).
@@ -310,10 +310,10 @@ Resolved on 14 November 2026 via `BACE_ADR_REVIEW_PACKAGE.md` §4.
    needs its own ADR after the Slice Q implementation proves out
    the page-level mechanism for `PageKind::Data`. (Review package
    P6.)
-6. **`.derc` coexistence.** Independently. BRPG v2 and `.derc`
+6. **`.brcs` coexistence.** Independently. BRPG v2 and `.brcs`
    negotiate policy separately through the policy service
    (ADR 0060). A single table may have v1 BRPG pages, v2 BRPG
-   pages, and a `.derc` projection in three different compression
+   pages, and a `.brcs` projection in three different compression
    postures. (Review package S7.)
 7. **Downgrade mechanism.** Formally verified backup-and-restore
    cycle only (per BACE-FMT-004). No page-by-page downgrade
@@ -354,7 +354,7 @@ the ADR 0061 codec registry registers for the BACE envelope.
 - Define overflow-chain or sidecar-dictionary semantics.
 - Define multi-envelope pages.
 - Specify B+tree v2 key encoding.
-- Specify `.derc` segment migration.
+- Specify `.brcs` segment migration.
 - Specify BRWL WAL frame BACE embedding.
 - Choose codec identifier numbers (ADR 0061 §5 Q1).
 - Implement any decoder or writer.

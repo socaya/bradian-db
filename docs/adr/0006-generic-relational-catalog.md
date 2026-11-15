@@ -17,7 +17,7 @@ Use deterministic `BTreeMap` object collections with monotonically increasing id
 
 ## Consequences and later work
 
-- New logical relational metadata does not alter `.derc`, current analytical partitions or DHIS2 adapters.
+- New logical relational metadata does not alter `.brcs`, current analytical partitions or DHIS2 adapters.
 - The first milestone does **not** support SQL parsing/execution, row storage, table data, MVCC, transactions, catalog persistence, online schema migrations, tenant policies or cluster metadata consensus.
 - The next ADR must select a versioned persistent catalog representation and recovery protocol; do not serialize these Rust structs directly as an unversioned permanent file format.
 - Future FK enforcement must coordinate with transaction isolation, including uniqueness races and concurrent delete/insert operations.

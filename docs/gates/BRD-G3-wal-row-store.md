@@ -55,6 +55,6 @@ These represent **committed tests, not executed-test evidence**.
 
 ## Explicit limitation
 
-**G3 is not the full ACID relational DBMS gate.** Single-operation WAL sync, multi-key atomic batch commit and restart recovery are implemented but are not sufficient for production database guarantees, multi-row atomic transactions, inter-process safe concurrent writers or globally consistent snapshots. Bradian now enforces an OS-level exclusive advisory lock for cooperating RowStore instances; cross-platform power-loss, external-process and hostile-file access tests remain pending. The legacy analytical `.derc` format and DHIS2 integrations remain unchanged.
+**G3 is not the full ACID relational DBMS gate.** Single-operation WAL sync, multi-key atomic batch commit and restart recovery are implemented but are not sufficient for production database guarantees, multi-row atomic transactions, inter-process safe concurrent writers or globally consistent snapshots. Bradian now enforces an OS-level exclusive advisory lock for cooperating RowStore instances; cross-platform power-loss, external-process and hostile-file access tests remain pending. The legacy analytical `.brcs` format and DHIS2 integrations remain unchanged.
 
 CI automation is disabled by owner instruction. This gate remains **unaccepted** until manual checks and outstanding correctness requirements are verified.

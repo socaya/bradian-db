@@ -1,4 +1,4 @@
-//! ADR 0081 — `.derc` multi-page writer integration tests.
+//! ADR 0081 — `.brcs` multi-page writer integration tests.
 //!
 //! Covers the §3.5 checklist: default byte-identical output,
 //! N-page emission, round-trip with concat_buffers, ZoneMap
@@ -81,8 +81,8 @@ fn item_1_default_options_produce_byte_identical_single_page_output() {
     // Any prior test that wrote with max_rows_per_page=None must
     // produce exactly the same file size and page layout.
     let dir = tempdir().unwrap();
-    let path_a = dir.path().join("a.derc");
-    let path_b = dir.path().join("b.derc");
+    let path_a = dir.path().join("a.brcs");
+    let path_b = dir.path().join("b.brcs");
 
     let rows = numeric_rows(100);
     for path in [&path_a, &path_b] {
@@ -109,7 +109,7 @@ fn item_1_default_options_produce_byte_identical_single_page_output() {
 #[test]
 fn item_2_max_rows_per_page_100_on_350_rows_emits_four_pages() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("split.derc");
+    let path = dir.path().join("split.brcs");
 
     let rows = numeric_rows(350);
     let mut w = SegmentWriter::new(numeric_schema(), opts_force_plain_utf8(Some(100)));
@@ -135,7 +135,7 @@ fn item_2_max_rows_per_page_100_on_350_rows_emits_four_pages() {
 #[test]
 fn item_3_multi_page_segment_round_trips_to_identical_values() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("rt.derc");
+    let path = dir.path().join("rt.brcs");
     let rows = numeric_rows(350);
     let mut w = SegmentWriter::new(numeric_schema(), opts_with_split(Some(100)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -169,7 +169,7 @@ fn item_3_multi_page_segment_round_trips_to_identical_values() {
 #[test]
 fn item_4_zone_map_row_count_and_null_count_sum_correctly() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("zone.derc");
+    let path = dir.path().join("zone.brcs");
     let rows = numeric_rows(350);
     let mut w = SegmentWriter::new(numeric_schema(), opts_with_split(Some(100)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -191,7 +191,7 @@ fn item_5_validity_bitmaps_across_pages_reproduce_null_mask() {
     // Covered partially by item 3. Here we explicitly check the
     // concat'd validity bitmap bit-by-bit.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("validity.derc");
+    let path = dir.path().join("validity.brcs");
     let rows = numeric_rows(350);
     let mut w = SegmentWriter::new(numeric_schema(), opts_with_split(Some(100)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -215,7 +215,7 @@ fn item_5_validity_bitmaps_across_pages_reproduce_null_mask() {
 #[test]
 fn item_6_utf8_offsets_after_concat_point_into_merged_buffer() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("utf8.derc");
+    let path = dir.path().join("utf8.brcs");
     let rows = numeric_rows(350);
     let mut w = SegmentWriter::new(numeric_schema(), opts_force_plain_utf8(Some(100)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -258,7 +258,7 @@ fn item_7_dict_encoded_column_splits_like_every_other_column() {
     ]).collect();
 
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_split.derc");
+    let path = dir.path().join("dict_split.brcs");
     let mut w = SegmentWriter::new(schema, opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
     w.finish_to_path(&path).unwrap();
@@ -285,7 +285,7 @@ fn item_8_dict_column_from_multi_page_writer_round_trips() {
     ]).collect();
 
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_rt.derc");
+    let path = dir.path().join("dict_rt.brcs");
     let mut w = SegmentWriter::new(schema, opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
     w.finish_to_path(&path).unwrap();
@@ -310,7 +310,7 @@ fn item_9_bace_envelope_round_trips_across_multi_page_segment() {
     // logic. If this round-trips, the per-page envelope path
     // is correct.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("multi_bace.derc");
+    let path = dir.path().join("multi_bace.brcs");
     let rows = numeric_rows(350);
     let mut w = SegmentWriter::new_with_bace(
         numeric_schema(), opts_with_split(Some(100)),
@@ -361,8 +361,8 @@ fn item_10_multi_page_v1_2_strictly_smaller_than_v1_1_on_small_page_payload() {
     ]).collect();
 
     let dir = tempdir().unwrap();
-    let v11_path = dir.path().join("v11.derc");
-    let v12_path = dir.path().join("v12.derc");
+    let v11_path = dir.path().join("v11.brcs");
+    let v12_path = dir.path().join("v12.brcs");
 
     // 8 rows per page = 512 pages.
     let page_size = Some(8usize);

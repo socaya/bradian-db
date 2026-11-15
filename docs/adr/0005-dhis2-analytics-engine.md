@@ -86,7 +86,7 @@ a source patch — but there is no runtime plugin to install.
 
 DHIS2 call → `AnalyticsManagerFactory.get("dap")` → `DapAnalyticsManager.aggregate(...)`
 → `DapHttpClient.postAnalytics("/api/analytics.json", envelope)` → DAP serves the
-response from `.derc` segments + delta → JSON envelope back to DHIS2 → DHIS2 lifts rows
+response from `.brcs` segments + delta → JSON envelope back to DHIS2 → DHIS2 lifts rows
 into its `Grid` → user sees the result.
 
 ### Rebuild path

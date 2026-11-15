@@ -52,7 +52,7 @@ Four unit tests inline in `bace::codec::tests`:
 - No envelope byte layout yet — Component Q.2.
 - No codec registry yet — Component Q.3.
 - No policy service yet — Component Q.4.
-- No carrier integration (BRPG v2, row_store, `.derc`, BRWL, backup).
+- No carrier integration (BRPG v2, row_store, `.brcs`, BRWL, backup).
 - No ID assignment in the 16–47 inner-encoding range — P1 still
   deferred.
 - No `ZSTD` or `LZ4` codec — only RAW.

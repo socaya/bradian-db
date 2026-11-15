@@ -1,4 +1,4 @@
-# ADR 0088 — `.derc` streaming page iterator (**ACCEPTED**)
+# ADR 0088 — `.brcs` streaming page iterator (**ACCEPTED**)
 
 **Status: ACCEPTED on 2026-11-15 and implemented.**
 

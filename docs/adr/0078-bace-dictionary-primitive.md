@@ -4,7 +4,7 @@
 drafted defaults; implementation landed in the same commit.
 
 Library-level primitive ONLY, mirroring ADR 0075 (authenticated
-envelope) scope. Carrier integration (RowStore, `.derc`, BRWL,
+envelope) scope. Carrier integration (RowStore, `.brcs`, BRWL,
 backup) is explicitly deferred to future ADRs that come with
 workload benchmarks.
 
@@ -101,7 +101,7 @@ Implementation summary:
   - Training with no samples fails `TrainingFailed`.
   - Training target-size clamp (ZSTD requires a minimum dict
     size; the helper surfaces that via `TrainingFailed`).
-  - Size-reduction demonstration: 100 redundant `.derc`-style
+  - Size-reduction demonstration: 100 redundant `.brcs`-style
     sample pages trained to a 16 KB dict, then the first page
     encoded with the dict is strictly smaller than the same
     page encoded without.
@@ -341,9 +341,9 @@ Simpler API. Rejected per ADR 0075 pattern: the type
 discourages casual access to the raw bytes; callers interact
 through the helpers.
 
-**E. Ship carrier integration (`.derc` per-column dict) in the
-same ADR.** Rejected: `.derc` dictionary integration would
-require a `.derc` format change AND a dictionary transport
+**E. Ship carrier integration (`.brcs` per-column dict) in the
+same ADR.** Rejected: `.brcs` dictionary integration would
+require a `.brcs` format change AND a dictionary transport
 decision. Separate ADR.
 
 **F. Hash the label into the fingerprint so different labels
@@ -395,7 +395,7 @@ existing `zstd` crate.
 ## 8. What this ADR explicitly does NOT do
 
 - Touch any carrier
-  (`RowStore`, `.derc`, BRWL, backup, lifecycle, SQL engines).
+  (`RowStore`, `.brcs`, BRWL, backup, lifecycle, SQL engines).
 - Extend `BaceWiring`.
 - Add CLI exposure.
 - Add a new codec ID.

@@ -9,7 +9,7 @@ byte layout into an actual Rust decoder/writer in
 `crates/bradian-relational/src/page.rs`.
 
 This ADR freezes the **Rust API surface** that every carrier
-(row_store, backup, `.derc` later) will use to read/write pages.
+(row_store, backup, `.brcs` later) will use to read/write pages.
 
 ## 1. Context
 
@@ -47,7 +47,7 @@ This ADR freezes the **Rust API surface** that every carrier
 - `buffer_pool.rs` accounting changes — carrier integration ADRs.
 - Any new codec beyond RAW — ADR 0066 (ZSTD) and successors.
 - `backup.rs` / `database_backup.rs` BACE adapter — ADR 0067.
-- `.derc` / BRWL BACE integration — follow-ups.
+- `.brcs` / BRWL BACE integration — follow-ups.
 - Any use of the `bace::policy::PolicyService` to decide which
   pages to encode. This ADR exposes the mechanism; the policy
   wiring is a carrier concern.

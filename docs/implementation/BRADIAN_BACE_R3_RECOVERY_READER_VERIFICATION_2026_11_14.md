@@ -115,7 +115,7 @@ Added to `tests/row_store_bace.rs` on top of the seven R.1+R.2 tests:
 - No compressed-copy page cache. Every indexed read decodes the
   envelope. For RAW this is a memcpy; for future codecs this
   becomes a BACE-FR-ROW-004 optimisation.
-- No `.derc` / BRWL / backup integration. R.4 concerns only the
+- No `.brcs` / BRWL / backup integration. R.4 concerns only the
   `RowStore` matrix; the other carriers are separate ADRs.
 
 ## Next

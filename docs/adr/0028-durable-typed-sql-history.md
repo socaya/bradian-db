@@ -62,7 +62,7 @@ A failed migration leaves the original catalog and shared-domain rows intact. Th
 
 `HistorySqlEngine` refuses G16/G21 `shared-domain/` or G18 lifecycle roots, and does not create a missing history domain on open. The older `SqlEngine`, `DomainSqlEngine`, `MvccSqlEngine`, and `CatalogLifecycle` also refuse roots containing `history-domain/`, preventing accidental creation of a second, empty independently writable SQL storage domain next to G23's authoritative history.
 
-No existing G16 or G21 database is modified in place by G23. Existing DAP analytical crates and `.derc` formats remain outside its scope.
+No existing G16 or G21 database is modified in place by G23. Existing DAP analytical crates and `.brcs` formats remain outside its scope.
 
 ## Remaining limitations and qualification
 

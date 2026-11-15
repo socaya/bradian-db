@@ -91,7 +91,7 @@ follow-up):
   persistent record.
 - **Interactive REPL support.** `bradian-db sql` runs
   non-interactive scripts.
-- **Authenticated envelope, `.derc` BACE, BRWL BACE,
+- **Authenticated envelope, `.brcs` BACE, BRWL BACE,
   dictionary scope, G23 DDL coordinator demonstration
   tests.**
 - **Changes to the private-root permission or CLI hygiene

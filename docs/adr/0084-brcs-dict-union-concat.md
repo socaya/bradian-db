@@ -1,4 +1,4 @@
-# ADR 0084 — `.derc` dict-union concat for differing-dict pages (**ACCEPTED**)
+# ADR 0084 — `.brcs` dict-union concat for differing-dict pages (**ACCEPTED**)
 
 **Status: ACCEPTED on 2026-11-15 and implemented.** See the [verification doc](../implementation/BRADIAN_BACE_DICT_UNION_VERIFICATION_2026_11_15.md).
 
@@ -284,7 +284,7 @@ reader materializes all pages before concat.
 
 ## 6. Impact on invariants
 
-- **INV-001/002/003/004:** N/A — `.derc` is a durable
+- **INV-001/002/003/004:** N/A — `.brcs` is a durable
   analytical format.
 - **INV-005 recoverable lifecycle:** reader-only change. No
   format version bump. No feature flag. Existing v1.0–v1.4

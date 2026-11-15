@@ -38,7 +38,7 @@ Layers top-down:
    `ProgramIndicatorQuery`). `ProgramIndicatorQuery` is DHIS2-flavoured in name but is
    just an indirection through a catalog object — any adapter that registers an
    "indicator" in the catalog can use the same code path.
-3. **Storage + core** — `.derc` column segments, WAL, manifests, delta, snapshots, typed
+3. **Storage + core** — `.brcs` column segments, WAL, manifests, delta, snapshots, typed
    `Value` / `Schema` / `Period` primitives. Zero domain knowledge.
 
 The two adapter wings below `storage/core` are what make the platform ship-ready for a
@@ -82,7 +82,7 @@ refactor.
 | FHIR analytics | new `dap-fhir` crate + optional JSONL source | DHIS2 crate |
 | Offline edge site (e.g. refugee camp registry) | core engine + any source adapter | serving cluster, distributed federation |
 
-Every deployment uses the same `.derc` format, the same vectorized runtime, the same
+Every deployment uses the same `.brcs` format, the same vectorized runtime, the same
 query planner. Only the wings on either side of the core differ.
 
 ## Consequences

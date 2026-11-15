@@ -1,4 +1,4 @@
-# ADR 0082 — `.derc` multi-page `DictIndex32` columns (implementation; **ACCEPTED**)
+# ADR 0082 — `.brcs` multi-page `DictIndex32` columns (implementation; **ACCEPTED**)
 
 **Status: ACCEPTED on 2026-11-15 and implemented.** See the [verification doc](../implementation/BRADIAN_BACE_DERC_MULTI_PAGE_DICT_VERIFICATION_2026_11_15.md).
 
@@ -22,7 +22,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
 
 ## 1. Context
 
-- `.derc`'s `DictIndex32` buffer has `{ indices, validity,
+- `.brcs`'s `DictIndex32` buffer has `{ indices, validity,
   dict_offsets, dict_data }`. The dict is a Utf8 blob keyed
   by an offsets vector; `indices[i]` names one dict entry.
 - `ColumnBuilder::new_dict(logical_type)` builds the whole
@@ -38,7 +38,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
   `DictIndex32`.
 - The dict-encoded Utf8-family columns (default for
   `LogicalType::{Utf8, Uid, Period}`) are precisely the
-  columns most likely to benefit from `.derc` multi-page
+  columns most likely to benefit from `.brcs` multi-page
   writes with BACE dictionary compression (ADRs 0078, 0079,
   0081). Fixing this unblocks the most natural workload for
   the BACE dict-mode story.
@@ -294,7 +294,7 @@ are identical-dict by construction.
 
 ## 6. Impact on invariants
 
-- **INV-001/002/003/004:** N/A — `.derc` is a durable
+- **INV-001/002/003/004:** N/A — `.brcs` is a durable
   analytical format.
 - **INV-005 recoverable lifecycle:** additive. Default
   behavior unchanged. Opt-in multi-page dict output is
@@ -307,7 +307,7 @@ None.
 
 ## 8. What this ADR explicitly does NOT do
 
-- Change the on-disk `.derc` format (no new minor version,
+- Change the on-disk `.brcs` format (no new minor version,
   no new feature flag, no new page shape).
 - Introduce column-level shared dict.
 - Implement dict-union or per-page sub-dict optimization.

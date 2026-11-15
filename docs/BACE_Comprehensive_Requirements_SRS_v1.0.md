@@ -42,7 +42,7 @@ The primary storage metric is end-to-end physical consumption, not just compress
 
 ## 3. Architecture and execution contracts
 
-The logical design comprises: (a) a common compression policy and capability registry; (b) typed statistics/profiling and deterministic candidate selection; (c) specialized storage adapters for BRPG relational pages, .derc columns, WAL and binary exchange; (d) versioned codec metadata and bounded decoders; (e) background recompression and compaction orchestration; and (f) observability and acceptance evidence. Common policy does not imply a single wire format, allocator, page layout or transaction boundary across all components.
+The logical design comprises: (a) a common compression policy and capability registry; (b) typed statistics/profiling and deterministic candidate selection; (c) specialized storage adapters for BRPG relational pages, .brcs columns, WAL and binary exchange; (d) versioned codec metadata and bounded decoders; (e) background recompression and compaction orchestration; and (f) observability and acceptance evidence. Common policy does not imply a single wire format, allocator, page layout or transaction boundary across all components.
 
 Pipeline: logical values → type-aware statistics → eligible inner encodings (constant, dictionary, RLE, delta, FOR, bit-packed, specialized floating point) → optional outer compression (LZ4/ZSTD/raw) → versioned authenticated or checksummed envelope → durable or transport-specific publication. Reads reverse the pipeline under size limits and should preferentially apply encoded-domain filtering, predicate pushdown, dictionary comparisons and SIMD decoding when proven correct.
 
@@ -74,9 +74,9 @@ Scope: OLTP row store and page cache. The subsystem adapter shall inherit the BA
 
 **BACE-FR-ROW-004 — Buffer pool.** Cache accounting MUST count resident decoded and compressed buffers; eviction policy MAY retain compressed copies when beneficial without duplicating unbounded memory. **Verification:** Memory cap and cache hit/miss workload tests.
 
-### 4.2 Columnar OLAP and .derc segments
+### 4.2 Columnar OLAP and .brcs segments
 
-Scope: Columnar OLAP and .derc segments. The subsystem adapter shall inherit the BACE policy and must document its own safety-critical publication and read contracts; common compression utilities do not replace existing durability or authorization checks.
+Scope: Columnar OLAP and .brcs segments. The subsystem adapter shall inherit the BACE policy and must document its own safety-critical publication and read contracts; common compression utilities do not replace existing durability or authorization checks.
 
 **BACE-FR-COL-001 — Type-aware pages.** Pages MUST support type-specific lossless encodings and optional outer codecs; selection shall be made per bounded page or homogeneous run. **Verification:** Round-trip and scan tests for every logical type.
 
@@ -196,7 +196,7 @@ For each eligible candidate, calculate total_stored_bytes = payload + validity +
 
 ## 6. Persistent format, integrity and recovery requirements
 
-Existing .derc v1 identifies codecs 0 Plain, 1 PlainUtf8, 2 Dictionary and reserves 3 RLE, 4 Delta, 5 BitPacked. The current writer is limited to the first three; ZSTD level 3 wraps pages by default when enabled. New codecs must not repurpose reserved numeric meanings incompatibly; feature flags and page metadata need a compatible reader strategy. The relational BRPG page and BRWL log are distinct formats and cannot be migrated implicitly as a side effect of .derc upgrades.
+Existing .brcs v1 identifies codecs 0 Plain, 1 PlainUtf8, 2 Dictionary and reserves 3 RLE, 4 Delta, 5 BitPacked. The current writer is limited to the first three; ZSTD level 3 wraps pages by default when enabled. New codecs must not repurpose reserved numeric meanings incompatibly; feature flags and page metadata need a compatible reader strategy. The relational BRPG page and BRWL log are distinct formats and cannot be migrated implicitly as a side effect of .brcs upgrades.
 
 **BACE-FMT-001 — Strict envelope.** Every compressed durable object MUST carry validated version, codec ID, flags, encoded length, decoded length, bounds and integrity material; dictionary references must resolve within authorized immutable scope. **Verification:** Malformed length, overflow and missing-dictionary fuzz corpus.
 
@@ -254,7 +254,7 @@ Potential future SQL surface (non-implemented illustration): ALTER TABLE observa
 
 **BACE-PLAN-002 — Gate B — Common bounded codecs.** Harden registry, parameter validation, bounded decompression, RAW and LZ4/ZSTD wrappers; finish existing RLE/Delta/BitPack integrations with safe golden vectors. **Verification:** Document gate evidence, measured benchmark deltas, release risk and rollback process.
 
-**BACE-PLAN-003 — Gate C — Adaptive analytical segments.** Introduce per-page selection, multiple pages/row groups, packed dictionaries, FOR and encoded-domain execution; maintain .derc compatibility. **Verification:** Document gate evidence, measured benchmark deltas, release risk and rollback process.
+**BACE-PLAN-003 — Gate C — Adaptive analytical segments.** Introduce per-page selection, multiple pages/row groups, packed dictionaries, FOR and encoded-domain execution; maintain .brcs compatibility. **Verification:** Document gate evidence, measured benchmark deltas, release risk and rollback process.
 
 **BACE-PLAN-004 — Gate D — Relational and index paths.** Design new versioned BRPG-compatible page/value compression and independently assess B+tree prefix encoding under transactional load. **Verification:** Document gate evidence, measured benchmark deltas, release risk and rollback process.
 
@@ -300,11 +300,11 @@ Release blockers include wrong SQL values; incorrect NULL/decimal/float semantic
 
 ## 12. Master-SRS traceability and source notes
 
-The following crosswalk is derived from the uploaded BDS-MASTER-001 revision 1.1: §2 integrated platform; §4 relational pages/WAL/MVCC; §5 .derc and vectorized OLAP; §6 one authoritative commit domain; §7 clusters/federation; §10 encrypted-at-rest, parsers and access control; §11 backup/PITR/retention; §12 data interchange; §13 resource governance and telemetry; §14 measurable engineering gates. BACE details beyond the master document, including named codec candidates, exact selection formula, implementation gates and proposed regression thresholds, are new normative proposals, not statements that the master SRS already specified them.
+The following crosswalk is derived from the uploaded BDS-MASTER-001 revision 1.1: §2 integrated platform; §4 relational pages/WAL/MVCC; §5 .brcs and vectorized OLAP; §6 one authoritative commit domain; §7 clusters/federation; §10 encrypted-at-rest, parsers and access control; §11 backup/PITR/retention; §12 data interchange; §13 resource governance and telemetry; §14 measurable engineering gates. BACE details beyond the master document, including named codec candidates, exact selection formula, implementation gates and proposed regression thresholds, are new normative proposals, not statements that the master SRS already specified them.
 
-Repository baseline examined: crates/bradian-storage/src/codec/mod.rs, crates/bradian-storage/src/segment/{format,writer}.rs, docs/adr/0002-derc-segment-format.md and docs/implementation/BRADIAN_SOURCE_INVENTORY.md. The observed .derc writer uses plain/plain UTF-8/dictionary encodings and optional default ZSTD level 3, while RLE/Delta/BitPacked remain reserved for persistent writing. The row store is architecturally separate; BACE must not mistake analytical compression for full-system coverage.
+Repository baseline examined: crates/bradian-storage/src/codec/mod.rs, crates/bradian-storage/src/segment/{format,writer}.rs, docs/adr/0002-brcs-segment-format.md and docs/implementation/BRADIAN_SOURCE_INVENTORY.md. The observed .brcs writer uses plain/plain UTF-8/dictionary encodings and optional default ZSTD level 3, while RLE/Delta/BitPacked remain reserved for persistent writing. The row store is architecturally separate; BACE must not mistake analytical compression for full-system coverage.
 
-Source records: [1] Vitalworks Limited, Bradian Database Systems Master Product Architecture & SRS, BDS-MASTER-001, Rev. 1.1, 12 Nov. 2026 (user-supplied). [2] Bradian source repository, https://github.com/socaya/bradian-db, reviewed 13 Nov. 2026. [3] Bradian ADR 0002, .derc native segment format v1, in repository docs/adr/. Standards, patents and licensing of proposed specialist codecs require separate due diligence before product adoption.
+Source records: [1] Vitalworks Limited, Bradian Database Systems Master Product Architecture & SRS, BDS-MASTER-001, Rev. 1.1, 12 Nov. 2026 (user-supplied). [2] Bradian source repository, https://github.com/socaya/bradian-db, reviewed 13 Nov. 2026. [3] Bradian ADR 0002, .brcs native segment format v1, in repository docs/adr/. Standards, patents and licensing of proposed specialist codecs require separate due diligence before product adoption.
 
 ## Appendix A. Requirement identifier conventions
 

@@ -13,7 +13,7 @@
 //!
 //! **Scope boundary** mirrors ADR 0075 (authenticated envelope):
 //! this module ships only the primitive. Carriers (RowStore
-//! checkpoint pages, `.derc` columns, BRWL batches, backup
+//! checkpoint pages, `.brcs` columns, BRWL batches, backup
 //! archives) consume dictionaries in future ADRs that come with
 //! their own workload benchmarks.
 
@@ -60,7 +60,7 @@ impl BaceDictionary {
     pub(crate) fn bytes_for_dict(&self) -> &[u8] { &self.bytes }
 
     /// ADR 0079 §3.3 — carrier-integration accessor. A carrier
-    /// (e.g. `.derc` segment writer) that stores the dictionary
+    /// (e.g. `.brcs` segment writer) that stores the dictionary
     /// in its on-disk pool needs the raw bytes. The ADR 0078
     /// "no casual raw-bytes access" culture is relaxed for this
     /// explicit serialization purpose; the method name signals
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn item_10_size_reduction_demonstration() {
-        // ADR 0078 §3.5 item 10 — on redundant .derc-style sample
+        // ADR 0078 §3.5 item 10 — on redundant .brcs-style sample
         // pages, encoding WITH the trained dict is strictly smaller
         // than encoding WITHOUT.
         let s = samples(128);

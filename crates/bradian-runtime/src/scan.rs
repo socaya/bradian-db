@@ -1,4 +1,4 @@
-//! Scan operator: materialise rows from `.derc` segments + the in-memory delta of a Partition
+//! Scan operator: materialise rows from `.brcs` segments + the in-memory delta of a Partition
 //! into a sequence of `RecordBatch` values.
 //!
 //! Reads are snapshot-consistent: the scan holds a `Snapshot` handle for its lifetime and

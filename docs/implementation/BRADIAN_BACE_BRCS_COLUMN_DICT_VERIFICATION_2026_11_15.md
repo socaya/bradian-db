@@ -1,4 +1,4 @@
-# BACE `.derc` column-level shared dict verification (ADR 0083)
+# BACE `.brcs` column-level shared dict verification (ADR 0083)
 
 15 November 2026. Baseline: `a3cd642`. Format bump from v1.3 to
 v1.4. Column dict bytes live ONCE in a new column-dict region
@@ -117,8 +117,8 @@ footer) + "no footer bincode change".
 Added `use_column_dict: false` to all existing
 `SegmentWriterOptions` struct-literal construction sites:
 `partition/store.rs` (2), `multi_page.rs`,
-`multi_page_dict.rs`, `derc_bace.rs`, `derc_baca.rs`,
-`derc_dictionary.rs`, `segment_roundtrip.rs`.
+`multi_page_dict.rs`, `brcs_bace.rs`, `brcs_baca.rs`,
+`brcs_dictionary.rs`, `segment_roundtrip.rs`.
 
 ## Compliance against ADR 0083 §9
 
@@ -164,12 +164,12 @@ Added `use_column_dict: false` to all existing
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (v1.1) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (v1.1) | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | 0078 | BACE dictionary primitive | ACCEPTED |
-| 0079 | `.derc` dictionary carrier (v1.2) | ACCEPTED |
-| 0080 | `.derc` BACA carrier (v1.3) | ACCEPTED |
-| 0081 | `.derc` multi-page writer | ACCEPTED |
+| 0079 | `.brcs` dictionary carrier (v1.2) | ACCEPTED |
+| 0080 | `.brcs` BACA carrier (v1.3) | ACCEPTED |
+| 0081 | `.brcs` multi-page writer | ACCEPTED |
 | 0082 | Multi-page DictIndex32 columns | ACCEPTED |
 | **0083** | **Column-level shared dict (v1.4)** | **ACCEPTED (82.3% size win)** |
 
@@ -190,4 +190,4 @@ Added `use_column_dict: false` to all existing
 Baseline: `a3cd642` (ADR 0082 ACCEPTED).
 Implementation commit: assigned by this commit.
 
-See [ADR 0083](../adr/0083-derc-column-level-shared-dict.md).
+See [ADR 0083]-brcs-column-level-shared-dict.md).

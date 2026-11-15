@@ -21,7 +21,7 @@ the ADR wins.
 | ADR | Commit | Scope | Lines |
 |---|---|---|---|
 | [0060 — BACE central policy service](../adr/0060-bace-central-policy-service.md) | `d0beded` | Type model for a versioned policy service with explicit scope-chain precedence. Addresses **BACE-ARCH-001**. | 308 |
-| [0061 — BACE codec registry and capability negotiation](../adr/0061-bace-codec-registry-capability-negotiation.md) | `244862b` | `u16` codec ID namespace with `.derc`-legacy preservation, `CodecCapability` descriptor, negotiation algorithm with fail-closed on missing critical codecs. Addresses **BACE-ARCH-002**. | 319 |
+| [0061 — BACE codec registry and capability negotiation](../adr/0061-bace-codec-registry-capability-negotiation.md) | `244862b` | `u16` codec ID namespace with `.brcs`-legacy preservation, `CodecCapability` descriptor, negotiation algorithm with fail-closed on missing critical codecs. Addresses **BACE-ARCH-002**. | 319 |
 | [0062 — BACE compressed envelope v1](../adr/0062-bace-compressed-envelope-v1.md) | `b694a90` | 32-byte fixed header + payload + 4-byte trailer CRC32. Little-endian. 14-step fail-closed read protocol. Host-local trust only. Addresses **BACE-FMT-001..005**, **BACE-ARCH-005/006**. | 346 |
 | [0063 — BRPG v2 feature-flag page](../adr/0063-brpg-v2-feature-flag-page.md) | `1ad30b5` | Same 4 096 B page, same 32-byte header. Bump `format_version` to 2, reinterpret byte `[7]` as `feature_flags`. Bit 0 = `payload_is_bace_envelope`. Natural fail-closed via v1 reader. Addresses **BACE-FR-ROW-002**, **BACE-FMT-004**. | 386 |
 
@@ -78,7 +78,7 @@ What acceptance *unblocks* is a second-tier workstream:
 | 0068 — Authenticated envelope variant | A separate on-disk layout for off-host / untrusted payloads | BRD-SEC-003 workstream |
 | 0069 — B+tree v2 key encoding | Prefix / delta encoding inside a v2 Index page | 0063 Q5 |
 | 0070 — Dictionary scope and lifecycle | Where dictionaries live, how they are authorised | 0060 + 0061 |
-| 0071 — `.derc` BACE integration | Column segment migration to the BACE envelope | 0062 |
+| 0071 — `.brcs` BACE integration | Column segment migration to the BACE envelope | 0062 |
 | 0072 — BRWL BACE integration | WAL frame carrying a BACE envelope | 0062 |
 
 **None of ADRs 0064–0072 is drafted.** They become writable only
@@ -97,10 +97,10 @@ the owning ADR §5 or §9.
 | S1 | 0060 Q1 | Scope-chain cardinality — the proposed seven levels match BACE §8. Is a per-tenant level required between workload and database? | 7 levels (no per-tenant) |
 | S2 | 0060 Q2 | Named workload profiles — fixed enum set `FAST` / `BALANCED` / `MAX` / `RAW`, or operator-definable profiles? | Fixed enum, four profiles |
 | S3 | 0060 Q3 | Persistence surface — levels 2–5 live in `PersistentCatalog`, or in a sibling policy store with its own WAL? | Reuse `PersistentCatalog` |
-| S4 | 0060 Q4 | Compatibility with existing `.derc` ZSTD-3 hardcode — migrate `.derc` to policy-governed compression, or leave in place and apply the policy service to new subsystems only? | Leave `.derc` in place; new subsystems only |
+| S4 | 0060 Q4 | Compatibility with existing `.brcs` ZSTD-3 hardcode — migrate `.brcs` to policy-governed compression, or leave in place and apply the policy service to new subsystems only? | Leave `.brcs` in place; new subsystems only |
 | S5 | 0060 Q5 | First subsystem to integrate — `backup` (plan §12.1 recommendation: cold path, reversible, ZSTD proven), or another? | `backup` |
 | S6 | 0063 Q1 | Initial coverage — v2.0 target only `PageKind::Data`, or also `Index` and `FreeMap`? | All three (`Data`, `Index`, `FreeMap`); `Metadata` excluded |
-| S7 | 0063 Q6 | `.derc` coexistence — single table's BRPG v2 and `.derc` projection negotiate policy together, or independently? | Independently |
+| S7 | 0063 Q6 | `.brcs` coexistence — single table's BRPG v2 and `.brcs` projection negotiate policy together, or independently? | Independently |
 
 ### 4.2 Protocol and identifier numbers (six questions)
 
@@ -198,7 +198,7 @@ not permit that.
 - Audit record contents per veto; channel wiring deferred.
 
 **Does NOT:** freeze any on-disk / wire format; choose codec
-numbers; decide envelope layout; alter `.derc` or BRPG today;
+numbers; decide envelope layout; alter `.brcs` or BRPG today;
 introduce admission variants; modify existing ADRs.
 
 ### 6.2 ADR 0061 — codec registry
@@ -206,7 +206,7 @@ introduce admission variants; modify existing ADRs.
 **Freezes:** a `u16` codec ID namespace partition and the
 negotiation algorithm.
 
-- Ranges: `0–5` FROZEN (mirror `.derc` v1 legacy), `6–15` compat
+- Ranges: `0–5` FROZEN (mirror `.brcs` v1 legacy), `6–15` compat
   buffer, `16–31` core inner, `32–47` specialized, `48–63` outer,
   `64–255` BACE future, `256+` vendor/experimental.
 - `CodecCapability` descriptor with every BACE-ARCH-002 field.
@@ -219,7 +219,7 @@ negotiation algorithm.
 
 **Does NOT:** freeze codec ID numbers in 16–63 range; freeze
 envelope layout; freeze BRPG v2; implement any codec; modify
-`.derc` or any existing format; introduce admission variants.
+`.brcs` or any existing format; introduce admission variants.
 
 ### 6.3 ADR 0062 — compressed envelope v1
 
@@ -241,7 +241,7 @@ forever.**
   deferred.
 
 **Does NOT:** freeze authenticated variant; specify dictionary
-storage; specify BRPG v2 / `.derc` / BRWL embedding; freeze codec
+storage; specify BRPG v2 / `.brcs` / BRWL embedding; freeze codec
 ID numbers; implement any codec; modify any existing format.
 
 ### 6.4 ADR 0063 — BRPG v2 feature-flag page
@@ -267,7 +267,7 @@ header position layout. **Only `format_version` (1→2) and byte
 **Does NOT:** freeze authenticated page variant; define
 overflow-chain or sidecar-dictionary semantics; define
 multi-envelope pages; specify B+tree v2 key encoding; specify
-`.derc` or BRWL embedding; freeze codec ID numbers; implement any
+`.brcs` or BRWL embedding; freeze codec ID numbers; implement any
 decoder or writer; modify any existing on-disk format.
 
 ## 7. Invariant check (SRS v1.1 §20)
@@ -322,14 +322,14 @@ following invariants is violated by any of the four ADRs:
 
 That outcome is legitimate. BACE is a parallel SRS with no
 backing today; the only compression in-tree is a hardcoded
-ZSTD-3 wrap on `.derc`. If BACE is deferred or deprioritised:
+ZSTD-3 wrap on `.brcs`. If BACE is deferred or deprioritised:
 
 - All four ADRs stay in-tree as PROPOSED, dated and committed.
   They remain available if a future decision revives the
   workstream.
 - The gaps analysis §5 and §9 continue to list BACE as a parallel
   SRS with zero backing.
-- The `.derc` ZSTD-3 hardcode continues to work. No regression.
+- The `.brcs` ZSTD-3 hardcode continues to work. No regression.
 
 Nothing in `main` depends on BACE acceptance.
 

@@ -217,8 +217,8 @@ mod tests {
     fn roundtrip_with_aad() {
         let ring = KeyRing::new();
         ring.add_key(KeyId::new("k1"), DataKey::generate(), true);
-        let sealed = seal(&ring, b"patients.csv rows", b"seg-1.derc").unwrap();
-        let plain = unseal(&ring, &sealed, b"seg-1.derc").unwrap();
+        let sealed = seal(&ring, b"patients.csv rows", b"seg-1.brcs").unwrap();
+        let plain = unseal(&ring, &sealed, b"seg-1.brcs").unwrap();
         assert_eq!(plain, b"patients.csv rows");
     }
 

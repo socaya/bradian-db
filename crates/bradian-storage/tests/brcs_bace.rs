@@ -1,4 +1,4 @@
-//! ADR 0076 — `.derc` BACE carrier adapter integration tests.
+//! ADR 0076 — `.brcs` BACE carrier adapter integration tests.
 //!
 //! Covers the §3.5 checklist: v1.0 preservation, v1.1 round-trip,
 //! cross-version reject paths, tamper detection, cap enforcement,
@@ -94,7 +94,7 @@ fn assert_round_trip(reader: &mut SegmentReader) {
 #[test]
 fn item_1_writer_with_zstd_balanced_emits_v1_1_bace_segment() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("bace.derc");
+    let path = dir.path().join("bace.brcs");
     write_segment(&path, Some(wiring_zstd_balanced()));
 
     // Confirm v1.1 header: minor version = 1 AND BACE_PAGE_ENVELOPE flag set.
@@ -109,7 +109,7 @@ fn item_1_writer_with_zstd_balanced_emits_v1_1_bace_segment() {
 #[test]
 fn item_3_writer_without_wiring_emits_v1_0_byte_identical() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("legacy.derc");
+    let path = dir.path().join("legacy.brcs");
     write_segment(&path, None);
 
     let bytes = std::fs::read(&path).unwrap();
@@ -125,7 +125,7 @@ fn writer_with_raw_only_wiring_opts_out_of_bace_envelope_overhead() {
     // §3.2 — RAW profile opts out so writers don't pay 36 bytes
     // of envelope per page for no compression benefit.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("raw.derc");
+    let path = dir.path().join("raw.brcs");
     write_segment(&path, Some(wiring_raw_only()));
     let bytes = std::fs::read(&path).unwrap();
     let required = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
@@ -138,7 +138,7 @@ fn writer_with_raw_only_wiring_opts_out_of_bace_envelope_overhead() {
 #[test]
 fn item_2_reader_with_bace_round_trips_bace_segment() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("rt.derc");
+    let path = dir.path().join("rt.brcs");
     write_segment(&path, Some(wiring_zstd_balanced()));
     let mut r = SegmentReader::open_with_bace(&path, wiring_zstd_balanced()).unwrap();
     assert_round_trip(&mut r);
@@ -147,7 +147,7 @@ fn item_2_reader_with_bace_round_trips_bace_segment() {
 #[test]
 fn item_4_legacy_reader_reads_v1_0_segment_unchanged() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("legacy.derc");
+    let path = dir.path().join("legacy.brcs");
     write_segment(&path, None);
     let mut r = SegmentReader::open(&path).unwrap();
     assert_round_trip(&mut r);
@@ -157,7 +157,7 @@ fn item_4_legacy_reader_reads_v1_0_segment_unchanged() {
 fn item_6_reader_with_bace_reads_legacy_v1_0_segment() {
     // Wiring tolerated on legacy v1.0 (no feature flag, no trailer).
     let dir = tempdir().unwrap();
-    let path = dir.path().join("legacy.derc");
+    let path = dir.path().join("legacy.brcs");
     write_segment(&path, None);
     let mut r = SegmentReader::open_with_bace(&path, wiring_zstd_balanced()).unwrap();
     assert_round_trip(&mut r);
@@ -168,7 +168,7 @@ fn item_6_reader_with_bace_reads_legacy_v1_0_segment() {
 #[test]
 fn item_5_legacy_reader_rejects_v1_1_segment_via_feature_flag() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("bace.derc");
+    let path = dir.path().join("bace.brcs");
     write_segment(&path, Some(wiring_zstd_balanced()));
     let err = SegmentReader::open(&path).unwrap_err();
     let msg = format!("{err}");
@@ -183,7 +183,7 @@ fn item_5_legacy_reader_rejects_v1_1_segment_via_feature_flag() {
 #[test]
 fn item_7_tampered_envelope_bytes_fail_closed() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("tamper.derc");
+    let path = dir.path().join("tamper.brcs");
     write_segment(&path, Some(wiring_zstd_balanced()));
     let mut bytes = std::fs::read(&path).unwrap();
     // Flip a byte inside the first page body (after 64-byte header).
@@ -211,7 +211,7 @@ fn item_7_tampered_envelope_bytes_fail_closed() {
 #[test]
 fn item_9_baca_reserved_trailer_byte_fails_closed() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("baca.derc");
+    let path = dir.path().join("baca.brcs");
     write_segment(&path, Some(wiring_zstd_balanced()));
     let mut bytes = std::fs::read(&path).unwrap();
     // Locate the first page's trailer byte. The writer wrote:
@@ -256,7 +256,7 @@ fn item_9_baca_reserved_trailer_byte_fails_closed() {
 #[test]
 fn item_10_unknown_trailer_byte_fails_corruption() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("unk.derc");
+    let path = dir.path().join("unk.brcs");
     write_segment(&path, Some(wiring_zstd_balanced()));
     let mut bytes = std::fs::read(&path).unwrap();
     let file_len = bytes.len();

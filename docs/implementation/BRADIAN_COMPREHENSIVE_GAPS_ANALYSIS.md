@@ -171,7 +171,7 @@ I highlight the **structural** gaps.
   checksums** — Primary (PK) B+tree compliant. **Secondary index
   implementation is not present.** Scoped per plan §4.1.
 - **BRD-STO-002 native columnar segments, atomic manifests** —
-  INHERITED from `.derc`. Not integrated with transactional state.
+  INHERITED from `.brcs`. Not integrated with transactional state.
   BACE §4.2 depends on this.
 - **BRD-STO-003 WAL, checkpoints, restore, PITR, snapshot
   consistency** — WAL/checkpoint/restore compliant. **PITR not
@@ -251,7 +251,7 @@ BRD-PORT-*, BRD-MIG-*, BRD-DR-*)
 ## 5. BACE integration gaps
 
 **All 32 BACE functional requirements are unimplemented.** The only
-compression in-tree is a hardcoded ZSTD-3 wrap on `.derc` columnar
+compression in-tree is a hardcoded ZSTD-3 wrap on `.brcs` columnar
 pages (BACE §6). Nothing in `bradian-relational` implements the
 BACE codec registry, policy service, selector, envelope or
 admission. BACE cross-cuts 10+ shipped modules.
@@ -274,7 +274,7 @@ All 32 FRs OPEN. Summary by section:
 | Section | FRs | Current state |
 |---|---|---|
 | §4.1 OLTP row store + page cache | BACE-FR-ROW-001..004 (4) | None; BRPG envelope cannot carry codec ID today. |
-| §4.2 Columnar OLAP + .derc | BACE-FR-COL-001..005 (5) | Hardcoded ZSTD-3 only; no codec selection, no page statistics API, no encoding-aware filter pushdown. |
+| §4.2 Columnar OLAP + .brcs | BACE-FR-COL-001..005 (5) | Hardcoded ZSTD-3 only; no codec selection, no page statistics API, no encoding-aware filter pushdown. |
 | §4.3 HTAP projections | BACE-FR-HTAP-001..003 (3) | No HTAP projection exists. |
 | §4.4 Indexes, search, metadata | BACE-FR-IDX-001..003 (3) | B+tree keys plain; catalog strings uncompressed. |
 | §4.5 WAL, checkpoints, MVCC | BACE-FR-DUR-001..004 (4) | WAL frames uncompressed; MVCC chains plain. |
@@ -286,7 +286,7 @@ All 32 FRs OPEN. Summary by section:
 
 Eleven codec IDs defined. **None implemented** in the BACE sense (no
 codec registry, no capability negotiation, no selection). ZSTD-3 on
-`.derc` is a hardcoded invocation of the external `zstd` crate, not
+`.brcs` is a hardcoded invocation of the external `zstd` crate, not
 a registered BACE codec.
 
 ### 5.4 BACE persistent-format MUSTs (§6)
@@ -362,7 +362,7 @@ forward.
 | BACE central-policy service shape | BACE-ARCH-001 and every §4 FR |
 | Codec registry capability-negotiation wire format | BACE-ARCH-002/005, BACE-FMT-001 |
 | BRPG v2 feature-flag page layout | BACE-FR-ROW-002, BACE-FMT-001 |
-| First BACE adapter target (backup vs WAL vs .derc) | Which subsystem lands first |
+| First BACE adapter target (backup vs WAL vs .brcs) | Which subsystem lands first |
 
 ## 8. Infrastructure blockers
 

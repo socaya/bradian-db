@@ -1,7 +1,7 @@
 //! Typed physical column buffers.
 //!
 //! A `ColumnBuffer` is a dense, validity-aware column of a single physical type. The storage
-//! writer consumes these to produce `.derc` pages; the reader produces them back on scan. The
+//! writer consumes these to produce `.brcs` pages; the reader produces them back on scan. The
 //! vectorized runtime (`bradian-runtime::ColumnBatch`) wraps these with selection-vector and
 //! operator-oriented metadata.
 

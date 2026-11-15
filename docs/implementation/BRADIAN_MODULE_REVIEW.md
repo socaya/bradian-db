@@ -211,7 +211,7 @@ investigate a forgotten session.
 
 ### 5.5 Legacy identifiers retained by policy
 
-`dap-*` crate names, the `.derc` analytical format and `apps/bradian-ui/`
+`dap-*` crate names, the `.brcs` analytical format and `apps/bradian-ui/`
 remain intentionally. CLAUDE.md §4.17 forbids a bulk rename until a
 documented migration and compatibility suite exist. The visible
 brand (README, Studio title, published GitHub URL) is Bradian.

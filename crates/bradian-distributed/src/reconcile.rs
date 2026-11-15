@@ -38,7 +38,7 @@ pub struct ReconciliationOutcome {
 }
 
 /// In-memory reconciliation log used by tests and by the single-process DAP build. The
-/// production server persists this log in the same `.derc` partition infrastructure used
+/// production server persists this log in the same `.brcs` partition infrastructure used
 /// for analytical facts.
 #[derive(Debug)]
 pub struct ReconciliationLog {

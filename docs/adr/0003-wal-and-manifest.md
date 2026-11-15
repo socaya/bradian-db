@@ -70,7 +70,7 @@ proceed in the background.
 ### Compaction
 
 - v1 scope: flush-delta compaction only. When the delta exceeds a size budget (rows or
-  bytes), writer emits a new `.derc` segment containing the merged state and publishes a
+  bytes), writer emits a new `.brcs` segment containing the merged state and publishes a
   new manifest that supersedes the delta's contributions. Multi-segment merging is
   reserved for a later gate.
 

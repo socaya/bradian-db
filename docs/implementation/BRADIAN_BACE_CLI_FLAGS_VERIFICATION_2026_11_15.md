@@ -159,7 +159,7 @@ bradian-db sql --root /path/to/db \
   unblock §6 scope limits from ADRs 0070/0071/0072.
 - **Authenticated envelope (`BACA`)** — integrity
   authentication family.
-- **`.derc` carrier BACE** — analytical column segments.
+- **`.brcs` carrier BACE** — analytical column segments.
 - **BRWL carrier BACE** — WAL frame compression.
 - **Dictionary scope** — BACE §4.2 dictionary mode.
 

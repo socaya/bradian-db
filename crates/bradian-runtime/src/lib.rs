@@ -2,7 +2,7 @@
 //!
 //! Implements RUN-001..004 from the traceability register:
 //! - Typed `RecordBatch` with validity bitmaps and selection-vector-friendly ownership.
-//! - Scan over `.derc` segments and in-memory delta (via the storage `Partition`).
+//! - Scan over `.brcs` segments and in-memory delta (via the storage `Partition`).
 //! - Filter, project, hash aggregate, sort/top-k.
 //! - A scalar reference "oracle" that re-executes the same logical plan row-by-row for
 //!   property tests.

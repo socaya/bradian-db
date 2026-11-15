@@ -1,4 +1,4 @@
-//! `.derc` v1 writer.
+//! `.brcs` v1 writer.
 //!
 //! Current v1 shape: one row group per segment, one page per column. Multi-row-group splitting
 //! can be added by driving the writer multiple times in a row — the format already supports
@@ -21,7 +21,7 @@ use super::format::{
     SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
 };
 
-pub const FOOTER_MAGIC: [u8; 4] = *b"DRCF";
+pub const FOOTER_MAGIC: [u8; 4] = *b"BCSF";
 
 #[derive(Clone, Debug)]
 pub struct SegmentWriterOptions {
@@ -91,7 +91,7 @@ impl SegmentWriter {
         Self::new_inner(schema, options, None, std::collections::HashMap::new())
     }
 
-    /// ADR 0076 — construct a writer that emits `.derc` v1.1
+    /// ADR 0076 — construct a writer that emits `.brcs` v1.1
     /// segments with BACE-wrapped page bodies. See ADR §3.2.
     /// When the resolved codec is RAW, the writer still emits
     /// v1.0-shape bytes (no envelope, no trailer byte) to avoid
@@ -105,7 +105,7 @@ impl SegmentWriter {
         Self::new_inner(schema, options, Some(wiring), std::collections::HashMap::new())
     }
 
-    /// ADR 0079 — construct a writer that emits `.derc` v1.2
+    /// ADR 0079 — construct a writer that emits `.brcs` v1.2
     /// segments with per-column embedded dictionaries. Columns
     /// present in `dictionaries` encode via
     /// `encode_zstd_with_dictionary`; columns absent fall back to
@@ -341,7 +341,7 @@ fn wrap_page_in_bace_envelope(
         }
     }
     let chosen = chosen.ok_or_else(|| BradianError::corruption(
-        "BACE wiring has no non-RAW codec available for .derc page wrapping",
+        "BACE wiring has no non-RAW codec available for .brcs page wrapping",
     ))?;
     let codec = wiring.registry.codec(chosen).expect("registry lookup just succeeded");
     let mut encoded = Vec::with_capacity(inner_payload.len());
@@ -398,7 +398,7 @@ fn wrap_page_in_baca_envelope(
         }
     }
     let chosen = chosen.ok_or_else(|| BradianError::corruption(
-        "BACE wiring has no non-RAW codec available for .derc BACA wrapping",
+        "BACE wiring has no non-RAW codec available for .brcs BACA wrapping",
     ))?;
     let codec = wiring.registry.codec(chosen).expect("registry lookup just succeeded");
     let mut encoded = Vec::with_capacity(inner_payload.len());

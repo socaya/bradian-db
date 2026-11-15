@@ -15,7 +15,7 @@ cycle. Third ADR in the 0089–0091 batch.
   snapshot files can swap page bytes (same CRC) or forge a
   page that reads back as valid data.
 - ADR 0080 integrated BACA (authenticated BACE variant) into
-  `.derc` pages via trailer byte 2. ADR 0086 did the same
+  `.brcs` pages via trailer byte 2. ADR 0086 did the same
   for BRWL batches (opcode 5). The checkpoint snapshot
   pages remain the last unauthenticated BACE carrier.
 
@@ -113,7 +113,7 @@ existing v1/v2 tools.
 
 **C. MAC the whole 4096-byte page.** Rejected: the BRPG
 header has its own CRC; a payload-scoped MAC matches BACE/
-BACA semantics on other carriers (.derc, BRWL).
+BACA semantics on other carriers (.brcs, BRWL).
 
 ## 5. Open design questions
 

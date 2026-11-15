@@ -77,7 +77,7 @@ Implementation summary:
   separate ADR.
 - **Authenticated envelope (`BACA`).** Different family of
   work; separate ADR.
-- **`.derc` carrier BACE.** Analytical column segments;
+- **`.brcs` carrier BACE.** Analytical column segments;
   orthogonal carrier; separate ADR.
 - **BRWL carrier BACE.** WAL frames; separate ADR.
 - **BACE-aware backup entry points on `MvccSqlEngine`.** G21
@@ -244,7 +244,7 @@ No new error variants.
 - Add new policy keys or codecs.
 - Add backup paths on MvccSqlEngine.
 - Touch G23 DDL coordinator flows.
-- Touch `.derc` or BRWL carriers.
+- Touch `.brcs` or BRWL carriers.
 - Introduce archive-level compression, encryption, or
   authentication.
 - Change in-memory MVCC version semantics.

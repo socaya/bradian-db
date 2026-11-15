@@ -176,7 +176,7 @@ pub use authenticated::{
 
 ## Remaining BACE workstream candidates
 
-- **`.derc` carrier BACE** — analytical column segments in
+- **`.brcs` carrier BACE** — analytical column segments in
   `bradian-storage` crate; format version bump; cross-crate.
 - **BRWL carrier BACE** — WAL frame compression on
   latency-sensitive write path; benchmarking required.

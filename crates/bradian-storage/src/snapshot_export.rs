@@ -6,7 +6,7 @@
 //! ```text
 //! <export_root>/
 //!   manifest.json       # copy of partition manifest at export time
-//!   segments/<id>.derc  # one file per visible segment
+//!   segments/<id>.brcs  # one file per visible segment
 //!   wal.log             # raw bytes of the current WAL (can be empty)
 //!   SNAPSHOT.json       # metadata header: schema fingerprint, data_revision, ts
 //! ```

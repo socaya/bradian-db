@@ -1,9 +1,9 @@
-# ADR 0080 — BACA carrier integration for `.derc` (implementation; **ACCEPTED**)
+# ADR 0080 — BACA carrier integration for `.brcs` (implementation; **ACCEPTED**)
 
 **Status: ACCEPTED, 15 November 2026.** Owner accepted with
 **explicit sign-off on the §10 threat-model + evidence table**
 (not a defensive accept). The ADR ships a narrow local
-integrity primitive reachable from the `.derc` carrier; it is
+integrity primitive reachable from the `.brcs` carrier; it is
 NOT a full production security feature.
 
 Implementation summary:
@@ -28,7 +28,7 @@ Implementation summary:
   `bace::authenticated::read_authenticated_envelope`. Missing
   wiring, missing authentication, and MAC mismatch all fail
   closed with specific error messages.
-- `crates/bradian-storage/tests/derc_baca.rs` — 10 §3.5
+- `crates/bradian-storage/tests/brcs_baca.rs` — 10 §3.5
   integration tests.
 
 1046 workspace tests pass (1036 → 1046); clippy clean on
@@ -41,7 +41,7 @@ Implementation summary:
   + payload). It is reachable only via direct call to
   `bace::authenticated::write_authenticated_envelope` /
   `read_authenticated_envelope` — no carrier consumes it.
-- ADR 0076 ships `.derc` v1.1 with BACE envelopes (trailer
+- ADR 0076 ships `.brcs` v1.1 with BACE envelopes (trailer
   byte 1). ADR 0079 ships v1.2 adding per-column dictionaries
   (trailer byte 3). Trailer byte 2 was **reserved** for BACA
   and unused.
@@ -55,7 +55,7 @@ Implementation summary:
   **narrow, operator-local threat model** (§3.6) and does
   NOT claim production-grade tamper-evidence beyond it. The
   claim this ADR makes is:
-  > "A `.derc` segment that BRADIAN wrote with an operator-
+  > "A `.brcs` segment that BRADIAN wrote with an operator-
   > held key K will fail to read if the segment bytes have
   > been modified without re-computing the MAC with K, OR
   > if the reader presents a key different from K."
@@ -78,7 +78,7 @@ Implementation summary:
 
 - Extend `BaceWiring` with an optional `authentication:
   Option<BaceAuthentication>` field.
-- `.derc` format minor bump v1.2 → v1.3:
+- `.brcs` format minor bump v1.2 → v1.3:
   - `SEGMENT_VERSION_MINOR_V1_3 = 3`.
   - `FeatureFlags::BACE_PAGE_AUTHENTICATED = 1 << 7`.
   - `ALL_SUPPORTED_V1_3` superset including the new bit.
@@ -129,7 +129,7 @@ Implementation summary:
   entirely.
 - **Replay / anti-rollback.** The MAC does not include a
   monotonic counter.
-- **BACA on `.derc` v1.1 / v1.2 segments.** v1.3 is a
+- **BACA on `.brcs` v1.1 / v1.2 segments.** v1.3 is a
   distinct opt-in; v1.1 and v1.2 continue to emit BACE
   envelopes.
 
@@ -174,7 +174,7 @@ through `BaceAuthentication::Debug` (ADR 0075).
 
 ### 3.3 Writer dispatch
 
-Inside `.derc`'s `write_column`:
+Inside `.brcs`'s `write_column`:
 
 ```rust
 let (payload_bytes, compressed, trailer_tag) = if let Some(dict) = &dict_for_column {
@@ -267,7 +267,7 @@ has operator adoption.
 
 **B. Ship BACA on all carriers (BRWL, RowStore, backup) in
 one ADR.** Rejected — too much security-sensitive code in
-one commit. `.derc` first, then follow-ups.
+one commit. `.brcs` first, then follow-ups.
 
 **C. Make authentication implicit (auto-generate key).**
 Rejected — operator must own key custody for any
@@ -313,14 +313,14 @@ reachable path.
 
 ## 6. Impact on invariants
 
-- **INV-001 commit correctness:** N/A — `.derc` is a
+- **INV-001 commit correctness:** N/A — `.brcs` is a
   durable analytical format with no live transactions.
 - **INV-002 one authoritative state:** no change.
 - **INV-003 no authorization gap:** THIS ADR interacts
   with authorization. The MAC verifies envelope integrity
   but says nothing about the operator's authorization to
   decrypt the segment's underlying data. SQL authorization
-  for queries over `.derc` segments is unchanged — it runs
+  for queries over `.brcs` segments is unchanged — it runs
   **after** the segment reader hands decoded rows back to
   the query engine. The MAC is an orthogonal integrity
   check.
@@ -347,7 +347,7 @@ None. `bradian-storage` already deps on `bradian-relational`
 - Make a confidentiality claim.
 - Add anti-replay / anti-rollback.
 - Add CLI exposure.
-- Change `.derc` v1.0 / v1.1 / v1.2 behavior.
+- Change `.brcs` v1.0 / v1.1 / v1.2 behavior.
 
 ## 9. Acceptance evidence required before marking Accepted
 
@@ -369,7 +369,7 @@ None. `bradian-storage` already deps on `bradian-relational`
 
 ## 10. Threat model + CLAUDE.md §6 evidence table
 
-The ADR makes ONE claim: a `.derc` v1.3 segment that passed
+The ADR makes ONE claim: a `.brcs` v1.3 segment that passed
 MAC verification under key `K` was written by a party
 holding `K`, and its bytes have not been modified since. All
 other security claims are future work.
@@ -380,7 +380,7 @@ other security claims are future work.
 | **Revocation** | Operator destroys the key value; segments become unreadable. | Automated revocation workflow, key-ID registry, per-segment revocation audit. |
 | **Audit integrity** | MAC failure fires a specific `Corruption` variant in the carrier error chain, nameable in logs. | Dedicated security audit log, structured events, retention / compliance semantics. |
 | **Key rotation** | Operator rewrites segments with a new key (manual). | Atomic rotation, dual-key support, key versioning in segment headers. |
-| **Backup protection** | **This ADR does NOT extend BACA to backup carriers.** A BACA `.derc` segment copied into a `backup.rs` archive would NOT be authenticated at the backup-archive level — only at the segment level. | BACA on backup, catalog, lifecycle, WAL carriers. See §2 out-of-scope list. |
+| **Backup protection** | **This ADR does NOT extend BACA to backup carriers.** A BACA `.brcs` segment copied into a `backup.rs` archive would NOT be authenticated at the backup-archive level — only at the segment level. | BACA on backup, catalog, lifecycle, WAL carriers. See §2 out-of-scope list. |
 | **Incident response** | Operator sees a `Corruption` with "BACA MAC verification failed" + column name; documented response is to isolate the segment and investigate bit rot vs tampering via CRC vs MAC distinction. | Automated incident alerts, playbooks, tenant notification. |
 
 **The ADR is honest about what it is: a narrow local

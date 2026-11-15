@@ -10,7 +10,7 @@ implement cycle for ADRs 0086–0088.
 - BRWL (bradian relational WAL) today carries four opcodes:
   `1` = single put, `2` = single delete, `3` = plain batch,
   `4` = BACE-wrapped batch (ADR 0077).
-- `.derc` segments gained authenticated pages (BACA) in ADR
+- `.brcs` segments gained authenticated pages (BACA) in ADR
   0080. `BaceWiring.authentication: Option<BaceAuthentication>`
   is set once per store.
 - BRWL batches above the `BRWL_BACE_MIN_BODY_BYTES` threshold

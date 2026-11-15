@@ -116,7 +116,7 @@ Fail-closed:
   are added when the selection algorithm needs them — this
   component's lookup + negotiation paths do not.
 - No policy service yet — Component Q.4.
-- No carrier integration (BRPG v2, row_store, `.derc`, BRWL,
+- No carrier integration (BRPG v2, row_store, `.brcs`, BRWL,
   backup).
 - No ID assignment in the 16–47 inner-encoding range. P1 still
   deferred.

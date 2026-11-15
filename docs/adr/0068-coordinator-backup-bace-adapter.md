@@ -431,7 +431,7 @@ None. No new crate deps. Implementation confined to:
   authentication.
 - Attempt to be BACE-aware inside `verify_reopened` (which
   reopens the full coordinator).
-- Fix `.derc` or BRWL carriers (separate ADRs).
+- Fix `.brcs` or BRWL carriers (separate ADRs).
 
 ## 9. Known scope limit explicitly surfaced
 

@@ -151,7 +151,7 @@ Bradian originated from the DAP/DER Analytics Platform analytical prototype. The
 - [Original analytical milestone records](gates/G1.md), [G2](gates/G2.md), and [G6](gates/G6.md)
 - [Original DHIS2 analytics integration decision](adr/0005-dhis2-analytics-engine.md)
 
-Legacy `dap-*` crate names, APIs, `.derc` storage and some DHIS2 integration identifiers are intentionally preserved to avoid breaking existing analytical data and clients. This does not change the product identity: **Bradian Database Systems**.
+Legacy `dap-*` crate names, APIs, `.brcs` storage and some DHIS2 integration identifiers are intentionally preserved to avoid breaking existing analytical data and clients. This does not change the product identity: **Bradian Database Systems**.
 
 ## Documentation policy
 

@@ -85,7 +85,7 @@ and no coordinator backup.
 - Add new policy keys or codecs.
 - Add backup paths on MvccSqlEngine.
 - Touch G23 DDL coordinator flows.
-- Touch `.derc` or BRWL carriers.
+- Touch `.brcs` or BRWL carriers.
 - Change in-memory MVCC version semantics.
 
 ## BACE workstream progress (as of this ADR)
@@ -114,7 +114,7 @@ relational stack is complete.
   in ADRs 0071, 0072.
 - **Authenticated envelope (`BACA`).** Different family of
   work; adds integrity authentication to the envelope.
-- **`.derc` carrier BACE.** Analytical column segments
+- **`.brcs` carrier BACE.** Analytical column segments
   under BACE wrapping. Independent carrier.
 - **BRWL carrier BACE.** WAL frame compression. Independent
   carrier.

@@ -77,7 +77,7 @@ sequence, each with its own commit and verification report.
 - **Catalog persistence of policy tree.** `PolicyService` is
   constructed in-memory by the caller; levels 2–5 persistence is
   a separate ADR per ADR 0060 §5 item 3.
-- **`.derc` column segment BACE.** Future follow-up.
+- **`.brcs` column segment BACE.** Future follow-up.
 
 ## 3. Proposed design
 

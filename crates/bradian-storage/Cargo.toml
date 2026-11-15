@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = ".derc segment format, WAL, manifests, delta, compaction"
+description = ".brcs segment format, WAL, manifests, delta, compaction"
 
 [dependencies]
 bradian-core    = { workspace = true }

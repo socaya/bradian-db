@@ -1,4 +1,4 @@
-# ADR 0081 — `.derc` multi-page column writer (implementation; **ACCEPTED**)
+# ADR 0081 — `.brcs` multi-page column writer (implementation; **ACCEPTED**)
 
 **Status: ACCEPTED, 15 November 2026.** Hard-fail §3.5 item 10
 passes on multi-page input, closing out the ADR 0079 §10
@@ -69,14 +69,14 @@ accepted.
 
 ## 1. Context
 
-- `.derc` format v1 was designed with multi-page support
+- `.brcs` format v1 was designed with multi-page support
   (`ColumnMeta.pages: Vec<PageMeta>`), but the writer only
   emits one page per column.
 - `SegmentReader::read_column` handles `pages.len() == 1`
   directly and routes `> 1` through `concat_buffers`, which
   returns `BradianError::unsupported("multi-page column
   concatenation not implemented in v1")`.
-- Every ADR in the BACE workstream that touches `.derc`
+- Every ADR in the BACE workstream that touches `.brcs`
   (0076, 0079, 0080) has been constrained by "single page
   per column." The ADR 0079 §10 size-reduction test had to
   relax from "strictly smaller" to "pool-overhead-bounded"
@@ -126,7 +126,7 @@ accepted.
 - **Per-column `max_rows_per_page` overrides.** The option
   is a global row count applied uniformly; column-specific
   thresholds are deferred.
-- **Row-group concept.** `.derc` v1 has one implicit row
+- **Row-group concept.** `.brcs` v1 has one implicit row
   group per segment; adding multiple row groups changes
   footer shape. Deferred.
 - **Streaming reads.** The reader still materializes the
@@ -315,11 +315,11 @@ one-per-segment; multi-page within a row group is enough.
 
 ## 6. Impact on invariants
 
-- **INV-001/002/003/004:** N/A — `.derc` is a durable
+- **INV-001/002/003/004:** N/A — `.brcs` is a durable
   analytical format.
 - **INV-005 recoverable lifecycle:** additive. Default
   behavior is unchanged. Opt-in multi-page writes stay
-  readable via the same `.derc` v1.0/v1.1/v1.2/v1.3 format
+  readable via the same `.brcs` v1.0/v1.1/v1.2/v1.3 format
   rules; no feature flag is added because multi-page was
   always in the format, only unreachable.
 

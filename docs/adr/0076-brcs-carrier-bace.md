@@ -1,10 +1,10 @@
-# ADR 0076 — `.derc` carrier BACE adapter (implementation; **ACCEPTED**)
+# ADR 0076 — `.brcs` carrier BACE adapter (implementation; **ACCEPTED**)
 
 **Status: ACCEPTED, 15 November 2026.** Owner accepted with the
 drafted defaults; implementation landed in the same commit as
 the R.1–R.4 sub-slices from §3.6.
 
-First ADR in the BACE series that touches `bradian-storage`. `.derc`
+First ADR in the BACE series that touches `bradian-storage`. `.brcs`
 format minor-version bump v1.0 → v1.1. New
 `FeatureFlags::BACE_PAGE_ENVELOPE` plus per-page trailer byte
 infrastructure. Legacy v1.0 segments stay byte-identical; v1.0
@@ -30,7 +30,7 @@ Implementation summary:
   reader reads trailer byte and dispatches on
   `BaceEnvelopeTag::{None, BaceV1, BacaV1Reserved}` with clean
   errors for unknown/reserved values.
-- `crates/bradian-storage/tests/derc_bace.rs` — 10 new integration
+- `crates/bradian-storage/tests/brcs_bace.rs` — 10 new integration
   tests covering §3.5 compliance.
 
 1005 workspace tests pass (995 → 1005); clippy clean on
@@ -38,10 +38,10 @@ Implementation summary:
 
 ## 1. Context
 
-- `.derc` v1 is the Bradian analytical columnar segment format
+- `.brcs` v1 is the Bradian analytical columnar segment format
   (one file per segment under
-  `<root>/datasets/<id>/partitions/<id>/segments/<id>.derc`).
-  Current layout: `SEGMENT_MAGIC "DERC\x01SEG"`, u16 major
+  `<root>/datasets/<id>/partitions/<id>/segments/<id>.brcs`).
+  Current layout: `SEGMENT_MAGIC "BRCS\x01SEG"`, u16 major
   version `1`, u16 minor `0`, 20-byte header reserved, N
   compressed pages, bincode-serialized `SegmentFooter`,
   `FOOTER_MAGIC`.
@@ -57,7 +57,7 @@ Implementation summary:
 - This path is entirely separate from `bradian-relational`'s
   BRPG v2 pages (ADR 0064). The two formats do not share
   bytes, codecs, or recovery paths.
-- Bringing `.derc` under BACE buys:
+- Bringing `.brcs` under BACE buys:
   - **Uniform codec governance** — operators control
     compression through one `BaceWiring` instead of the
     scattered `options.compress: bool` on the writer.
@@ -66,17 +66,17 @@ Implementation summary:
     `uncompressed_len`, but there is no caller-supplied cap
     distinct from the on-disk declaration. BACE adds one.
   - **Codec extensibility** — future outer codecs (LZ4 etc.)
-    plug in via the BACE registry without `.derc` format
+    plug in via the BACE registry without `.brcs` format
     changes.
   - **Authenticated variant readiness** — once a carrier-
     integration ADR consumes ADR 0075's `BACA` envelope,
-    `.derc` segments inherit tamper-evidence for free.
+    `.brcs` segments inherit tamper-evidence for free.
 
 ## 2. Scope of this ADR
 
 **In scope:**
 
-- `.derc` format v2: minor version bump to
+- `.brcs` format v2: minor version bump to
   `SEGMENT_VERSION_MAJOR = 1`, `SEGMENT_VERSION_MINOR = 1`.
   Readers that know v1.1 can read both v1.0 and v1.1
   segments. v1.0-only readers REJECT v1.1 segments through a
@@ -116,7 +116,7 @@ Implementation summary:
 
 **Explicitly out of scope** (each a future ADR or follow-up):
 
-- **Authenticated `.derc` segments (BACA).** The format
+- **Authenticated `.brcs` segments (BACA).** The format
   reserves `bace_envelope=2`, but no production writer emits
   it. A future carrier-integration ADR for BACA across
   carriers lands that path.
@@ -125,18 +125,18 @@ Implementation summary:
   whatever the inner codec produces.
 - **Dictionary-scope integration** (BACE §4.2). Separate ADR.
 - **CLI exposure on `bradian-admin` operator commands that touch
-  `.derc`** (`ExportSnapshot`, `RestoreSnapshot`,
+  `.brcs`** (`ExportSnapshot`, `RestoreSnapshot`,
   `CompactPartition`). Follow-up ADR extends the CLI; this
   ADR adds only library APIs.
-- **Encryption of `.derc` payload** (ChaCha20-Poly1305 or
+- **Encryption of `.brcs` payload** (ChaCha20-Poly1305 or
   similar). Separate ADR.
 - **Format-level changes beyond the two additions** (new
   feature flag, new PageMeta field).
 - **Migration from v1.0 to v1.1 in-place.** v1.0 segments
   stay v1.0 forever; compaction / rewrite is the only path
   to v1.1.
-- **Rename `.derc` → `.bradian-column` or any `dap-*` crate
-  rename.** Per CLAUDE.md §4, `.derc` and `dap-*` are
+- **Rename `.brcs` → `.bradian-column` or any `dap-*` crate
+  rename.** Per CLAUDE.md §4, `.brcs` and `dap-*` are
   retained internal identifiers.
 
 ## 3. Proposed design
@@ -343,7 +343,7 @@ R.x-style implementation workflow analogous to ADR 0065:
   signatures (`new_with_bace`, `open_with_bace`) returning
   the legacy behavior unchanged. No format change yet.
   Proves the dependency direction compiles.
-- **R.2** — `.derc` v1.1 format bits: `SEGMENT_VERSION_MINOR
+- **R.2** — `.brcs` v1.1 format bits: `SEGMENT_VERSION_MINOR
   = 1`, `BACE_PAGE_ENVELOPE` flag, per-page trailer byte,
   `PageMeta::bace_envelope` field (if we revisit Option C
   vs A/B at implementation time). Reader tolerates v1.1 but
@@ -361,7 +361,7 @@ depended on by every consumer within that crate; splitting
 it to a sibling now is a separate refactor. Future ADR can
 split if coupling becomes a problem.
 
-**B. Major version bump (`.derc` v2) with no v1.0 backward
+**B. Major version bump (`.brcs` v2) with no v1.0 backward
 compat.** Simpler format. Rejected: operators would be
 forced to compact every segment to upgrade, a risky mass-
 rewrite.
@@ -375,7 +375,7 @@ the page body.** Rejected: conflates envelope framing with
 BACE magic, and a v1.0 reader reading a v1.1 page would
 mis-parse the first byte as valid payload.
 
-**E. Skip `.derc` BACE entirely; consume ZSTD at the
+**E. Skip `.brcs` BACE entirely; consume ZSTD at the
 analytical layer directly.** Rejected: loses the uniform-
 codec-governance story, the bounded-decode cap, and the
 future BACA tamper-evidence path.
@@ -406,7 +406,7 @@ future BACA tamper-evidence path.
 
 ## 6. Impact on invariants
 
-- **INV-001 commit correctness:** N/A — `.derc` is a durable
+- **INV-001 commit correctness:** N/A — `.brcs` is a durable
   analytical format with no live transactions.
 - **INV-002 one authoritative state:** no change. Legacy and
   BACE-wrapped segments coexist; neither hides the other.
@@ -426,14 +426,14 @@ future BACA tamper-evidence path.
 
 ## 8. What this ADR explicitly does NOT do
 
-- Rename `.derc` or any `dap-*` crate.
+- Rename `.brcs` or any `dap-*` crate.
 - Change the inner codec set.
-- Add BACA / authenticated envelopes to `.derc` production
+- Add BACA / authenticated envelopes to `.brcs` production
   writes.
 - Add encryption.
 - Rewrite any existing v1.0 segment.
-- Extend `bradian-admin` CLI for `.derc` BACE.
-- Touch the `.derc` partition WAL, manifest, zone-map, or
+- Extend `bradian-admin` CLI for `.brcs` BACE.
+- Touch the `.brcs` partition WAL, manifest, zone-map, or
   compaction code beyond the writer/reader entry points.
 - Make a tamper-evidence security claim (that comes with
   the BACA carrier-integration ADR + CLAUDE.md §6 evidence).

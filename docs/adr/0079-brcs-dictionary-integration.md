@@ -1,4 +1,4 @@
-# ADR 0079 — `.derc` dictionary carrier integration (implementation; **ACCEPTED**)
+# ADR 0079 — `.brcs` dictionary carrier integration (implementation; **ACCEPTED**)
 
 **Status: ACCEPTED, 15 November 2026.** Plumbing accepted; ships
 the dictionary-aware format bump v1.1 → v1.2 end-to-end. **The
@@ -28,7 +28,7 @@ Implementation summary:
   on segments with the v1.2 feature flag, trailer=3 dispatch
   to `decode_bace_v1_page_with_dict`, fingerprint-mismatch
   and missing-pool-entry fail-closed paths.
-- `crates/bradian-storage/tests/derc_dictionary.rs` — 10 §3.5
+- `crates/bradian-storage/tests/brcs_dictionary.rs` — 10 §3.5
   integration tests.
 
 1036 workspace tests pass (1026 → 1036); clippy clean on
@@ -66,13 +66,13 @@ requires either:**
 
 Neither condition is met by the v1 writer's
 one-page-per-column emission on ultra-redundant test data.
-A future ADR adding multi-page `.derc` writing would unlock
+A future ADR adding multi-page `.brcs` writing would unlock
 the dict's actual size advantage; this ADR ships the
 plumbing so that future ADR has somewhere to land.
 
 ## 1. Context
 
-- `.derc` v1.1 (ADR 0076) wraps page payloads in BACE v1
+- `.brcs` v1.1 (ADR 0076) wraps page payloads in BACE v1
   envelopes. The current envelope uses ZSTD **without** a
   dictionary — each page is compressed in isolation.
 - ADR 0078 shipped the `BaceDictionary` primitive and the
@@ -85,7 +85,7 @@ plumbing so that future ADR has somewhere to land.
     period strings, common codes).
   - ZSTD's dictionary mode is especially effective when the
     same ~1 KB prefix appears in dozens of pages.
-  - `.derc` already supports multiple pages per column via
+  - `.brcs` already supports multiple pages per column via
     `ColumnMeta.pages: Vec<PageMeta>` (even if the v1 writer
     emits one page per column today).
 - Open question deliberately resolved by this ADR: **where
@@ -93,20 +93,20 @@ plumbing so that future ADR has somewhere to land.
   1. **Embedded in segment footer** (one copy per column).
      Simplest; self-contained segment; matches the existing
      file-copy backup model.
-  2. **Sidecar file** (`.derd` next to `.derc`). Requires
+  2. **Sidecar file** (`.derd` next to `.brcs`). Requires
      backup-flow orchestration + rename-atomic pairs.
   3. **External registry** mapping `fingerprint → bytes`.
      Requires a registry service + consistency semantics.
   4. **Inline in every envelope**. Wastes space; defeats
      dictionary scope's "store common bytes once" benefit.
   Draft picks **(1) embedded in segment footer** as the only
-  option that preserves `.derc`'s self-contained property.
+  option that preserves `.brcs`'s self-contained property.
 
 ## 2. Scope of this ADR
 
 **In scope:**
 
-- `.derc` format minor bump v1.1 → v1.2:
+- `.brcs` format minor bump v1.1 → v1.2:
   - New `SEGMENT_VERSION_MINOR_V1_2 = 2`.
   - New `FeatureFlags::BACE_PAGE_DICTIONARY = 1 << 6`.
   - New `ALL_SUPPORTED_V1_2` superset including the new bit.
@@ -367,7 +367,7 @@ expensive. Minor bump + feature-flag reject is cleaner.
 
 ## 6. Impact on invariants
 
-- **INV-001 commit correctness:** N/A — `.derc` is a
+- **INV-001 commit correctness:** N/A — `.brcs` is a
   durable analytical format with no live transactions.
 - **INV-002 one authoritative state:** no change. Legacy
   and v1.2 segments coexist.
@@ -388,7 +388,7 @@ None. `bradian-storage` already deps on `bradian-relational`
 
 ## 8. What this ADR explicitly does NOT do
 
-- Rename `.derc` or any `dap-*` crate.
+- Rename `.brcs` or any `dap-*` crate.
 - Auto-train dictionaries.
 - Add sidecar / external-registry transport.
 - Add CLI exposure.

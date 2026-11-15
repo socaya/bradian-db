@@ -1,4 +1,4 @@
-//! `.derc` v1 reader.
+//! `.brcs` v1 reader.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -57,7 +57,7 @@ impl SegmentReader {
         })
     }
 
-    /// ADR 0076 + ADR 0079 — open a `.derc` segment that may
+    /// ADR 0076 + ADR 0079 — open a `.brcs` segment that may
     /// carry BACE-wrapped page bodies (v1.1) and/or per-column
     /// embedded dictionaries (v1.2). The wiring is consulted
     /// per page if the segment's `BACE_PAGE_ENVELOPE` feature
@@ -683,7 +683,7 @@ fn read_footer_with_features(
 ) -> BradianResult<(SegmentFooter, bool, bool, bool)> {
     let file_len = file.metadata()?.len();
     if file_len < 64 + 8 {
-        return Err(BradianError::corruption("file too short to be a valid .derc"));
+        return Err(BradianError::corruption("file too short to be a valid .brcs"));
     }
     // Verify magic.
     file.seek(SeekFrom::Start(0))?;

@@ -28,7 +28,7 @@ Copied here so every reader sees them before picking up a task:
    runs.
 5. **No compatibility shims for unused code.** Deletion is preferred over
    `#[cfg(todo)]`. New flags only when behavior would otherwise regress.
-6. **Legacy DAP identifiers (`dap-*`, `.derc`, `apps/bradian-ui/`) stay.**
+6. **Legacy DAP identifiers (`dap-*`, `.brcs`, `apps/bradian-ui/`) stay.**
    Bulk rename is not in scope until a migration + compatibility suite
    exists. Visible branding is Bradian Database Systems / Bradian Studio.
 
@@ -393,7 +393,7 @@ Bradian threat model and master SRS call out as design blockers.
 - Production acceptance of any gate beyond its current honest status. No
   gate can be marked accepted without its exit evidence; this plan does
   not short-circuit that.
-- Removal of the inherited `dap-*` identifiers or `.derc` format before a
+- Removal of the inherited `dap-*` identifiers or `.brcs` format before a
   versioned migration is designed.
 - CI automation. The owner instruction makes CI manual-only; this plan
   does not change that.

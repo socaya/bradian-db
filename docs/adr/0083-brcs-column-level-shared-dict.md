@@ -1,4 +1,4 @@
-# ADR 0083 — `.derc` column-level shared dictionary format (**ACCEPTED**)
+# ADR 0083 — `.brcs` column-level shared dictionary format (**ACCEPTED**)
 
 **Status: ACCEPTED on 2026-11-15 and implemented.** See the [verification doc](../implementation/BRADIAN_BACE_DERC_COLUMN_DICT_VERIFICATION_2026_11_15.md).
 
@@ -13,7 +13,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
 
 ## 1. Context
 
-- `.derc` v1.0–v1.3 pack `(indices, dict_offsets, dict_data)`
+- `.brcs` v1.0–v1.3 pack `(indices, dict_offsets, dict_data)`
   inside every `PageCodec::Dictionary` page payload. ADR 0082
   made N-page dict columns work by cloning the dict into
   every page at write time (fast-path concat at read time).
@@ -31,7 +31,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
 
 **In scope:**
 
-- A new `.derc` minor version `V1_4` and feature flag
+- A new `.brcs` minor version `V1_4` and feature flag
   `COLUMN_DICT` (bit 8) covering the new on-disk shape.
 - A new column-level dict region between the last page region
   and the footer. For each column that opts into column-dict
@@ -256,7 +256,7 @@ A real fix removes the duplication from the on-disk shape.
 5. **Column-dict region position.** Draft: between pages and
    footer. Alternative: at the END of the file, after the
    footer trailer — enables appending more columns post-hoc.
-   Rejected because `.derc` has no append semantics; confirm.
+   Rejected because `.brcs` has no append semantics; confirm.
 6. **Interaction with BACE dict pool (ADR 0079).** Draft:
    both apply independently. The BACE dict pool trains on
    raw column input bytes and operates at compression time;
@@ -271,7 +271,7 @@ A real fix removes the duplication from the on-disk shape.
 
 ## 6. Impact on invariants
 
-- **INV-001/002/003/004:** N/A — `.derc` is a durable
+- **INV-001/002/003/004:** N/A — `.brcs` is a durable
   analytical format.
 - **INV-005 recoverable lifecycle:** additive feature flag.
   Default behavior unchanged. v1.4 segments are readable by

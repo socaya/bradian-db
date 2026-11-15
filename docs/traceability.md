@@ -18,7 +18,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 
 | ID | Priority | Requirement (summary) | Status | Crate(s) | Verification |
 |---|---|---|---|---|---|
-| STO-001 | M | Native versioned `.derc` column segment format | DONE | `bradian-storage` | roundtrip + corruption + version-reject tests |
+| STO-001 | M | Native versioned `.brcs` column segment format | DONE | `bradian-storage` | roundtrip + corruption + version-reject tests |
 | STO-002 | M | WAL, atomic manifest, crash recovery | DONE | `bradian-storage` | partition_durability suite covers crash+replay |
 | STO-003 | M | Typed pages, NULL masks, dictionaries, compression | DONE | `bradian-storage` | codec roundtrips + dict codec selection test |
 | STO-004 | M | Snapshot-consistent delta/segment reads | DONE | `bradian-storage`, `bradian-runtime` | `Partition::snapshot_rows` + scan merges delta |
@@ -57,7 +57,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 | API-003 | M | Async jobs, cancel, bounded export | PART | `bradian-serving` | submit / list / get / cancel wired + tested; async query jobs enforce `max_output_rows` cap (default 100k) with precise diagnostic when exceeded; file-spilled large export (`/exports/<id>`) DEFER |
 | SEC-001 | M | Row/column/OU/program/site policy | DONE | `bradian-security` | policy_predicate + e2e acceptance test |
 | SEC-002 | M | Context-safe caching + diagnostics | DONE | `bradian-security` | cache_key fingerprint test |
-| SEC-003 | M | Encryption + governed deletion + export audit | PART | `bradian-security` | AuditLog + ChaCha20-Poly1305 `seal` / `unseal` with AAD binding + key-ring rotation + governed deletion (`KeyRing::revoke`, `revoke_and_rotate`) ship with 9 encryption tests; storage-layer integration (seal `.derc` payloads end-to-end) DEFER |
+| SEC-003 | M | Encryption + governed deletion + export audit | PART | `bradian-security` | AuditLog + ChaCha20-Poly1305 `seal` / `unseal` with AAD binding + key-ring rotation + governed deletion (`KeyRing::revoke`, `revoke_and_rotate`) ship with 9 encryption tests; storage-layer integration (seal `.brcs` payloads end-to-end) DEFER |
 | OPS-001 | M | Metrics, tracing, profiling, query history | DONE | `bradian-serving` | /engine/health + query history ring |
 | OPS-002 | M | Capture isolation + bounded background | DEFER | `bradian-runtime`, `bradian-admin` | Capture latency co-load bench |
 | OPS-003 | M | Snapshot restore + source-log rebuild | DONE | `bradian-storage`, `bradian-admin` | WAL replay covers runtime restart; `export_snapshot` + `restore_snapshot` + `inspect-snapshot` CLI ship with round-trip + refuse-overwrite + refuse-non-empty-target + missing-header tests |
@@ -71,7 +71,7 @@ Status legend: `TODO` not started · `WIP` in progress · `DONE` implemented and
 |---|---|---|---|
 | G0 | Audit, traceability, ADRs, workspace bootstrap | DONE | ADR 0001-0003, CLAUDE.md, this file |
 | G1 | Types, catalog, scalar oracle, query DSL slice | DONE | `docs/gates/G1.md` |
-| G2 | `.derc` storage, WAL, manifests, delta, compaction | DONE | `docs/gates/G2.md` |
+| G2 | `.brcs` storage, WAL, manifests, delta, compaction | DONE | `docs/gates/G2.md` |
 | G3 | Vectorized operators + spill | PART | 77-test runtime + bench baseline; disk spill DEFER |
 | G4 | Ingest + materialized views + retractions | PART | canonical ingest + delta tombstones + freshness; incremental MV refresh DEFER |
 | G5 | Indexes, stats, CBO, joins, parallelism | DEFER | — |

@@ -1,7 +1,7 @@
-# BACE `.derc` carrier adapter verification (ADR 0076)
+# BACE `.brcs` carrier adapter verification (ADR 0076)
 
 15 November 2026. Baseline: `aa2555e`. First BACE ADR that
-touches `bradian-storage`. `.derc` format minor-version bump
+touches `bradian-storage`. `.brcs` format minor-version bump
 v1.0 → v1.1 with additive feature flag and per-page trailer
 byte.
 
@@ -15,7 +15,7 @@ Clippy clean on `cargo clippy --workspace --all-targets
 |---|---|
 | `cargo check -p bradian-storage` | Passed |
 | `cargo test --workspace --locked` | 1005 passed, 0 failed |
-| `cargo test -p bradian-storage --test derc_bace` | 10 passed |
+| `cargo test -p bradian-storage --test brcs_bace` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## What landed
@@ -99,7 +99,7 @@ Anti-swap check: the envelope's `decoded_length` must equal
 the page's declared `uncompressed_len`; a mismatch fails
 closed with a specific corruption message.
 
-### 10 new tests in `tests/derc_bace.rs`
+### 10 new tests in `tests/brcs_bace.rs`
 
 | # | Test | §3.5 item |
 |---|---|---|
@@ -119,7 +119,7 @@ closed with a specific corruption message.
 The envelope-level decoded-length cap is proven by ADR 0065
 R.3 test
 `decoded_length_above_policy_cap_fails_closed_before_allocation`.
-The `.derc` reader threads the same policy cap through
+The `.brcs` reader threads the same policy cap through
 `EnvelopeCaps::max_decoded_length` and relies on
 `read_envelope`'s bounded-decode step. No duplicate test
 landed here.
@@ -150,14 +150,14 @@ in this ADR locks in the current module layout.
 
 ## What this ADR explicitly does NOT do (unchanged)
 
-- Rename `.derc` or any `dap-*` crate.
+- Rename `.brcs` or any `dap-*` crate.
 - Change the inner codec set.
-- Add BACA / authenticated envelopes to `.derc` production
+- Add BACA / authenticated envelopes to `.brcs` production
   writes.
 - Add encryption.
 - Rewrite any existing v1.0 segment.
-- Extend `bradian-admin` CLI for `.derc` BACE.
-- Touch the `.derc` partition WAL, manifest, zone-map, or
+- Extend `bradian-admin` CLI for `.brcs` BACE.
+- Touch the `.brcs` partition WAL, manifest, zone-map, or
   compaction code beyond the writer/reader entry points.
 - Make a tamper-evidence security claim.
 
@@ -171,7 +171,7 @@ in this ADR locks in the current module layout.
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration tests | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| **0076** | **`.derc` carrier BACE adapter** | **ACCEPTED** |
+| **0076** | **`.brcs` carrier BACE adapter** | **ACCEPTED** |
 
 ## Remaining BACE workstream candidates
 
@@ -188,4 +188,4 @@ in this ADR locks in the current module layout.
 Baseline: `aa2555e` (ADR 0076 PROPOSED).
 Implementation commit: assigned by this commit.
 
-See [ADR 0076](../adr/0076-derc-carrier-bace.md).
+See [ADR 0076]-brcs-carrier-bace.md).

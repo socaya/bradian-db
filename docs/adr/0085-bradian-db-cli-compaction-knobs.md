@@ -35,7 +35,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
   it hard-codes `None` + `false`.
 - Admin CLI: `bradian-db compact-partition` + `bradian-db
   export-snapshot` are the two entry points where a new
-  `.derc` write happens at operator request.
+  `.brcs` write happens at operator request.
 
 ## 2. Scope of this ADR
 

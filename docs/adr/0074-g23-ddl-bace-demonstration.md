@@ -62,7 +62,7 @@ scope.
   invariants.
 - This is the cleanest remaining "operator-facing verification"
   of the BACE workstream before moving into carrier work
-  (`.derc`, BRWL) or new security primitives
+  (`.brcs`, BRWL) or new security primitives
   (authenticated envelope).
 
 ## 2. Scope of this ADR
@@ -106,7 +106,7 @@ scope.
 - **Any change to the DDL coordinator's semantics,
   activation protocol, or lock discipline.**
 - **Benchmarks of DDL-emitted v2 page size.**
-- **Authenticated envelope, `.derc` BACE, BRWL BACE,
+- **Authenticated envelope, `.brcs` BACE, BRWL BACE,
   dictionary scope** — each its own future ADR.
 
 ## 3. Proposed test design
@@ -212,7 +212,7 @@ None. One new test file.
 - Benchmark anything.
 - Change the DDL coordinator.
 - Address the four other remaining BACE candidates
-  (authenticated envelope, `.derc`, BRWL, dictionary scope).
+  (authenticated envelope, `.brcs`, BRWL, dictionary scope).
 
 ## 9. Acceptance evidence required before marking Accepted
 

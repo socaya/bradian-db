@@ -379,7 +379,7 @@ None. `bradian-relational` already consumes
 - Add authentication (BACA) to WAL frames.
 - Add WAL-level encryption.
 - Modify fsync / group-commit behavior.
-- Touch `.derc`, backup, or any coordinator path.
+- Touch `.brcs`, backup, or any coordinator path.
 
 ## 9. Acceptance evidence required before marking Accepted
 

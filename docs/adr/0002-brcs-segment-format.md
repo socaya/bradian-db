@@ -1,4 +1,4 @@
-# ADR 0002 — `.derc` native segment format v1
+# ADR 0002 — `.brcs` native segment format v1
 
 **Status:** Accepted · 2026-11-11
 **Spec sections:** §3.1–§3.3, §3.5, requirement STO-001/003/006
@@ -20,7 +20,7 @@ are in bytes.
 +---------------------------------------------------+
 |                 FILE HEADER (64 B)                |
 +---------------------------------------------------+
-|   magic [8]       = "DERC\x01SEG"                 |
+|   magic [8]       = "BRCS\x01SEG"                 |
 |   version_major u16  = 1                          |
 |   version_minor u16  = 0                          |
 |   feature_flags u64  = required-feature bitset    |
@@ -37,7 +37,7 @@ are in bytes.
 +---------------------------------------------------+
 |                     FOOTER                        |
 +---------------------------------------------------+
-|   footer_magic [4]  = "DRCF"                      |
+|   footer_magic [4]  = "BCSF"                      |
 |   footer_len    u32  = length of bincode payload  |
 |   footer_crc    u32  = CRC32(footer_payload)      |
 |   footer_payload[]   = bincode(SegmentFooter)     |
@@ -98,7 +98,7 @@ and, when present, the validity bitmap. Mismatch → error `SegmentCorruption`.
 
 ### Atomic publication
 
-A segment file is first written to `segments/<id>.derc.tmp`, fsynced, then renamed to the final
+A segment file is first written to `segments/<id>.brcs.tmp`, fsynced, then renamed to the final
 name. The partition `manifest` records the generation + visible segment set and is itself
 written via temp-and-rename with its own CRC32. Readers hold a snapshot handle referencing the
 generation; compaction cannot delete files referenced by live snapshots.

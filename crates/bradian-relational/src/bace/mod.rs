@@ -8,7 +8,7 @@
 //! - Component Q.3 — `registry`: static codec registry (ADR 0061). TBD.
 //! - Component Q.4 — `policy`: policy service skeleton (ADR 0060). TBD.
 //!
-//! **Standalone module.** No carrier integration (BRPG v2 pages, `.derc`
+//! **Standalone module.** No carrier integration (BRPG v2 pages, `.brcs`
 //! column segments, BRWL WAL frames, backup archives) lands in this
 //! component or in Q.2–Q.4. Carrier integration is a separate workstream
 //! per each future implementation ADR.

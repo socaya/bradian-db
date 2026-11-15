@@ -139,7 +139,7 @@ mod tests {
             generation: 7,
             visible_segments: vec![ManifestSegment {
                 segment_id: "s1".into(),
-                path: dir.path().join("segments/s1.derc"),
+                path: dir.path().join("segments/s1.brcs"),
                 size_bytes: 1024,
                 row_count: 42,
                 watermark_ms: 1000,

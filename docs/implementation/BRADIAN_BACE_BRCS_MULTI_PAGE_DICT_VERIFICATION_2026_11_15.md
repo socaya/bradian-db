@@ -1,4 +1,4 @@
-# BACE `.derc` multi-page `DictIndex32` verification (ADR 0082)
+# BACE `.brcs` multi-page `DictIndex32` verification (ADR 0082)
 
 15 November 2026. Baseline: `8560af1`. Closes the ADR 0081 §2
 non-goal by removing the dict-column split bypass. Dict
@@ -146,12 +146,12 @@ baseline that does not exist yet.
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (v1.1) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (v1.1) | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | 0078 | BACE dictionary primitive | ACCEPTED |
-| 0079 | `.derc` dictionary carrier (v1.2) | ACCEPTED (plumbing + relaxed size test) |
-| 0080 | `.derc` BACA carrier (v1.3) | ACCEPTED (narrow threat model) |
-| 0081 | `.derc` multi-page writer | ACCEPTED (size win verified) |
+| 0079 | `.brcs` dictionary carrier (v1.2) | ACCEPTED (plumbing + relaxed size test) |
+| 0080 | `.brcs` BACA carrier (v1.3) | ACCEPTED (narrow threat model) |
+| 0081 | `.brcs` multi-page writer | ACCEPTED (size win verified) |
 | **0082** | **Multi-page `DictIndex32` columns** | **ACCEPTED** |
 
 ## Remaining BACE directions
@@ -169,4 +169,4 @@ baseline that does not exist yet.
 Baseline: `8560af1` (ADR 0081 ACCEPTED).
 Implementation commit: assigned by this commit.
 
-See [ADR 0082](../adr/0082-derc-multi-page-dict-columns.md).
+See [ADR 0082]-brcs-multi-page-dict-columns.md).

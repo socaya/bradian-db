@@ -1,4 +1,4 @@
-//! End-to-end runtime check: ingest rows into a Partition, flush to a `.derc` segment, scan,
+//! End-to-end runtime check: ingest rows into a Partition, flush to a `.brcs` segment, scan,
 //! filter, aggregate, and verify the result matches the scalar oracle.
 
 use bradian_core::{Column, LogicalType, Schema, Value};

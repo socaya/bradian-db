@@ -1,6 +1,6 @@
-//! `.derc` segment format v1 — writer + reader.
+//! `.brcs` segment format v1 — writer + reader.
 //!
-//! Byte layout and feature flags are specified in `docs/adr/0002-derc-segment-format.md`.
+//! Byte layout and feature flags are specified in `docs/adr/0002-brcs-segment-format.md`.
 
 mod format;
 mod reader;

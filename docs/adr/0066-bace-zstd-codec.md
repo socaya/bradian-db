@@ -45,11 +45,11 @@ coalescing; that work is a separate future ADR.
   target.
 - ADR 0061 §9 item 7 (resolved): format-version strategy is
   monotone `u16` per codec. ZSTD starts at `format_version = 1`.
-- BACE §6 `.derc` already uses ZSTD level 3 as the default wrap,
+- BACE §6 `.brcs` already uses ZSTD level 3 as the default wrap,
   independent of the BACE policy service. That hardcode is left
   in place per ADR 0060 §5 item 4; the BACE ZSTD codec is a
   separate, policy-governed integration (not a reuse of the
-  `.derc` layer).
+  `.brcs` layer).
 - Workspace already pins `zstd = "0.13"` for `bradian-storage`; this
   ADR adds it as a direct dep on `bradian-relational`.
 
@@ -62,7 +62,7 @@ coalescing; that work is a separate future ADR.
 - Registration via `BuiltInRegistry::new()` so every build ships
   ZSTD alongside RAW.
 - Default compression level pinned to **ZSTD level 3** (matches
-  the `.derc` hardcode; `ZSTD_CLEVEL_DEFAULT`).
+  the `.brcs` hardcode; `ZSTD_CLEVEL_DEFAULT`).
 - Capability descriptor: `Determinism::HardwareDependent`,
   `flags.critical = false`, `flags.allows_outer_compression =
   false` (ZSTD is itself an outer compressor).
@@ -113,7 +113,7 @@ coalescing; that work is a separate future ADR.
 ```rust
 pub const ZSTD_ID: CodecId = CodecId(49);
 pub const ZSTD_FORMAT_VERSION: u16 = 1;
-pub const ZSTD_LEVEL: i32 = 3;  // matches .derc default, ZSTD_CLEVEL_DEFAULT
+pub const ZSTD_LEVEL: i32 = 3;  // matches .brcs default, ZSTD_CLEVEL_DEFAULT
 ```
 
 The codec sits at `CodecId(49)` inside the outer-compression range
@@ -311,19 +311,19 @@ first implementation.
 Operator flexibility. Rejected: the Slice Q `CodecCapability`
 does not expose a `parameters` schema yet. Adding a per-codec
 parameter needs an ADR 0061 amendment first; the current ADR
-hardcodes level 3 (matches `.derc`).
+hardcodes level 3 (matches `.brcs`).
 
-**E. Reuse `bradian-storage`'s existing `.derc` ZSTD wrap via a
-shared helper crate.** Code reuse. Rejected: `.derc` uses ZSTD
+**E. Reuse `bradian-storage`'s existing `.brcs` ZSTD wrap via a
+shared helper crate.** Code reuse. Rejected: `.brcs` uses ZSTD
 without the BACE envelope. Collapsing the two would couple the
-BACE lifecycle to `.derc`'s v1 format and vice versa. Each
+BACE lifecycle to `.brcs`'s v1 format and vice versa. Each
 subsystem maintains its own compression wrapper.
 
 ## 5. Open design questions (owner review)
 
 1. **ZSTD compression level.** Draft pins level 3. Alternatives:
    level 1 (fast), level 10, level 19 (max). Level 3 matches
-   `.derc` and is the ZSTD default; confirm.
+   `.brcs` and is the ZSTD default; confirm.
 2. **Codec ID 49 vs a later number in 48–63.** Draft picks 49
    immediately after RAW. Alternatives: 50 to leave 49 reserved
    for a future codec family between RAW and ZSTD. Picking 49 is
@@ -383,7 +383,7 @@ transitive dep.
 - Expose `compression.zstd_level` as a policy key.
 - Implement BACE-SEL-002 avoid-expansion.
 - Use ZSTD dictionaries.
-- Touch `.derc` or `BRWL`.
+- Touch `.brcs` or `BRWL`.
 
 ## 9. Acceptance evidence required before marking Accepted
 

@@ -82,7 +82,7 @@ bradian-db/
 ├── crates/
 │   ├── bradian-relational/       # Persistent catalog, native SQL, WAL rows, typed tables, disk B+tree
 │   ├── bradian-core/                 # Legacy core primitives
-│   ├── bradian-storage/              # Existing .derc analytical segments, WAL and snapshots
+│   ├── bradian-storage/              # Existing .brcs analytical segments, WAL and snapshots
 │   ├── bradian-runtime/              # Analytical execution operators
 │   ├── bradian-planner/              # Existing analytics query planning
 │   ├── bradian-security/             # Security primitives

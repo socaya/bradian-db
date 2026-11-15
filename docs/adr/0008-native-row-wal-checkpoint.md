@@ -6,7 +6,7 @@
 
 ## Problem and architectural boundary
 
-Bradian's first generic relational catalog and physical page codec were in-memory structures and binary primitives. They did not persist user rows or provide recovery after a process restart. This decision introduces a functional, non-DHIS2 persistent key/value row store while retaining the existing analytical `.derc` format and the original DAP conventions: append-only checksummed log records, per-record synchronization, deterministic maps, explicit checkpoints, strict decoding and actual file-based tests.
+Bradian's first generic relational catalog and physical page codec were in-memory structures and binary primitives. They did not persist user rows or provide recovery after a process restart. This decision introduces a functional, non-DHIS2 persistent key/value row store while retaining the existing analytical `.brcs` format and the original DAP conventions: append-only checksummed log records, per-record synchronization, deterministic maps, explicit checkpoints, strict decoding and actual file-based tests.
 
 This implements complete single-key persistence and an **atomic local multi-key batch-commit primitive** rather than a pretend full SQL DBMS. It provides persistent inserts, replacements, deletes, ordered scans, checksummed transaction frames, checkpoints and recovery. It does not implement multi-row SQL transactions, MVCC, a B+tree, a persistent relational catalog, query planning, SQL constraints, cluster replication, file encryption or multi-process file locking.
 

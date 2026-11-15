@@ -76,7 +76,7 @@ ADR 0074 scope and could be a separate thin follow-up.
 - Benchmark anything.
 - Change the DDL coordinator.
 - Address the four remaining BACE candidates
-  (authenticated envelope, `.derc`, BRWL, dictionary
+  (authenticated envelope, `.brcs`, BRWL, dictionary
   scope).
 
 ## BACE workstream progress (as of this ADR)
@@ -106,7 +106,7 @@ G24 relational coordinator:
 
 - **Authenticated envelope (`BACA`)** — new security primitive
   with HMAC/signatures; needs threat modeling per CLAUDE.md §6.
-- **`.derc` carrier BACE** — analytical column segments in
+- **`.brcs` carrier BACE** — analytical column segments in
   `bradian-storage` crate; format version bump.
 - **BRWL carrier BACE** — WAL frame compression on the
   latency-sensitive write path; needs benchmarking.

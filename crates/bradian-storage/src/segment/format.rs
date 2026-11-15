@@ -1,11 +1,11 @@
-//! `.derc` v1 header, footer and page metadata.
+//! `.brcs` v1 header, footer and page metadata.
 
 use bradian_core::{Fingerprint, LogicalType, PhysicalType};
 use serde::{Deserialize, Serialize};
 
 use crate::zonemap::ZoneMap;
 
-pub const SEGMENT_MAGIC: [u8; 8] = *b"DERC\x01SEG";
+pub const SEGMENT_MAGIC: [u8; 8] = *b"BRCS\x01SEG";
 pub const SEGMENT_VERSION_MAJOR: u16 = 1;
 /// ADR 0076 — writer emits minor=1 when the BACE feature flag is
 /// set on the segment header; otherwise minor=0 for byte-identical

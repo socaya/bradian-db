@@ -33,7 +33,7 @@ module:
 ```rust
 pub const ZSTD_ID: CodecId = CodecId(49);
 pub const ZSTD_FORMAT_VERSION: u16 = 1;
-pub const ZSTD_LEVEL: i32 = 3;        // matches ZSTD_CLEVEL_DEFAULT and .derc default
+pub const ZSTD_LEVEL: i32 = 3;        // matches ZSTD_CLEVEL_DEFAULT and .brcs default
 ```
 
 Capability descriptor matches ADR 0066 §3.2 exactly:
@@ -75,7 +75,7 @@ updated to the two-codec reality:
 **6 unit tests in `src/bace/codec.rs`:**
 
 - `zstd_codec_identifies_itself_as_id_49_hardware_dependent_non_critical_outer`
-- `zstd_pinned_level_matches_derc_default` — asserts `ZSTD_LEVEL == 3`.
+- `zstd_pinned_level_matches_brcs_default` — asserts `ZSTD_LEVEL == 3`.
 - `zstd_round_trip_empty_input_golden_corpus` — ADR 0066 §3.6 case 1.
 - `zstd_round_trip_short_incompressible_golden_corpus` — §3.6 case 2.
 - `zstd_round_trip_long_repetitive_golden_corpus_actually_saves_space`
@@ -126,7 +126,7 @@ updated to the two-codec reality:
 - Implement BACE-SEL-002 avoid-expansion selection. On
   incompressible data ZSTD today still pays 36 bytes of envelope
   overhead.
-- Touch `.derc`, BRWL, backup, or any other carrier.
+- Touch `.brcs`, BRWL, backup, or any other carrier.
 - Use ZSTD dictionaries.
 
 ## Known design-level limitation surfaced by this slice

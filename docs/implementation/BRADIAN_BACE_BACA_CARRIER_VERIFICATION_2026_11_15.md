@@ -1,7 +1,7 @@
 # BACE BACA carrier integration verification (ADR 0080)
 
 15 November 2026. Baseline: `5b9fe0f`. First carrier consumer
-of ADR 0075's `BaceAuthentication` primitive. `.derc` minor
+of ADR 0075's `BaceAuthentication` primitive. `.brcs` minor
 bump v1.2 → v1.3 with BACA envelopes on non-dict pages.
 
 **Owner explicitly accepted the §10 threat model.** This ADR
@@ -22,7 +22,7 @@ Clippy clean on `cargo clippy --workspace --all-targets
 |---|---|
 | `cargo check --workspace --tests` | Passed |
 | `cargo test --workspace --locked` | 1046 passed, 0 failed |
-| `cargo test -p bradian-storage --test derc_baca` | 10 passed |
+| `cargo test -p bradian-storage --test brcs_baca` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## What landed
@@ -108,8 +108,8 @@ survives through the error chain (test item 10).
 
 ### No regression to existing BACE paths
 
-All 10 ADR 0076 tests (`derc_bace.rs`), all 10 ADR 0079
-tests (`derc_dictionary.rs`), and every prior-ADR test still
+All 10 ADR 0076 tests (`brcs_bace.rs`), all 10 ADR 0079
+tests (`brcs_dictionary.rs`), and every prior-ADR test still
 passes. ADR 0076's `item_9_baca_reserved_trailer_byte_fails_closed`
 now exercises the new trailer-2 → "authentication required"
 fail-closed path (same observable outcome; error message
@@ -154,7 +154,7 @@ non-goal landed as observable behavior.
 ## §10 threat-model recap (authoritative record)
 
 The ADR makes ONE claim:
-> "A `.derc` segment that BRADIAN wrote with an operator-held
+> "A `.brcs` segment that BRADIAN wrote with an operator-held
 > key K will fail to read if the segment bytes have been
 > modified without re-computing the MAC with K, OR if the
 > reader presents a key different from K."
@@ -186,7 +186,7 @@ Does NOT claim:
 - Make a confidentiality claim.
 - Add anti-replay / anti-rollback.
 - Add CLI exposure.
-- Change `.derc` v1.0 / v1.1 / v1.2 behavior.
+- Change `.brcs` v1.0 / v1.1 / v1.2 behavior.
 
 ## BACE workstream progress (as of this ADR)
 
@@ -198,18 +198,18 @@ Does NOT claim:
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (v1.1) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (v1.1) | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | 0078 | BACE dictionary primitive | ACCEPTED |
-| 0079 | `.derc` dictionary carrier (v1.2) | ACCEPTED (plumbing) |
-| **0080** | **`.derc` BACA carrier (v1.3)** | **ACCEPTED (narrow threat model)** |
+| 0079 | `.brcs` dictionary carrier (v1.2) | ACCEPTED (plumbing) |
+| **0080** | **`.brcs` BACA carrier (v1.3)** | **ACCEPTED (narrow threat model)** |
 
 ## Remaining BACE directions
 
 The primitive library is complete. Carrier integration can
 continue in future ADRs on specific unmet needs:
 
-- **Multi-page `.derc` writer** — would unlock ADR 0079's
+- **Multi-page `.brcs` writer** — would unlock ADR 0079's
   size-reduction win by amortizing dict pool.
 - **BACA on backup / BRWL / RowStore carriers** — would
   extend the ADR 0080 integrity primitive beyond the one

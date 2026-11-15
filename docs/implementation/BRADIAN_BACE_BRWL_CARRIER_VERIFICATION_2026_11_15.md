@@ -154,7 +154,7 @@ Single-op `put` / `delete` continue to use the unchanged
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (cross-crate) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (cross-crate) | ACCEPTED |
 | **0077** | **BRWL carrier BACE (benchmarked)** | **ACCEPTED** |
 
 ## Remaining BACE workstream candidates

@@ -1,4 +1,4 @@
-# BACE `.derc` multi-page writer verification (ADR 0081)
+# BACE `.brcs` multi-page writer verification (ADR 0081)
 
 15 November 2026. Baseline: `f2548b0`. Closes the ADR 0079
 §10 "pool-overhead-bounded" relaxation by enabling the
@@ -163,15 +163,15 @@ concrete.
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (v1.1) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (v1.1) | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | 0078 | BACE dictionary primitive | ACCEPTED |
-| 0079 | `.derc` dictionary carrier (v1.2) | ACCEPTED (plumbing + relaxed size test) |
-| 0080 | `.derc` BACA carrier (v1.3) | ACCEPTED (narrow threat model) |
-| **0081** | **`.derc` multi-page writer** | **ACCEPTED (size win verified)** |
+| 0079 | `.brcs` dictionary carrier (v1.2) | ACCEPTED (plumbing + relaxed size test) |
+| 0080 | `.brcs` BACA carrier (v1.3) | ACCEPTED (narrow threat model) |
+| **0081** | **`.brcs` multi-page writer** | **ACCEPTED (size win verified)** |
 
 The ADR 0079 §10 relaxation is now obsoleted by ADR 0081's
-strict size test. `.derc` segments can now genuinely benefit
+strict size test. `.brcs` segments can now genuinely benefit
 from dict-mode compression when the multi-page writer is
 enabled on small pages.
 
@@ -193,4 +193,4 @@ item is cleanly scoped and independent.
 Baseline: `e6e26fd` (ADR 0081 PROPOSED).
 Implementation commit: assigned by this commit.
 
-See [ADR 0081](../adr/0081-derc-multi-page-writer.md).
+See [ADR 0081]-brcs-multi-page-writer.md).

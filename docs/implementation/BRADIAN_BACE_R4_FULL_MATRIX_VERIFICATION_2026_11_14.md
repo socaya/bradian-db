@@ -101,7 +101,7 @@ the scope of ADR 0065**. The remaining BACE workstream is:
 | 0068 | Authenticated envelope variant (`"BACA"` magic reserved by ADR 0062) | **not drafted** |
 | 0069 | B+tree v2 Index page key encoding | **not drafted** |
 | 0070 | Dictionary scope and lifecycle | **not drafted** |
-| 0071 | `.derc` BACE integration | **not drafted** |
+| 0071 | `.brcs` BACE integration | **not drafted** |
 | 0072 | BRWL BACE integration | **not drafted** |
 
 **Production effect of the BACE stack as of R.4:** stores opened

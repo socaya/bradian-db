@@ -1,4 +1,4 @@
-//! ADR 0080 — BACA carrier integration for `.derc`.
+//! ADR 0080 — BACA carrier integration for `.brcs`.
 //!
 //! Covers the §3.5 checklist: v1.3 writer emission, round-trip
 //! under matching key, cross-version reject paths (v1.0/v1.1/
@@ -102,7 +102,7 @@ fn assert_round_trip(reader: &mut SegmentReader) {
 #[test]
 fn item_1_v1_3_writer_emits_minor_3_and_authenticated_flag() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v13.derc");
+    let path = dir.path().join("v13.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
 
     let bytes = std::fs::read(&path).unwrap();
@@ -119,7 +119,7 @@ fn item_1_v1_3_writer_emits_minor_3_and_authenticated_flag() {
 #[test]
 fn item_2_round_trip_under_matching_key() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("rt.derc");
+    let path = dir.path().join("rt.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
     let mut r = SegmentReader::open_with_bace(
         &path, wiring_with_auth(KEY_PRIMARY, "primary"),
@@ -132,7 +132,7 @@ fn item_2_round_trip_under_matching_key() {
 #[test]
 fn item_3_legacy_reader_rejects_v1_3_segment() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v13.derc");
+    let path = dir.path().join("v13.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
     let err = SegmentReader::open(&path).unwrap_err();
     let msg = format!("{err}");
@@ -147,7 +147,7 @@ fn item_3_legacy_reader_rejects_v1_3_segment() {
 #[test]
 fn item_4_reader_without_authentication_fails_unsupported() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v13.derc");
+    let path = dir.path().join("v13.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
 
     let err = SegmentReader::open_with_bace(&path, wiring_no_auth())
@@ -165,7 +165,7 @@ fn item_4_reader_without_authentication_fails_unsupported() {
 #[test]
 fn item_5_reader_with_wrong_key_fails_corruption() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v13.derc");
+    let path = dir.path().join("v13.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
 
     let err = SegmentReader::open_with_bace(
@@ -185,7 +185,7 @@ fn item_5_reader_with_wrong_key_fails_corruption() {
 #[test]
 fn item_6_tampered_envelope_bytes_fail_closed() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("tamper.derc");
+    let path = dir.path().join("tamper.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
     let mut bytes = std::fs::read(&path).unwrap();
     // Flip a byte inside the first page body (right after the
@@ -216,7 +216,7 @@ fn item_7_trailer_flip_from_bace_to_baca_fails_magic_mismatch() {
     // envelope but the on-disk bytes are a BACE envelope with
     // "BACE" magic, firing a magic-mismatch error.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("flip.derc");
+    let path = dir.path().join("flip.brcs");
     write(&path, wiring_no_auth());
 
     // Locate and flip a trailer byte. Use the same approach as
@@ -266,7 +266,7 @@ fn item_7_trailer_flip_from_bace_to_baca_fails_magic_mismatch() {
 #[test]
 fn item_8_wiring_without_authentication_produces_v1_1_output() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("v11.derc");
+    let path = dir.path().join("v11.brcs");
     write(&path, wiring_no_auth());
 
     let bytes = std::fs::read(&path).unwrap();
@@ -287,7 +287,7 @@ fn item_9_dict_path_ignores_authentication_emits_trailer_3() {
     // writes trailer 3 (ADR 0079), not trailer 2 (ADR 0080). This
     // is the §2 non-goal check.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_auth.derc");
+    let path = dir.path().join("dict_auth.brcs");
 
     let samples_owned: Vec<Vec<u8>> = (0..64).map(|i| {
         format!("tag-{:04}", i % 4).into_bytes()
@@ -323,7 +323,7 @@ fn item_10_wrong_key_error_names_the_wiring_label() {
     // reader's auth label. This test confirms that information
     // survives through the bradian-storage error chain.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("rt.derc");
+    let path = dir.path().join("rt.brcs");
     write(&path, wiring_with_auth(KEY_PRIMARY, "primary"));
     let err = SegmentReader::open_with_bace(
         &path, wiring_with_auth(KEY_SECONDARY, "ops-reader"),

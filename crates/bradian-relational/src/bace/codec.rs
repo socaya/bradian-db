@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Stable codec identifier. The `u16` namespace is partitioned per
-/// ADR 0061 §3.1. IDs 0–5 FROZEN as `.derc` v1 legacy mirror. IDs 6–15
+/// ADR 0061 §3.1. IDs 0–5 FROZEN as `.brcs` v1 legacy mirror. IDs 6–15
 /// legacy compat buffer. 16–31 core inner, 32–47 specialized, 48–63
 /// outer stream compression, 64–255 reserved BACE future, 256+
 /// vendor/experimental.
@@ -183,7 +183,7 @@ pub mod zstd {
     //! ADR 0061 §5 item 4.
     //!
     //! Uses the ZSTD **frame format** (not raw blocks) at compression
-    //! level 3 — identical to the `.derc` v1 default wrap. Decoder
+    //! level 3 — identical to the `.brcs` v1 default wrap. Decoder
     //! enforces the envelope-declared `decoded_length` as the output
     //! capacity bound at the library call, satisfying BACE-FMT-003
     //! "bounded output DURING decoding, not merely after."
@@ -196,7 +196,7 @@ pub mod zstd {
 
     pub const ZSTD_ID: CodecId = CodecId(49);
     pub const ZSTD_FORMAT_VERSION: u16 = 1;
-    /// Pinned level — matches ZSTD_CLEVEL_DEFAULT and the `.derc` default.
+    /// Pinned level — matches ZSTD_CLEVEL_DEFAULT and the `.brcs` default.
     /// A future ADR may expose this via `compression.zstd_level`.
     pub const ZSTD_LEVEL: i32 = 3;
 
@@ -323,9 +323,9 @@ mod tests {
     }
 
     #[test]
-    fn zstd_pinned_level_matches_derc_default() {
+    fn zstd_pinned_level_matches_brcs_default() {
         // ADR 0066 §3.1 — level 3 matches ZSTD_CLEVEL_DEFAULT and the
-        // .derc v1 default wrap. If this ever changes, a new ADR is
+        // .brcs v1 default wrap. If this ever changes, a new ADR is
         // required (the on-disk bytes depend on it).
         assert_eq!(ZSTD_LEVEL, 3);
     }

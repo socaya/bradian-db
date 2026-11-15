@@ -166,7 +166,7 @@ Each connection has an authenticated identity, database context, transaction sta
 
 ### 5.1 Proprietary columnar storage
 
-The original `.derc` analytical segment concept is retained as the starting point for a versioned Bradian-native column format, with a documented migration from DER terminology. Each segment includes magic/version, schema fingerprint, column directories, typed pages, null bitmaps, dictionaries, compressed buffers, zone maps, offsets and integrity metadata. Immutable row groups enable column pruning and predictable parallel scans; atomic manifest publication makes complete segment generations visible together. Unknown critical format versions must be rejected or opened by a tested compatible reader.
+The original `.brcs` analytical segment concept is retained as the starting point for a versioned Bradian-native column format, with a documented migration from DER terminology. Each segment includes magic/version, schema fingerprint, column directories, typed pages, null bitmaps, dictionaries, compressed buffers, zone maps, offsets and integrity metadata. Immutable row groups enable column pruning and predictable parallel scans; atomic manifest publication makes complete segment generations visible together. Unknown critical format versions must be rejected or opened by a tested compatible reader.
 
 Encoding should adapt to the data: dictionary encoding for repetitive strings, delta encoding for ordered integers, RLE or bit packing for small domains and vetted lossless codecs such as LZ4/Zstd for general payloads. Bradian records compression ratios and decode cost per segment, not just file size. Deleted and updated rows require version fences, delete vectors or merge-on-write semantics so old analytical copies do not reappear after compaction.
 
@@ -455,7 +455,7 @@ Studio should target WCAG 2.2 AA where practicable and test keyboard, screen-rea
 
 **Gate 3 — Full core relational SQL.** Implement joins, subqueries, views, schema migrations, composite constraints, prepared statements, transactional DDL policies and explain plans. Test against a published reference SQL corpus and supported isolation levels.
 
-**Gate 4 — Native columnar/OLAP engine.** Preserve and port the original `.derc` column format, vector batches, compression, indexes, parallel operators, CBO, spill and incremental views. Validate against the scalar oracle and real large-data benchmarks.
+**Gate 4 — Native columnar/OLAP engine.** Preserve and port the original `.brcs` column format, vector batches, compression, indexes, parallel operators, CBO, spill and incremental views. Validate against the scalar oracle and real large-data benchmarks.
 
 **Gate 5 — Unified HTAP.** Establish commit-coordinate propagation, coherent cross-store snapshots, bounded staleness, strong fallback, commit-aware materialization and mixed workload reservations. Fail if an analytical plan can return mismatched revisions.
 

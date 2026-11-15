@@ -1,7 +1,7 @@
 //! Typed analytic value model.
 //!
 //! `LogicalType` is what query authors reason about; `PhysicalType` is the in-memory encoding
-//! used by the vectorized runtime and the `.derc` format. One logical type may map to several
+//! used by the vectorized runtime and the `.brcs` format. One logical type may map to several
 //! physical encodings depending on segment statistics.
 //!
 //! `Value` is a scalar reference form for the **correctness oracle** and for metadata (zone

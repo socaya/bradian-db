@@ -58,7 +58,7 @@ pub struct BaceWiring {
     pub registry: Arc<dyn CodecRegistry + Send + Sync>,
     /// ADR 0080 — operator-held authentication key for BACA
     /// envelopes. Default `None` preserves every pre-ADR-0080
-    /// call site. When `Some(_)`, carriers that opt in (`.derc`
+    /// call site. When `Some(_)`, carriers that opt in (`.brcs`
     /// v1.3) emit BACA envelopes instead of BACE envelopes on
     /// their non-dict pages. The key is NEVER serialized to disk
     /// by any ADR 0060–0080 code path.
@@ -68,7 +68,7 @@ pub struct BaceWiring {
     /// carriers that have an authenticated alternative. When
     /// `true` AND `authentication.is_some()`, the reader
     /// rejects legacy frames (currently: backup descriptor v1).
-    /// .derc trailers 0/1, BRWL opcodes 3/4, and BRPG bit-0
+    /// .brcs trailers 0/1, BRWL opcodes 3/4, and BRPG bit-0
     /// pages remain tolerated in this ADR; follow-up ADRs may
     /// extend strict mode to those carriers.
     pub strict_authenticated: bool,

@@ -27,7 +27,7 @@ BACE SRS v1.0 §3.1 requires:
 BACE §5 enumerates eleven codec families (BACE-CODEC-001..011). BACE
 §6 adds the backward-compatibility constraint:
 
-> Existing `.derc` v1 identifies codecs 0 Plain, 1 PlainUtf8, 2
+> Existing `.brcs` v1 identifies codecs 0 Plain, 1 PlainUtf8, 2
 > Dictionary and reserves 3 RLE, 4 Delta, 5 BitPacked. The current
 > writer is limited to the first three; ZSTD level 3 wraps pages by
 > default when enabled. New codecs MUST NOT repurpose reserved
@@ -40,7 +40,7 @@ BACE-NFR-PORT-001 adds the portability obligation:
 > different CPU SIMD paths.
 
 Today the only compression in-tree is a hardcoded `ZSTD-3` wrap on
-`.derc` pages; no `Codec` trait, no capability descriptor, no
+`.brcs` pages; no `Codec` trait, no capability descriptor, no
 registry, no negotiation surface. ADR 0060 (policy service) depends
 on being able to ask the registry "which codecs are available on
 this build?".
@@ -72,7 +72,7 @@ allocations stay stable and future allocations have room:
 
 | Range | Allocation | Notes |
 |---|---|---|
-| **0–5** | **FROZEN — mirror `.derc` v1 legacy IDs** | `0 Plain`, `1 PlainUtf8`, `2 Dictionary`, `3 RLE` (reserved), `4 Delta` (reserved), `5 BitPacked` (reserved). Production invariant: an ID in this range MUST decode the same payload on BACE as on `.derc` v1. |
+| **0–5** | **FROZEN — mirror `.brcs` v1 legacy IDs** | `0 Plain`, `1 PlainUtf8`, `2 Dictionary`, `3 RLE` (reserved), `4 Delta` (reserved), `5 BitPacked` (reserved). Production invariant: an ID in this range MUST decode the same payload on BACE as on `.brcs` v1. |
 | 6–15 | RESERVED — legacy compatibility buffer | Unallocated. May be used only for backward-compatibility bridges, never for new BACE codec families. |
 | 16–31 | Core inner encodings (BACE §5) | Constant, RLE (BACE native), Dictionary+packed, FOR, Delta, BitPacked, Boolean bitmap. |
 | 32–47 | Specialized inner encodings | FSST or equivalent, Gorilla, Chimp, ALP. |
@@ -85,16 +85,16 @@ ADR's acceptance review** (§5 Q1). Freezing a number is an
 irrevocable commitment: once published, an ID MUST decode the same
 payload on every future Bradian build forever.
 
-### 3.2 Backward compatibility with `.derc` v1
+### 3.2 Backward compatibility with `.brcs` v1
 
-- `.derc` segments written before BACE continue to use IDs 0, 1, 2
+- `.brcs` segments written before BACE continue to use IDs 0, 1, 2
   (and MAY use the reserved 3, 4, 5). The BACE registry MUST
   resolve these IDs and SHOULD route them through the same decoder
   path used today, so no re-encoding is required at read time.
 - BACE codec families that correspond semantically to legacy IDs
   (e.g. BACE RLE, BACE Dictionary) MUST be allocated **new** IDs
   in the 16–31 range. They MUST NOT reuse 0–5.
-- The `.derc` → BACE transition for an individual segment is a
+- The `.brcs` → BACE transition for an individual segment is a
   rewrite, not an in-place reinterpretation.
 
 ### 3.3 `CodecCapability` descriptor
@@ -227,7 +227,7 @@ is out of scope for this ADR.
 ## 4. Alternatives considered
 
 **A. One flat `CodecId = u32` space with no partition.** Simpler.
-Rejected: makes legacy `.derc` compatibility constraint harder to
+Rejected: makes legacy `.brcs` compatibility constraint harder to
 state and leaves no obvious room for vendor extensions.
 
 **B. Tagged union of codec enums instead of integer IDs.** More
@@ -314,7 +314,7 @@ registered.
 - Specify a replication / federation wire protocol for exchanging
   capability sets.
 - Implement any codec.
-- Modify `.derc` or any existing on-disk format today.
+- Modify `.brcs` or any existing on-disk format today.
 - Introduce any `BACE*` admission or `ResourceError` variant.
 - Modify any existing ADR.
 

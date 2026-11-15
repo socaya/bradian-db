@@ -8,7 +8,7 @@ cycle. Final ADR in the 0089–0091 batch.
 ## 1. Context
 
 - ADRs 0075, 0080, 0086, 0089, 0090 added BACA variants
-  across .derc pages, BRWL batches, backup descriptors, and
+  across .brcs pages, BRWL batches, backup descriptors, and
   BRPG checkpoint pages. All are opt-in: the writer emits
   BACA when `BaceAuthentication` is set in the wiring.
 - The readers remain **tolerant**: a reader with auth still
@@ -18,7 +18,7 @@ cycle. Final ADR in the 0089–0091 batch.
   **downgrade attack**: an attacker who can swap bytes can
   replace a BACA frame with its legacy equivalent and the
   reader will proceed under the operator key.
-- Full strict-mode coverage spans four carriers (.derc,
+- Full strict-mode coverage spans four carriers (.brcs,
   BRWL, BRPG, backup descriptor) and many code paths. This
   ADR ships the **narrowest, highest-value slice** —
   backup descriptor strict mode — and explicitly defers the
@@ -39,8 +39,8 @@ cycle. Final ADR in the 0089–0091 batch.
 
 **Explicitly out of scope** (future ADRs):
 
-- **.derc trailer strict mode.** Follow-up ADR extends the
-  `.derc` reader to reject trailer 0/1 when auth is present.
+- **.brcs trailer strict mode.** Follow-up ADR extends the
+  `.brcs` reader to reject trailer 0/1 when auth is present.
 - **BRWL opcode strict mode.** Follow-up ADR rejects
   opcode 4 (BACE batch) in favor of opcode 5 (BACA batch)
   when auth is present; single-op opcodes 1/2 remain
@@ -130,7 +130,7 @@ The receipt is read lazily (during backup/restore), so
    "strict mode" prefix so operators recognize downgrade
    rejection. Alternative: new `StoreError::StrictAuthDowngrade`
    variant. Keep draft.
-3. **Scope.** Draft: backup descriptor only; .derc / BRWL /
+3. **Scope.** Draft: backup descriptor only; .brcs / BRWL /
    BRPG strict modes deferred to follow-up ADRs. Confirm.
 
 ## 6. Acceptance evidence

@@ -1,4 +1,4 @@
-//! ADR 0082 — `.derc` multi-page `DictIndex32` columns.
+//! ADR 0082 — `.brcs` multi-page `DictIndex32` columns.
 //!
 //! §3.5 checklist: default byte-identical output, 4-page dict
 //! column emission, round-trip to byte-identical strings, dict
@@ -82,7 +82,7 @@ fn item_1_default_options_dict_column_still_one_page() {
     // page (no change from prior behavior). ADR 0082 only adds
     // the multi-page split when the option is set.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_default.derc");
+    let path = dir.path().join("dict_default.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), opts_with_split(None));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -98,7 +98,7 @@ fn item_1_default_options_dict_column_still_one_page() {
 #[test]
 fn item_2_max_rows_per_page_50_on_200_rows_emits_four_dict_pages() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_split_4.derc");
+    let path = dir.path().join("dict_split_4.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -114,7 +114,7 @@ fn item_2_max_rows_per_page_50_on_200_rows_emits_four_dict_pages() {
 #[test]
 fn item_3_multi_page_dict_round_trips_to_identical_values() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_rt.derc");
+    let path = dir.path().join("dict_rt.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -140,7 +140,7 @@ fn item_4_every_page_carries_byte_identical_dict_bytes() {
     // into every page, so reading each page back yields the same
     // (dict_offsets, dict_data) pair.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_identical.derc");
+    let path = dir.path().join("dict_identical.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -169,7 +169,7 @@ fn item_5_fast_path_returns_dictindex32_not_utf8() {
     // (writer invariant), concat produces DictIndex32 and NOT
     // Utf8. This preserves the dict-encoded output shape.
     let dir = tempdir().unwrap();
-    let path = dir.path().join("fast_path.derc");
+    let path = dir.path().join("fast_path.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new(dict_schema(), opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
@@ -230,7 +230,7 @@ fn item_6_differing_dicts_concat_fallback_produces_utf8() {
 #[test]
 fn item_7_bace_envelope_round_trips_multi_page_dict() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("bace_dict.derc");
+    let path = dir.path().join("bace_dict.brcs");
     let rows = dict_rows(200, 4);
     let mut w = SegmentWriter::new_with_bace(
         dict_schema(), opts_with_split(Some(50)), wiring_zstd_balanced(),
@@ -263,8 +263,8 @@ fn item_8_multi_page_dict_size_observation_recorded() {
     let rows = dict_rows(200, 4);
 
     let dir = tempdir().unwrap();
-    let dict_path = dir.path().join("dict.derc");
-    let plain_path = dir.path().join("plain.derc");
+    let dict_path = dir.path().join("dict.brcs");
+    let plain_path = dir.path().join("plain.brcs");
 
     let mut w1 = SegmentWriter::new(dict_schema(), opts_with_split(Some(50)));
     for r in &rows { w1.append_row(r).unwrap(); }
@@ -301,7 +301,7 @@ fn item_8_multi_page_dict_size_observation_recorded() {
 fn item_9_baca_envelope_round_trips_multi_page_dict() {
     let key = [7u8; 32];
     let dir = tempdir().unwrap();
-    let path = dir.path().join("baca_dict.derc");
+    let path = dir.path().join("baca_dict.brcs");
     let rows = dict_rows(200, 4);
 
     let mut w = SegmentWriter::new_with_bace(
@@ -337,7 +337,7 @@ fn item_10_bace_dictionary_pool_on_multi_page_dict_column() {
     dicts.insert("tag".into(), dict);
 
     let dir = tempdir().unwrap();
-    let path = dir.path().join("bace_pool_dict.derc");
+    let path = dir.path().join("bace_pool_dict.brcs");
     let rows = dict_rows(200, 4);
 
     let mut w = SegmentWriter::new_with_bace_and_dictionaries(

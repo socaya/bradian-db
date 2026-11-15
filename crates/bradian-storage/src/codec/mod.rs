@@ -2,7 +2,7 @@
 //!
 //! The v1 release wires codec IDs 0 (Plain), 1 (PlainUtf8) and 2 (Dictionary). The remaining
 //! IDs (RLE, Delta, BitPack) are reserved in the format so segments can be forward-compatibly
-//! read once encoders land. See `docs/adr/0002-derc-segment-format.md` §Codec IDs.
+//! read once encoders land. See `docs/adr/0002-brcs-segment-format.md` §Codec IDs.
 
 use serde::{Deserialize, Serialize};
 

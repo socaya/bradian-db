@@ -1,7 +1,7 @@
-# BACE `.derc` dictionary carrier integration verification (ADR 0079)
+# BACE `.brcs` dictionary carrier integration verification (ADR 0079)
 
 15 November 2026. Baseline: `de07753`. First carrier consumer
-of ADR 0078's `BaceDictionary` primitive. `.derc` minor format
+of ADR 0078's `BaceDictionary` primitive. `.brcs` minor format
 bump v1.1 → v1.2 with per-column embedded dictionaries.
 
 **Honest acceptance note recorded in the ADR:** the drafted
@@ -22,7 +22,7 @@ Clippy clean on `cargo clippy --workspace --all-targets
 |---|---|
 | `cargo check -p bradian-storage` | Passed |
 | `cargo test --workspace --locked` | 1036 passed, 0 failed |
-| `cargo test -p bradian-storage --test derc_dictionary` | 10 passed |
+| `cargo test -p bradian-storage --test brcs_dictionary` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## Size-reduction observation (§3.5 item 9)
@@ -30,7 +30,7 @@ Clippy clean on `cargo clippy --workspace --all-targets
 Reproduce with:
 
 ```sh
-cargo test -p bradian-storage --test derc_dictionary item_9 -- --nocapture
+cargo test -p bradian-storage --test brcs_dictionary item_9 -- --nocapture
 ```
 
 Observed on 1024 identical rows of `DHIS2-ORGANISATIONUNIT-COMMON-PREFIX-012`:
@@ -92,7 +92,7 @@ impl BaceDictionary {
 
 ADR 0078 §3.1 said "no casual raw-bytes access." ADR 0079 is
 the legitimate carrier case the primitive was designed to
-serve — a `.derc` writer that stores the dict in its on-disk
+serve — a `.brcs` writer that stores the dict in its on-disk
 pool needs the bytes. The method name signals the limited
 intent.
 
@@ -178,7 +178,7 @@ and `open_with_bace` (full v1.2 reader). No public
 
 ## What this ADR explicitly does NOT do (unchanged)
 
-- Rename `.derc` or any `dap-*` crate.
+- Rename `.brcs` or any `dap-*` crate.
 - Auto-train dictionaries.
 - Add sidecar / external-registry transport.
 - Add CLI exposure.
@@ -197,10 +197,10 @@ and `open_with_bace` (full v1.2 reader). No public
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE (v1.1) | ACCEPTED |
+| 0076 | `.brcs` carrier BACE (v1.1) | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | 0078 | BACE dictionary primitive | ACCEPTED |
-| **0079** | **`.derc` dictionary carrier (v1.2)** | **ACCEPTED (plumbing)** |
+| **0079** | **`.brcs` dictionary carrier (v1.2)** | **ACCEPTED (plumbing)** |
 
 ## Remaining BACE workstream candidate
 
@@ -213,7 +213,7 @@ The one remaining primitive-with-no-carrier is:
   ADR.
 
 Non-BACE directions where the workstream could pause:
-- Multi-page `.derc` segment writer (would unlock ADR 0079's
+- Multi-page `.brcs` segment writer (would unlock ADR 0079's
   size-reduction win).
 - Real-world DHIS2 workload benchmarks for BACE adoption
   guidance.
@@ -223,4 +223,4 @@ Non-BACE directions where the workstream could pause:
 Baseline: `d22b905` (ADR 0079 PROPOSED).
 Implementation commit: assigned by this commit.
 
-See [ADR 0079](../adr/0079-derc-dictionary-integration.md).
+See [ADR 0079]-brcs-dictionary-integration.md).

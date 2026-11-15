@@ -8,7 +8,7 @@
 
 The `bradian-relational::page` module serializes a fixed 4096-byte native page containing an explicit magic, format version, kind, page ID, log sequence field, payload length and CRC32 checksum. Decoding rejects an unknown format, flags, page kind, noncanonical padding, wrong length, oversized payload or corruption.
 
-Regression tests cover byte order, page categories, boundary payload sizes and mutation of header and payload bytes. The existing analytical `.derc` segments and DHIS2 adapters are not modified.
+Regression tests cover byte order, page categories, boundary payload sizes and mutation of header and payload bytes. The existing analytical `.brcs` segments and DHIS2 adapters are not modified.
 
 ## What this slice does not deliver
 

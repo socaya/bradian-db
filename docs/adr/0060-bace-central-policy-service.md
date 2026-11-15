@@ -32,7 +32,7 @@ with suggested keys `compression.profile`,
 `compression.background_io_mbps` and `compression.dictionary_scope`.
 
 Today nothing in the workspace resolves any of these: the only
-compression in-tree is a hardcoded `ZSTD-3` wrap on `.derc` pages
+compression in-tree is a hardcoded `ZSTD-3` wrap on `.brcs` pages
 (BACE §6). No `BACE*` policy type exists in `bradian-relational`.
 
 The gaps analysis §5.1 lists this as the first BACE prerequisite:
@@ -246,9 +246,9 @@ Resolved on 14 November 2026 via `BACE_ADR_REVIEW_PACKAGE.md` §4.
    specify the DDL event shape for policy entries. Levels 0 and 6
    remain process-local. Level 1 (workload) ships in the build.
    (Review package S3.)
-4. **Compatibility with existing `.derc` ZSTD-3 hardcode.** Leave
-   `.derc` in place; apply the policy service to new subsystems
-   only. `.derc` migration to policy-governed compression is a
+4. **Compatibility with existing `.brcs` ZSTD-3 hardcode.** Leave
+   `.brcs` in place; apply the policy service to new subsystems
+   only. `.brcs` migration to policy-governed compression is a
    separate future ADR. (Review package S4.)
 5. **First subsystem to integrate.** `backup` (plan §12.1
    recommendation). (Review package S5.)
@@ -284,7 +284,7 @@ runtime dependencies beyond what is already in CLAUDE.md §5.
 - Freeze any on-disk or wire format.
 - Choose codec identifier numbers.
 - Decide the compressed-envelope layout.
-- Alter `.derc` or BRPG today.
+- Alter `.brcs` or BRPG today.
 - Introduce any `BACE*` admission / `ResourceError` variant.
 - Modify any existing ADR.
 

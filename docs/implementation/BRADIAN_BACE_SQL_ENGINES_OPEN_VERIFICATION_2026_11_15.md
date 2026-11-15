@@ -132,7 +132,7 @@ shipped tests cover the still-reachable positive paths (ADR
   coordinator).
 - **Authenticated envelope (`BACA`).** Different family of
   work; separate ADR.
-- **`.derc` carrier BACE.** Analytical column segments —
+- **`.brcs` carrier BACE.** Analytical column segments —
   orthogonal carrier; separate ADR.
 - **BRWL carrier BACE.** WAL frames — separate ADR.
 

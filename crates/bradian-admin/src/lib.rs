@@ -77,7 +77,7 @@ struct ExportSnapshotArgs {
     /// `timestamp`.
     #[arg(long)]
     schema: String,
-    /// ADR 0081/0085 — rows per page in emitted `.derc` segments.
+    /// ADR 0081/0085 — rows per page in emitted `.brcs` segments.
     /// Default (omit): one page per column (pre-ADR-0081 shape).
     /// Small values (8–128) improve BACE dict-pool amortization.
     /// Zero is rejected.
@@ -142,7 +142,7 @@ struct CompactArgs {
     primary_key: String,
     #[arg(long)]
     schema: String,
-    /// ADR 0081/0085 — rows per page in the compacted `.derc`
+    /// ADR 0081/0085 — rows per page in the compacted `.brcs`
     /// segment. See `export-snapshot --max-rows-per-page`.
     #[arg(long)]
     max_rows_per_page: Option<usize>,

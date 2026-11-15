@@ -132,7 +132,7 @@ pub use dictionary::{
 
 ### §3.5 item 10 size-reduction demonstration
 
-Trained a 8 KB dictionary on 128 `.derc`-style sample pages
+Trained a 8 KB dictionary on 128 `.brcs`-style sample pages
 with a common 28-byte prefix (`BRADIAN-SAMPLE-COMMON-PREFIX-`)
 plus a per-sample numeric suffix and a 50-byte redundant
 tail. Encoded the first sample with and without the dict:
@@ -171,7 +171,7 @@ tail. Encoded the first sample with and without the dict:
 
 ## What this ADR explicitly does NOT do (unchanged)
 
-- Touch any carrier (`RowStore`, `.derc`, BRWL, backup,
+- Touch any carrier (`RowStore`, `.brcs`, BRWL, backup,
   lifecycle, SQL engines).
 - Extend `BaceWiring`.
 - Add CLI exposure.
@@ -191,7 +191,7 @@ tail. Encoded the first sample with and without the dict:
 | 0073 | `bradian-db` CLI BACE flags | ACCEPTED |
 | 0074 | G23 DDL demonstration | ACCEPTED |
 | 0075 | BACA envelope primitive | ACCEPTED |
-| 0076 | `.derc` carrier BACE | ACCEPTED |
+| 0076 | `.brcs` carrier BACE | ACCEPTED |
 | 0077 | BRWL carrier BACE (benchmarked) | ACCEPTED |
 | **0078** | **BACE dictionary primitive** | **ACCEPTED** |
 
@@ -207,7 +207,7 @@ evidence obligations:
   audit integrity, key rotation, backup protection, incident
   response).
 - **Carrier integration of `BaceDictionary` (ADR 0078)** —
-  per-column dictionary consumption in `.derc` and/or BRWL.
+  per-column dictionary consumption in `.brcs` and/or BRWL.
   Requires workload benchmarks + a dictionary-transport
   decision (sidecar, inline envelope, external registry).
 
