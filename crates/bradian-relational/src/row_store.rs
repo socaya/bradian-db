@@ -213,7 +213,7 @@ impl RowStore {
             .open(wal_path)?;
         // Persist the directory entry for newly created WAL files on Unix.
         sync_directory(root)?;
-        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows, &mut delta, &mut usage, limits)?;
+        let (lsn, valid_length) = replay(&mut wal, checkpoint_lsn, &mut rows, &mut delta, &mut usage, limits, bace_wiring.as_ref())?;
         // A committed checkpoint can outlive an interrupted derived-index
         // publication. Rebuild only an absent index from verified pages.
         if snapshot_path(root, checkpoint_lsn).exists() {
@@ -508,7 +508,13 @@ impl RowStore {
         let changes = final_changes(mutations);
         let usage = projected_usage(&inner.rows, &inner.delta, inner.usage, self.limits, &changes)?;
         let next = inner.lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)?;
-        let frame = encode_batch(next, mutations, size);
+        // ADR 0077 — opt-in BACE wrap. Single-op frames stay v1
+        // always (too small to benefit, latency-sensitive).
+        // Batch bodies above BRWL_BACE_MIN_BODY_BYTES go v2 under
+        // non-RAW wiring.
+        let frame = encode_batch_with_optional_bace(
+            next, mutations, size, self.bace_wiring.as_ref(),
+        )?;
         if let Err(error) = inner.wal.write_all(&frame).and_then(|_| inner.wal.sync_all()) {
             inner.poisoned = true;
             return Err(StoreError::Io(error));
@@ -887,41 +893,137 @@ fn encode_batch(lsn: u64, mutations: &[RowMutation], size: usize) -> Vec<u8> {
     encode_frame(&body)
 }
 
-fn decode_mutations(body: &[u8], offset: u64) -> StoreResult<Vec<RowMutation>> {
+/// ADR 0077 — minimum batch body-after-opcode size at which the
+/// writer wraps the body in a BACE envelope (opcode 4). Smaller
+/// bodies emit the v1 opcode 3 path to avoid 36 bytes of envelope
+/// overhead for little compression benefit. Benchmark-driven
+/// default; promotion to policy knob is a separate ADR.
+pub const BRWL_BACE_MIN_BODY_BYTES: usize = 512;
+
+/// ADR 0077 §3.2 — branch between v1 and v2 batch encodings based
+/// on wiring + resolved codec + body size. Returns the complete
+/// outer WAL frame (header + body + CRC). Single-op callers use
+/// `encode_wal`; this helper is only used by `commit_batch`.
+fn encode_batch_with_optional_bace(
+    lsn: u64, mutations: &[RowMutation], size: usize,
+    bace: Option<&BaceWiring>,
+) -> StoreResult<Vec<u8>> {
+    let legacy = encode_batch(lsn, mutations, size);
+    // Fast path: no wiring → v1 frame identical to today.
+    let Some(wiring) = bace else { return Ok(legacy); };
+    // Resolve codec. If RAW or no codec registered, fall through to v1.
+    let Some((codec_id, codec)) = resolve_bace_codec(Some(wiring))? else {
+        return Ok(legacy);
+    };
+    // The legacy frame layout:
+    //   WAL_HEADER (12 bytes) | LSN (8) | op=3 (1) | count (4) | records...
+    // The payload we'd compress is the bytes AFTER (WAL_HEADER + LSN + op).
+    // That's position 12 + 8 + 1 = 21 in the legacy frame.
+    const FRAME_HEADER: usize = 12;  // BRWL + len + CRC
+    const LSN_PLUS_OP: usize = 9;    // LSN(8) + op(1)
+    let payload = &legacy[FRAME_HEADER + LSN_PLUS_OP..];
+    if payload.len() < BRWL_BACE_MIN_BODY_BYTES {
+        // Below threshold — keep the v1 fast path.
+        return Ok(legacy);
+    }
+    // Encode payload under the chosen codec.
+    let mut encoded = Vec::with_capacity(payload.len());
+    codec.encode(payload, &mut encoded).map_err(|_|
+        StoreError::BaceCodecUnavailable { codec_id }
+    )?;
+    let encoded_length = u32::try_from(encoded.len())
+        .map_err(|_| StoreError::InvalidRow("WAL BACE encoded payload exceeds u32::MAX"))?;
+    let decoded_length = u32::try_from(payload.len())
+        .map_err(|_| StoreError::InvalidRow("WAL BACE payload exceeds u32::MAX"))?;
+    // Wrap in a BACE envelope.
+    let header = crate::bace::envelope::EnvelopeHeader {
+        codec_id,
+        codec_format_version: codec.capability().format_version,
+        flags: crate::bace::envelope::EnvelopeFlags {
+            payload_is_raw: codec_id == CodecId::raw(),
+            critical: codec.capability().flags.critical,
+            ..crate::bace::envelope::EnvelopeFlags::default()
+        },
+        encoded_length,
+        decoded_length,
+    };
+    let mut envelope = Vec::with_capacity(
+        crate::bace::envelope::ENVELOPE_HEADER_SIZE
+            + encoded.len()
+            + crate::bace::envelope::ENVELOPE_TRAILER_SIZE,
+    );
+    crate::bace::envelope::write_envelope(&mut envelope, &header, &encoded)?;
+    // Compose v2 frame body: LSN + op=4 + envelope bytes.
+    let mut body = Vec::with_capacity(LSN_PLUS_OP + envelope.len());
+    body.extend_from_slice(&lsn.to_le_bytes());
+    body.push(4);
+    body.extend_from_slice(&envelope);
+    Ok(encode_frame(&body))
+}
+
+fn decode_mutations(
+    body: &[u8], offset: u64, bace: Option<&BaceWiring>,
+) -> StoreResult<Vec<RowMutation>> {
     let malformed = || StoreError::Corruption(format!("malformed WAL body at byte {offset}"));
     if body.len() < 13 {
         return Err(malformed());
     }
-    let batch = body[8] == 3;
-    let count = if batch {
-        u32::from_le_bytes(body[9..13].try_into().unwrap()) as usize
-    } else {
-        1
-    };
+    // ADR 0077 — opcode dispatch.
+    //   1 = single put, 2 = single delete, 3 = batch,
+    //   4 = BACE-wrapped batch body (v2, since ADR 0077).
+    let opcode = body[8];
+    match opcode {
+        1 | 2 => decode_single_mutation(opcode, body, offset),
+        3 => decode_batch_payload(&body[9..], offset),
+        4 => {
+            // ADR 0077 §3.3 — BACE-wrapped batch body. The payload
+            // at body[9..] is a BACE envelope whose decoded bytes
+            // are the same count+records layout as a v1 batch
+            // payload-after-opcode.
+            let wiring = bace.ok_or_else(|| StoreError::Corruption(format!(
+                "WAL frame at byte {offset} is BACE-wrapped but RowStore has no wiring; reopen via open_with_bace",
+            )))?;
+            let envelope_bytes = &body[9..];
+            let decoded = decode_bace_wal_envelope(envelope_bytes, wiring, offset)?;
+            decode_batch_payload(&decoded, offset)
+        }
+        _ => Err(malformed()),
+    }
+}
+
+/// ADR 0077 §3.3 — decode `count + repeated records` payload. This
+/// is the shared body shape used by both v1 opcode 3 (plain bytes
+/// at body[9..]) and v2 opcode 4 (BACE-decoded bytes).
+fn decode_batch_payload(payload: &[u8], offset: u64) -> StoreResult<Vec<RowMutation>> {
+    let malformed = || StoreError::Corruption(format!("malformed WAL body at byte {offset}"));
+    if payload.len() < 4 {
+        return Err(malformed());
+    }
+    let count = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
     if count == 0 || count > MAX_BATCH_OPS {
         return Err(malformed());
     }
-    let mut pos = if batch { 13_usize } else { 8_usize };
+    let mut pos = 4_usize;
     let mut operations = Vec::with_capacity(count);
     for _ in 0..count {
-        if body.len().saturating_sub(pos) < 7 {
+        if payload.len().saturating_sub(pos) < 7 {
             return Err(malformed());
         }
-        let op = body[pos];
-        let key_len = u16::from_le_bytes(body[pos + 1..pos + 3].try_into().unwrap()) as usize;
-        let value_len = u32::from_le_bytes(body[pos + 3..pos + 7].try_into().unwrap()) as usize;
+        let op = payload[pos];
+        let key_len = u16::from_le_bytes(payload[pos + 1..pos + 3].try_into().unwrap()) as usize;
+        let value_len = u32::from_le_bytes(payload[pos + 3..pos + 7].try_into().unwrap()) as usize;
         let record_size = 7_usize.checked_add(key_len)
             .and_then(|n| n.checked_add(value_len))
             .ok_or_else(malformed)?;
         if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE
-            || record_size > body.len() - pos
+            || record_size > payload.len() - pos
             || (op == 2 && value_len != 0)
             || (op != 1 && op != 2)
         {
             return Err(malformed());
         }
-        let key = body[pos + 7..pos + 7 + key_len].to_vec();
-        let value = body[pos + 7 + key_len..pos + record_size].to_vec();
+        let key = payload[pos + 7..pos + 7 + key_len].to_vec();
+        let value = payload[pos + 7 + key_len..pos + record_size].to_vec();
         operations.push(if op == 1 {
             RowMutation::Put { key, value }
         } else {
@@ -929,18 +1031,88 @@ fn decode_mutations(body: &[u8], offset: u64) -> StoreResult<Vec<RowMutation>> {
         });
         pos += record_size;
     }
-    if pos != body.len() {
+    if pos != payload.len() {
         return Err(malformed());
     }
     Ok(operations)
 }
 
+/// ADR 0077 §3.3 — decode a single-op WAL body at body[0..].
+fn decode_single_mutation(op: u8, body: &[u8], offset: u64) -> StoreResult<Vec<RowMutation>> {
+    let malformed = || StoreError::Corruption(format!("malformed WAL body at byte {offset}"));
+    let pos = 8_usize; // after LSN+opcode, opcode byte was already at body[8]
+    if body.len().saturating_sub(pos) < 7 {
+        return Err(malformed());
+    }
+    let key_len = u16::from_le_bytes(body[pos + 1..pos + 3].try_into().unwrap()) as usize;
+    let value_len = u32::from_le_bytes(body[pos + 3..pos + 7].try_into().unwrap()) as usize;
+    let record_size = 7_usize.checked_add(key_len)
+        .and_then(|n| n.checked_add(value_len))
+        .ok_or_else(malformed)?;
+    if key_len == 0 || key_len > MAX_KEY || value_len > MAX_VALUE
+        || record_size > body.len() - pos
+        || body[pos] != op
+        || (op == 2 && value_len != 0)
+    {
+        return Err(malformed());
+    }
+    let key = body[pos + 7..pos + 7 + key_len].to_vec();
+    let value = body[pos + 7 + key_len..pos + record_size].to_vec();
+    if pos + record_size != body.len() {
+        return Err(malformed());
+    }
+    Ok(vec![if op == 1 {
+        RowMutation::Put { key, value }
+    } else {
+        RowMutation::Delete { key }
+    }])
+}
+
+/// ADR 0077 §3.3 — decode a BACE-wrapped WAL batch body. Uses the
+/// policy service's `CompressionMaxDecodedPageBytes` as the
+/// envelope's output cap (same policy knob as ADR 0065).
+fn decode_bace_wal_envelope(
+    envelope_bytes: &[u8], wiring: &BaceWiring, offset: u64,
+) -> StoreResult<Vec<u8>> {
+    use crate::bace::envelope::{read_envelope, EnvelopeCaps};
+    let scope = ScopeChain::baseline_only();
+    let cap = wiring.policy_service.resolve(PolicyKey::CompressionMaxDecodedPageBytes, &scope);
+    let max_decoded_length = cap.value.as_u32().ok_or_else(|| StoreError::Corruption(
+        "policy service returned non-u32 for max_decoded_page_bytes".into(),
+    ))?;
+    let caps = EnvelopeCaps {
+        max_decoded_length,
+        max_encoded_length: envelope_bytes.len() as u32,
+    };
+    let env = read_envelope(envelope_bytes, caps).map_err(|e| StoreError::Corruption(
+        format!("WAL BACE envelope at byte {offset} failed to decode: {e}"),
+    ))?;
+    let codec = wiring.registry.codec(env.header.codec_id).ok_or(
+        StoreError::BaceCodecUnavailable { codec_id: env.header.codec_id },
+    )?;
+    if codec.capability().format_version != env.header.codec_format_version {
+        return Err(StoreError::BaceCodecFormatVersionMismatch {
+            codec_id: env.header.codec_id,
+            declared: env.header.codec_format_version,
+            build_supports: codec.capability().format_version,
+        });
+    }
+    let mut decoded = Vec::with_capacity(env.header.decoded_length as usize);
+    codec.decode(env.payload, env.header.decoded_length, &mut decoded)
+        .map_err(|e| StoreError::Corruption(format!(
+            "WAL BACE codec decode at byte {offset} failed: {e}",
+        )))?;
+    Ok(decoded)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn replay(
     wal: &mut File,
     checkpoint_lsn: u64,
     rows: &mut BTreeMap<Vec<u8>, Vec<u8>>,
     delta: &mut BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     usage: &mut RowStoreUsage, limits: RowStoreLimits,
+    bace: Option<&BaceWiring>,
 ) -> StoreResult<(u64, u64)> {
     wal.seek(SeekFrom::Start(0))?;
     let mut lsn = checkpoint_lsn;
@@ -979,7 +1151,7 @@ fn replay(
         }
         previous_in_wal = Some(seq);
         // Decode and validate the entire batch before modifying any row.
-        let operations = decode_mutations(&body, start)?;
+        let operations = decode_mutations(&body, start, bace)?;
         if seq > checkpoint_lsn {
             if seq != lsn.checked_add(1).ok_or(StoreError::SequenceExhausted)? {
                 return Err(StoreError::Corruption(format!("WAL gap after checkpoint at byte {start}")));
