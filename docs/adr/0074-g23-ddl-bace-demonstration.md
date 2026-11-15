@@ -1,22 +1,42 @@
-# ADR 0074 — G23 DDL coordinator BACE demonstration tests (implementation; **PROPOSED**)
+# ADR 0074 — G23 DDL coordinator BACE demonstration tests (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE workstream through ADR 0073. This
-ADR closes the scope-limit deferrals explicitly recorded in
-ADRs 0070 (§6 item 6), 0071 (§3.5 items 4–5), and 0072
-(§3.5 items 4–5): the "fresh-open + idempotent-checkpoint rule"
-meant none of those ADRs could demonstrate actual BRPG v2 pages
-on disk through their engine's test path.
+Closes the scope-limit deferrals recorded in ADRs 0070
+(§6 item 6), 0071 (§3.5 items 4–5), and 0072 (§3.5 items 4–5)
+with a dedicated test file that exercises the G23 DDL
+coordinator path under BACE wiring and asserts actual v2 pages
+on disk.
 
-The G23 DDL coordinator (`HistorySqlEngine::execute_ddl` +
-`enable_epoch_row_writes`) already works through a
-BACE-wired engine — it's the natural mutation path that forces
-a post-migration checkpoint. This ADR is **pure test
-demonstration**: no new code, just honest coverage of what the
-plumbing already does.
+Implementation summary:
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+- `crates/bradian-relational/tests/g23_ddl_bace_demonstration.rs`
+  — one new test file, 4 tests, no production code changes.
+
+982 workspace tests pass (978 → 982); clippy clean on
+`bradian-relational --all-targets`.
+
+### Honest adjustment to §3.2 item 2
+
+The drafted §3.2 item 2 asserted catalog-side v2 pages
+appear after `HistorySqlEngine::checkpoint()`. Implementation
+surfaced that `HistorySqlEngine::checkpoint()` only drives
+`self.domain.checkpoint()` — the history-domain store — and
+does NOT trigger a catalog checkpoint. The catalog is
+checkpointed only via its own `backup_catalog_to` which is
+reached through `backup_to_with_bace`. The shipped tests:
+
+- Test 1 (item 1): history-domain v2 pages after
+  `db.checkpoint()`.
+- Test 4 (item 5): BOTH catalog and history-domain sub-archive
+  `.brp` files contain v2 pages after `db.backup_to_with_bace`,
+  because the catalog backup step invokes its own checkpoint.
+
+No source-side catalog-checkpoint assertion is landed outside
+the backup path because `HistorySqlEngine` does not expose a
+direct catalog-checkpoint entry. Adding one is out of ADR 0074
+scope.
 
 ## 1. Context
 
