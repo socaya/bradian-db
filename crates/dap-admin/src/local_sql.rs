@@ -1,13 +1,22 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use anyhow::{Context, Result};
+use bradian_relational::bace::codec::raw::RAW_ID;
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+use bradian_relational::bace::policy::{
+    CompressionProfile, InMemoryPolicyService, PlatformBaseline,
+};
+use bradian_relational::bace::registry::BuiltInRegistry;
+use bradian_relational::bace::codec::CodecId;
 use bradian_relational::history_sql::HistorySqlEngine;
 use bradian_relational::local_access::{
     ensure_private_root, LocalAccessError, PrivateRootPolicy,
 };
+use bradian_relational::row_store::BaceWiring;
 use bradian_relational::sql::SqlEngine;
 use bradian_relational::runtime_limits::{ScanControl, ScanLimits, HistoryLimits, StagingLimits, TransactionLimits};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crate::local_sql_output::{output,DEFAULT_OUTPUT_BYTES};
 #[cfg(test)]
 use {serde_json::Value as Json,bradian_relational::{typed_table::Value,sql::SqlResultSet}};
@@ -64,6 +73,72 @@ pub(crate) struct SqlArgs {
     /// Active historical transaction admission (default 128 per domain).
     #[arg(long, requires = "history")]
     max_active_transactions: Option<usize>,
+    /// ADR 0073 — BACE compression profile. `none` (default)
+    /// opens the engine through the legacy pre-BACE path.
+    /// `raw` attaches a wiring whose baseline is Raw (recovery
+    /// tolerates v2 pages but checkpoint emits only v1).
+    /// `balanced` / `max` attach a wiring whose checkpoint
+    /// writer emits BACE-wrapped v2 pages using the first
+    /// available codec from `--bace-codecs`.
+    #[arg(long, value_enum, default_value_t = BaceProfileArg::None)]
+    bace_profile: BaceProfileArg,
+    /// ADR 0073 — comma-separated BACE codec names in
+    /// preference order. Known names: `raw`, `zstd`. Ignored
+    /// when `--bace-profile` is `none`.
+    #[arg(long, default_value = "zstd,raw")]
+    bace_codecs: String,
+}
+
+/// ADR 0073 — CLI value for `--bace-profile`. `None` means no
+/// `BaceWiring` is attached; the engine opens via the legacy
+/// path identical to today's `bradian-db sql` behavior.
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub(crate) enum BaceProfileArg {
+    None,
+    Raw,
+    Balanced,
+    Max,
+}
+
+/// ADR 0073 — construct a `BaceWiring` from the CLI flags.
+/// Returns `Ok(None)` when `--bace-profile none` (default).
+/// Fails fast on empty or unknown codec lists; no on-disk
+/// side effects occur before this call.
+pub(crate) fn build_bace_wiring(args: &SqlArgs) -> Result<Option<BaceWiring>> {
+    let profile = match args.bace_profile {
+        BaceProfileArg::None => return Ok(None),
+        BaceProfileArg::Raw => CompressionProfile::Raw,
+        BaceProfileArg::Balanced => CompressionProfile::Balanced,
+        BaceProfileArg::Max => CompressionProfile::Max,
+    };
+    let mut allowed: Vec<CodecId> = Vec::new();
+    for name in args.bace_codecs.split(',') {
+        let name = name.trim();
+        if name.is_empty() { continue; }
+        let id = match name.to_ascii_lowercase().as_str() {
+            "raw" => RAW_ID,
+            "zstd" => ZSTD_ID,
+            other => anyhow::bail!(
+                "unknown BACE codec {other:?}; known: raw, zstd"
+            ),
+        };
+        allowed.push(id);
+    }
+    anyhow::ensure!(
+        !allowed.is_empty(),
+        "--bace-codecs must list at least one codec",
+    );
+    let baseline = PlatformBaseline {
+        profile,
+        allowed_codecs: allowed,
+        ..PlatformBaseline::shipped()
+    };
+    Ok(Some(BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(
+            baseline, BuiltInRegistry::new(),
+        )),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }))
 }
 
 fn read_script(args: &SqlArgs) -> Result<String> {
@@ -145,6 +220,10 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
     let statements = statements(&source)?;
     if args.history { anyhow::ensure!(args.root.join("history-domain").is_dir(), "--history requires an existing migrated history-domain root"); }
     private_root(&args.root)?;
+    // ADR 0073 — construct the BACE wiring BEFORE opening any
+    // engine; a malformed --bace-codecs list fails here with no
+    // on-disk side effects.
+    let wiring = build_bace_wiring(&args)?;
     let output_limit=args.max_output_bytes.unwrap_or(DEFAULT_OUTPUT_BYTES);
     let mut writer = std::io::BufWriter::new(std::io::stdout().lock());
     let defaults = ScanLimits::default();
@@ -155,11 +234,22 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
     });
     if args.history {
         let defaults = HistoryLimits::default();
-        let engine = HistorySqlEngine::open_with_resource_limits(&args.root, HistoryLimits {
+        let history_limits = HistoryLimits {
             max_keys: args.max_history_keys.unwrap_or(defaults.max_keys),
             max_versions: args.max_history_versions.unwrap_or(defaults.max_versions),
             max_bytes: args.max_history_bytes.unwrap_or(defaults.max_bytes),
-        }, TransactionLimits { max_active:args.max_active_transactions.unwrap_or(TransactionLimits::default().max_active) })?;
+        };
+        let txn_limits = TransactionLimits {
+            max_active: args.max_active_transactions.unwrap_or(TransactionLimits::default().max_active),
+        };
+        let engine = match wiring.clone() {
+            Some(w) => HistorySqlEngine::open_with_bace_and_resource_limits(
+                &args.root, w, history_limits, txn_limits,
+            )?,
+            None => HistorySqlEngine::open_with_resource_limits(
+                &args.root, history_limits, txn_limits,
+            )?,
+        };
         let defaults = StagingLimits::default();
         engine.with_session_limits(control, StagingLimits {
             max_keys: args.max_staged_keys.unwrap_or(defaults.max_keys),
@@ -176,7 +266,10 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
             Ok(())
         })?;
     } else {
-        let engine = SqlEngine::open(&args.root)?;
+        let engine = match wiring {
+            Some(w) => SqlEngine::open_with_bace(&args.root, w)?,
+            None => SqlEngine::open(&args.root)?,
+        };
         if let Some(table) = &args.table {
             engine.with_sql_session_control(table, control, |session| {
                 for (index, statement) in statements.iter().enumerate() {
@@ -201,7 +294,7 @@ pub(crate) fn run(args: SqlArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn args() -> SqlArgs { SqlArgs { root: PathBuf::from("unused"), execute: None, file: None, table: None, history: false, max_scan_rows: None, max_scan_bytes: None, max_scan_work: None, max_output_bytes: None, max_history_keys: None, max_history_versions: None, max_history_bytes: None, max_staged_keys: None, max_staged_bytes: None, max_active_transactions: None } }
+    fn args() -> SqlArgs { SqlArgs { root: PathBuf::from("unused"), execute: None, file: None, table: None, history: false, max_scan_rows: None, max_scan_bytes: None, max_scan_work: None, max_output_bytes: None, max_history_keys: None, max_history_versions: None, max_history_bytes: None, max_staged_keys: None, max_staged_bytes: None, max_active_transactions: None, bace_profile: BaceProfileArg::None, bace_codecs: "zstd,raw".into() } }
 
     #[test]
     fn splitting_preserves_quoted_semicolons_unicode_and_doubled_quotes() {
@@ -236,6 +329,72 @@ mod tests {
         input.file = None;
         input.execute = Some("x".repeat(MAX_SCRIPT + 1));
         assert!(read_script(&input).is_err());
+    }
+
+    // ---------- ADR 0073 — CLI BACE flags ----------
+
+    #[test]
+    fn build_bace_wiring_returns_none_for_profile_none() {
+        // ADR 0073 §3.5 item "default is legacy path" — the absence
+        // of --bace-profile yields None and the engines open through
+        // their legacy paths.
+        let a = args();
+        assert!(matches!(a.bace_profile, BaceProfileArg::None));
+        assert!(build_bace_wiring(&a).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_bace_wiring_rejects_empty_codec_list() {
+        // ADR 0073 §3.4 — malformed input fails fast with no side
+        // effects.
+        let mut a = args();
+        a.bace_profile = BaceProfileArg::Balanced;
+        a.bace_codecs = "  ,  ,".into();
+        let err = build_bace_wiring(&a).unwrap_err();
+        assert!(
+            err.to_string().contains("must list at least one codec"),
+            "expected empty-codec-list error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn build_bace_wiring_rejects_unknown_codec_name() {
+        // ADR 0073 §3.4 — unknown codec names fail with a clear
+        // message naming the known set.
+        let mut a = args();
+        a.bace_profile = BaceProfileArg::Balanced;
+        a.bace_codecs = "zstd,lz4".into();
+        let err = build_bace_wiring(&a).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown BACE codec"), "got: {msg}");
+        assert!(msg.contains("lz4"), "got: {msg}");
+        assert!(msg.contains("raw") && msg.contains("zstd"),
+            "expected known-set hint, got: {msg}");
+    }
+
+    #[test]
+    fn build_bace_wiring_builds_zstd_balanced_wiring() {
+        // ADR 0073 §3.2 — the default --bace-codecs "zstd,raw"
+        // with Balanced profile yields a wiring whose policy
+        // service can resolve to ZSTD first.
+        let mut a = args();
+        a.bace_profile = BaceProfileArg::Balanced;
+        let wiring = build_bace_wiring(&a).unwrap().expect("expected Some wiring");
+        // The registry ships RAW + ZSTD; both must be resolvable.
+        assert!(wiring.registry.codec(RAW_ID).is_some());
+        assert!(wiring.registry.codec(ZSTD_ID).is_some());
+    }
+
+    #[test]
+    fn build_bace_wiring_builds_raw_profile_wiring_when_requested() {
+        // ADR 0073 §3.5 item 2 — `--bace-profile raw` attaches a
+        // wiring (not None) but the baseline profile is Raw so the
+        // checkpoint writer emits only v1 pages.
+        let mut a = args();
+        a.bace_profile = BaceProfileArg::Raw;
+        a.bace_codecs = "raw".into();
+        let wiring = build_bace_wiring(&a).unwrap().expect("expected Some wiring");
+        assert!(wiring.registry.codec(RAW_ID).is_some());
     }
 
     #[test]

@@ -1,16 +1,28 @@
-# ADR 0073 — `bradian-db` CLI BACE flags (implementation; **PROPOSED**)
+# ADR 0073 — `bradian-db` CLI BACE flags (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE workstream through ADR 0072: all
-four SQL engines accept BACE wiring at the library level, but
-the operator-facing `bradian-db sql` CLI still routes to the
-legacy pre-BACE opens. This ADR adds CLI flags that construct
-a `BaceWiring` from operator-supplied values and route the two
-engines the CLI currently exposes
-(`SqlEngine`, `HistorySqlEngine`) to their `_with_bace` opens.
+First operator-facing CLI exposure of BACE. The `bradian-db sql`
+subcommand now accepts `--bace-profile` and `--bace-codecs`
+flags; `SqlEngine::open` and
+`HistorySqlEngine::open_with_resource_limits` route to their
+`_with_bace` variants when a wiring is constructed.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+Implementation summary:
+
+- `crates/dap-admin/src/local_sql.rs` — new
+  `BaceProfileArg` clap enum, two new fields on `SqlArgs`
+  (`bace_profile`, `bace_codecs`), a `build_bace_wiring`
+  helper that constructs an `Option<BaceWiring>` or fails
+  fast on malformed input, and open-path routing in `run()`.
+- +5 unit tests covering flag parsing, wiring construction,
+  and fail-fast behavior on malformed codec lists / unknown
+  codec names.
+
+978 workspace tests pass; clippy clean on the entire workspace
+(`cargo clippy --workspace --all-targets --locked -- -D
+warnings`).
 
 ## 1. Context
 
