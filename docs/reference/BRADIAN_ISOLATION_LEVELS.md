@@ -127,6 +127,13 @@ behaviours.
 | **ACID D under process exit** — a process that exits mid-transaction keeps only the outer committed work | `savepoint_crash::process_exit_keeps_only_outer_committed_work` |
 | **Historical SQL rollback never publishes staged changes** | `history_sql::deletion_history_and_rollback_behave_correctly` |
 | **AS OF before any committed data returns no rows** — historical reads do not fabricate pre-existence | `history_sql::as_of_before_first_import_visibility_returns_no_rows` |
+| **Rolled-back or dropped transactions never leave versions in the durable history** — atomicity (ACID A) in the durable MVCC kernel | `durable_mvcc::rollback_and_dropped_transaction_never_write_history` |
+| **Over-budget commits reject without partial version publication** — atomicity under admission failure | `durable_mvcc::too_many_operations_are_rejected_without_partial_versions` |
+| **Concurrent threads publish disjoint durable histories without serialising on each other** — parallel-commit scheduling honours snapshot isolation | `durable_mvcc::simultaneous_threads_publish_disjoint_durable_histories` |
+| **GC never erases a delete-reinsert baseline that an AS OF reader could still observe** — retention honours the historical timeline | `durable_mvcc::gc_never_loses_delete_reinsert_baseline_visibility` |
+| **AS OF reads persist across restart** — historical durability (ACID D) through the SQL frontend | `history_sql::historical_select_as_of_persists_across_restart` |
+| **Historical SQL obeys the durable retention floor after reopen** — retention isolation survives restart | `history_sql::historical_sql_obeys_durable_retention_floor_after_reopen` |
+| **Malformed LSN values abort atomically in historical SQL** — atomicity under invalid input | `history_sql::historical_sql_rejects_malformed_lsn_values_and_abort_is_atomic` |
 
 Each cited test is a passing integration test in the current workspace.
 

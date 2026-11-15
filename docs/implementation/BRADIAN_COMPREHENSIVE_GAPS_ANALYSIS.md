@@ -385,11 +385,11 @@ infrastructure. Each is a single vertical slice.
 
 | Item | Scope |
 |---|---|
-| `DomainSqlEngine::open_with_limits` wrapper | Follow-up to Slice L; thread `MultiTableStore::open_with_limits` + `CatalogLimits` through the SQL frontend. |
-| Observational `resource_usage()` aggregator | Report combined counts across catalog + domain + MVCC. No admission; operator diagnostics only. |
+| `DomainSqlEngine::open_with_limits` wrapper | **Already shipped** at `crates/bradian-relational/src/domain_sql.rs:45` (plus `open_with_bace_and_limits:64`); both admission paths asserted in `crates/bradian-relational/tests/transitive_admission.rs` (DomainLimits + CatalogLimits refusal via DomainSqlEngine). This gap entry was stale. |
+| Observational `resource_usage()` aggregator | **Shipped** 2026-11-15 — `WorkspaceUsage` at `crates/bradian-relational/src/workspace_usage.rs` with `for_catalog`/`with_domain`/`with_mvcc`/`with_row_store`/`with_durable_mvcc` (ADR 0059 extension). Five-engine `Display` + 8 tests in `crates/bradian-relational/tests/workspace_usage.rs`. |
 | Expand fault-recovery matrix | **Shipped** 2026-11-15 via `crates/bradian-relational/tests/fault_recovery_extension.rs`: parallel-open race (2 tests), WAL header-only + body truncation (2 tests), lock-file deletion POSIX-foot-gun honest boundary (1 test). |
 | Range `ORDER BY` positive corpus | Only possible if we accept range predicates; today they're correctly rejected. So this is **not** achievable — flagged honestly in `BRADIAN_SQL_SUBSET.md` §14. |
-| Cross-engine isolation proofs | Additional citations in `BRADIAN_ISOLATION_LEVELS.md` from `durable_mvcc` and `history_sql` schedules. |
+| Cross-engine isolation proofs | **Shipped** 2026-11-15 — `docs/reference/BRADIAN_ISOLATION_LEVELS.md` §8 extended with 7 new citations spanning `durable_mvcc` (rollback-and-dropped, over-budget atomicity, parallel disjoint histories, delete-reinsert baseline) and `history_sql` (AS OF persistence, retention floor after reopen, malformed-LSN atomic abort). |
 
 Everything else is either §13-blocked, infra-blocked, or a BACE
 workstream that needs the §20.2 signed-ADR review.

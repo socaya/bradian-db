@@ -138,3 +138,79 @@ fn workspace_usage_is_non_admitting_and_takes_no_locks_longer_than_one_read() {
     assert_eq!(frozen.domain_tables, Some(1));
     assert_eq!(frozen.mvcc_distinct_keys, Some(0));
 }
+
+// ---------- ADR 0059 extension — RowStore + DurableMvccStore ----------
+
+#[test]
+fn with_row_store_reports_decoded_rows_and_delta_counts() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = RowStore::open(dir.path().join("rows")).unwrap();
+    store.put(b"alice", b"active").unwrap();
+    store.put(b"bob", b"pending").unwrap();
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store(&store);
+    let rs = usage.row_store.expect("with_row_store installed");
+    assert_eq!(rs.rows, 2);
+    assert!(rs.row_bytes > 0);
+    // Delta keys / bytes reflect uncommitted/post-checkpoint mutations.
+    // Fresh store with no checkpoint: delta counts match put history.
+    assert!(rs.delta_keys >= 2);
+}
+
+#[test]
+fn with_durable_mvcc_reports_retained_history_counts() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    use bradian_relational::runtime_limits::HistoryLimits;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = DurableMvccStore::open_with_limits(
+        dir.path().join("hist"), HistoryLimits::default(),
+    ).unwrap();
+    {
+        let mut tx = store.begin();
+        tx.insert(b"k", b"v").unwrap();
+        tx.commit().unwrap();
+    }
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_durable_mvcc(&store);
+    let h = usage.durable_mvcc.expect("with_durable_mvcc installed");
+    assert!(h.keys >= 1);
+    assert!(h.versions >= 1);
+    assert!(h.bytes > 0);
+}
+
+#[test]
+fn full_five_engine_display_formats_every_field() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::runtime_limits::HistoryLimits;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let _tables = one_db_two_tables(&catalog);
+    let domain = MultiTableStore::open(dir.path().join("domain")).unwrap();
+    let mvcc = MvccStore::open(dir.path().join("mvcc")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    rs.put(b"k", b"v").unwrap();
+    let dmv = DurableMvccStore::open_with_limits(
+        dir.path().join("hist"), HistoryLimits::default(),
+    ).unwrap();
+    {
+        let mut tx = dmv.begin();
+        tx.insert(b"a", b"b").unwrap();
+        tx.commit().unwrap();
+    }
+
+    let full = WorkspaceUsage::for_catalog(&catalog)
+        .with_domain(&domain)
+        .with_mvcc(&mvcc)
+        .with_row_store(&rs)
+        .with_durable_mvcc(&dmv);
+    let s = format!("{full}");
+    assert!(s.contains("catalog:"));
+    assert!(s.contains("domain:"));
+    assert!(s.contains("mvcc:"));
+    assert!(s.contains("row_store:"));
+    assert!(s.contains("durable_mvcc:"));
+}
