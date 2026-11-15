@@ -95,19 +95,39 @@ impl BackupReceipt {
         Self::decode_with_auth(bytes, None)
     }
 
-    /// ADR 0089 §3.3 — version-dispatching decode. `BRBKv001`
-    /// takes the legacy CRC-only path (ignores `auth`).
-    /// `BRBKv002` verifies the 16-byte MAC trailer under the
-    /// supplied authentication; absent auth → error.
+    /// ADR 0089 §3.3 — version-dispatching decode.
+    /// ADR 0091 — when the caller's wiring is strict (strict mode
+    /// is set in `decode_with_strict_auth`), a legacy v1
+    /// descriptor is rejected even when auth is `None`? No —
+    /// strict only applies when auth is present. This signature
+    /// stays backward-compatible.
     pub fn decode_with_auth(
         bytes: &[u8],
         auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+    ) -> StoreResult<Self> {
+        Self::decode_with_strict_auth(bytes, auth, false)
+    }
+
+    /// ADR 0091 §3.2 — strict-authenticated-mode decode. When
+    /// `strict && auth.is_some()`, a v1 descriptor is rejected
+    /// with a Corruption error prefixed "strict mode:".
+    pub fn decode_with_strict_auth(
+        bytes: &[u8],
+        auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+        strict: bool,
     ) -> StoreResult<Self> {
         if bytes.len() < 8 {
             return Err(StoreError::Corruption("backup descriptor truncated".into()));
         }
         match &bytes[..8] {
-            m if m == MAGIC => Self::decode_v1(bytes),
+            m if m == MAGIC => {
+                if strict && auth.is_some() {
+                    return Err(StoreError::Corruption(
+                        "strict mode: legacy v1 backup descriptor rejected under authenticated wiring (ADR 0091)".into(),
+                    ));
+                }
+                Self::decode_v1(bytes)
+            }
             m if m == MAGIC_V2 => Self::decode_v2(bytes, auth),
             _ => Err(StoreError::Corruption(
                 "backup descriptor has unknown magic (expected BRBKv001 or BRBKv002)".into(),
@@ -214,6 +234,16 @@ pub fn read_receipt_with_auth(
     path: &Path,
     auth: Option<&crate::bace::authenticated::BaceAuthentication>,
 ) -> StoreResult<BackupReceipt> {
+    read_receipt_with_strict_auth(path, auth, false)
+}
+
+/// ADR 0091 §3.2 — strict-authenticated-mode receipt reader.
+/// Rejects v1 descriptors when `strict && auth.is_some()`.
+pub fn read_receipt_with_strict_auth(
+    path: &Path,
+    auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+    strict: bool,
+) -> StoreResult<BackupReceipt> {
     // Enforce exact-length reads (pre-ADR-0089 contract):
     // files with trailing bytes or short files all fail with
     // Corruption. We try the 40-byte path first; if the first 8
@@ -226,7 +256,7 @@ pub fn read_receipt_with_auth(
                 "invalid backup descriptor header".into(),
             ),
         })?;
-        return BackupReceipt::decode_with_auth(&bytes, auth);
+        return BackupReceipt::decode_with_strict_auth(&bytes, auth, strict);
     }
     if file_len == DESCRIPTOR_LENGTH_V2 as u64 {
         let bytes = crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH_V2>(path).map_err(|e| match e {
@@ -235,7 +265,7 @@ pub fn read_receipt_with_auth(
                 "invalid backup descriptor header".into(),
             ),
         })?;
-        return BackupReceipt::decode_with_auth(&bytes, auth);
+        return BackupReceipt::decode_with_strict_auth(&bytes, auth, strict);
     }
     Err(StoreError::Corruption(format!(
         "backup descriptor file has wrong length {} (expected {} or {})",
@@ -349,10 +379,13 @@ fn verify_directory(
     policies: StorageLimits,
     bace: Option<&BaceWiring>,
 ) -> StoreResult<()> {
-    // ADR 0089 §3.3 — verify v2 MAC when wiring has auth.
-    let stored = read_receipt_with_auth(
+    // ADR 0089 §3.3 + ADR 0091 — verify v2 MAC when wiring has
+    // auth; reject legacy v1 under strict mode.
+    let strict = bace.map(|w| w.strict_authenticated).unwrap_or(false);
+    let stored = read_receipt_with_strict_auth(
         &path.join(META_FILE),
         bace.and_then(|w| w.authentication.as_ref()),
+        strict,
     )?;
     if stored != receipt {
         return Err(StoreError::Corruption("backup descriptor differs from intended state".into()));
@@ -440,11 +473,14 @@ fn restore_backup_inner(
     if !backup.is_dir() {
         return Err(StoreError::Corruption("backup source is not a directory".into()));
     }
-    // ADR 0089 §3.3 — read with auth when wiring provides it so
-    // a v2 descriptor's MAC is verified BEFORE any staging work.
-    let receipt = read_receipt_with_auth(
+    // ADR 0089 §3.3 + ADR 0091 — read with auth when wiring
+    // provides it (v2 MAC verified); reject legacy v1 descriptor
+    // under strict mode.
+    let strict = wiring.as_ref().map(|w| w.strict_authenticated).unwrap_or(false);
+    let receipt = read_receipt_with_strict_auth(
         &backup.join(META_FILE),
         wiring.as_ref().and_then(|w| w.authentication.as_ref()),
+        strict,
     )?;
     // ADR 0067 §3.4 — reject BACE backups on the legacy path BEFORE
     // creating any staging directory. Operators see exactly which

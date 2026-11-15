@@ -295,6 +295,7 @@ fn wiring_with_profile(profile: CompressionProfile) -> BaceWiring {
         policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
+        strict_authenticated: false,
     }
 }
 
@@ -308,6 +309,7 @@ fn wiring_zstd_balanced() -> BaceWiring {
         policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
+        strict_authenticated: false,
     }
 }
 
@@ -502,6 +504,7 @@ fn bace_backup_restore_fails_closed_when_wiring_lacks_source_codec() {
         policy_service: policy_svc,
         registry: registry_raw_only,
         authentication: None,
+        strict_authenticated: false,
     };
 
     let err = RowStore::restore_backup_with_bace(

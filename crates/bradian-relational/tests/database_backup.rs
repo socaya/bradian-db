@@ -292,6 +292,7 @@ fn wiring_zstd_balanced() -> BaceWiring {
         policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
+        strict_authenticated: false,
     }
 }
 

@@ -63,6 +63,15 @@ pub struct BaceWiring {
     /// their non-dict pages. The key is NEVER serialized to disk
     /// by any ADR 0060–0080 code path.
     pub authentication: Option<crate::bace::BaceAuthentication>,
+    /// ADR 0091 — strict authenticated mode. Default `false`
+    /// preserves pre-ADR-0091 tolerance for legacy frames on
+    /// carriers that have an authenticated alternative. When
+    /// `true` AND `authentication.is_some()`, the reader
+    /// rejects legacy frames (currently: backup descriptor v1).
+    /// .derc trailers 0/1, BRWL opcodes 3/4, and BRPG bit-0
+    /// pages remain tolerated in this ADR; follow-up ADRs may
+    /// extend strict mode to those carriers.
+    pub strict_authenticated: bool,
 }
 
 impl std::fmt::Debug for BaceWiring {

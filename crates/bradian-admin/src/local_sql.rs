@@ -139,6 +139,7 @@ pub(crate) fn build_bace_wiring(args: &SqlArgs) -> Result<Option<BaceWiring>> {
         )),
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
+        strict_authenticated: false,
     }))
 }
 

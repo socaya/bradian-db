@@ -34,6 +34,7 @@ fn wiring_with_auth(key: [u8; 32], label: &str) -> BaceWiring {
         policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: Some(BaceAuthentication::new(key, label)),
+        strict_authenticated: false,
     }
 }
 
@@ -47,6 +48,7 @@ fn wiring_no_auth() -> BaceWiring {
         policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
+        strict_authenticated: false,
     }
 }
 
