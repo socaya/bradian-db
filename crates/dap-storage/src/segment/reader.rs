@@ -370,11 +370,11 @@ fn decode_bace_v1_page(
     Ok(out)
 }
 
-/// ADR 0081 §3.4 — concatenate N ColumnBuffers of the same
-/// physical type into one. Dict columns are explicitly
-/// unsupported (§2 non-goal): the writer bypasses the split for
-/// dict-encoded columns, so a multi-page dict column is itself
-/// a corruption.
+/// ADR 0081 §3.4 + ADR 0082 §3.3 — concatenate N ColumnBuffers
+/// of the same physical type into one. Dict columns use the
+/// identical-dict fast path (the ADR 0082 writer invariant) or
+/// fall back to Utf8 materialization if the pages carry
+/// differing dicts.
 fn concat_buffers(_col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
     if pages.is_empty() {
         return Err(DapError::corruption("concat_buffers called with no pages"));
@@ -507,9 +507,72 @@ fn concat_buffers(_col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> DapResult<Colu
             Ok(ColumnBuffer::Timestamp { data, validity })
         }
         dap_core::PhysicalType::DictIndex32 => {
-            Err(DapError::unsupported(
-                "multi-page DictIndex32 columns are an ADR 0081 §2 non-goal; writer must bypass dict columns from the split path",
-            ))
+            // ADR 0082 §3.3 — fast path when all pages carry
+            // byte-identical dict bytes (the writer invariant).
+            let (first_offsets, first_data) = match &pages[0] {
+                ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } => {
+                    (dict_offsets, dict_data)
+                }
+                _ => return Err(DapError::corruption(
+                    "DictIndex32 concat: page 0 wrong variant",
+                )),
+            };
+            let mut all_same = true;
+            for p in pages.iter().skip(1) {
+                let ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } = p else {
+                    return Err(DapError::corruption(
+                        "DictIndex32 concat: wrong page variant",
+                    ));
+                };
+                if dict_offsets != first_offsets || dict_data != first_data {
+                    all_same = false;
+                    break;
+                }
+            }
+            if all_same {
+                let mut indices = Vec::with_capacity(total);
+                let mut validity = Bitmap::with_capacity(total);
+                for page in &pages {
+                    let ColumnBuffer::DictIndex32 { indices: idx, validity: val, .. } = page
+                    else { unreachable!() };
+                    indices.extend_from_slice(idx);
+                    validity.extend_from(val);
+                }
+                Ok(ColumnBuffer::DictIndex32 {
+                    indices,
+                    validity,
+                    dict_offsets: first_offsets.clone(),
+                    dict_data: first_data.clone(),
+                })
+            } else {
+                // Fallback: materialize each DictIndex32 page to
+                // Utf8, then concat as Utf8. Forward-compat for a
+                // future writer that emits per-page sub-dicts.
+                let mut offsets: Vec<u32> = vec![0];
+                let mut data: Vec<u8> = Vec::new();
+                let mut validity = Bitmap::with_capacity(total);
+                for page in &pages {
+                    let ColumnBuffer::DictIndex32 {
+                        indices, validity: pv, dict_offsets, dict_data,
+                    } = page else { unreachable!() };
+                    for (i, &dict_idx) in indices.iter().enumerate() {
+                        if pv.is_valid(i) {
+                            let di = dict_idx as usize;
+                            if di + 1 >= dict_offsets.len() {
+                                return Err(DapError::corruption(
+                                    "DictIndex32 concat fallback: dict index out of range",
+                                ));
+                            }
+                            let s = dict_offsets[di] as usize;
+                            let e = dict_offsets[di + 1] as usize;
+                            data.extend_from_slice(&dict_data[s..e]);
+                        }
+                        offsets.push(data.len() as u32);
+                        validity.push(pv.is_valid(i));
+                    }
+                }
+                Ok(ColumnBuffer::Utf8 { offsets, data, validity })
+            }
         }
     }
 }

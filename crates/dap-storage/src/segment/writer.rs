@@ -630,17 +630,19 @@ impl SegmentFileWriter {
             _ => PageCodec::Plain,
         };
 
-        // ADR 0081 §3.2 — multi-page split decision. Dict-encoded
-        // columns bypass the split (multi-page dict is a §2
-        // non-goal); non-dict columns split into pages of at most
-        // `max_rows_per_page` rows when the option is set.
+        // ADR 0081 §3.2 + ADR 0082 §3.2 — multi-page split
+        // decision. Both dict-encoded and non-dict columns split
+        // into pages of at most `max_rows_per_page` rows when the
+        // option is set. Dict columns' per-page copies of the
+        // column dict are byte-identical by construction (slice
+        // clones the dict verbatim per ADR 0082 §3.1), so the
+        // reader's identical-dict fast path applies.
         //
         // The Utf8-family builders produce a DictIndex32 buffer by
         // default (for low-cardinality friendly columns). When the
         // chosen codec is PlainUtf8 but the buffer is still
         // DictIndex32, materialize to Utf8 before slicing so the
         // slice path produces sliceable variants only.
-        let is_dict = matches!(codec, PageCodec::Dictionary);
         let effective_buf = if matches!(codec, PageCodec::PlainUtf8)
             && matches!(&buf, ColumnBuffer::DictIndex32 { .. })
         {
@@ -649,8 +651,8 @@ impl SegmentFileWriter {
             buf
         };
         let total_rows = effective_buf.len();
-        let page_size = match (is_dict, self.options.max_rows_per_page) {
-            (false, Some(limit)) if limit > 0 && limit < total_rows => limit,
+        let page_size = match self.options.max_rows_per_page {
+            Some(limit) if limit > 0 && limit < total_rows => limit,
             _ => total_rows.max(1),   // single page
         };
 

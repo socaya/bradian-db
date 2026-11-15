@@ -239,12 +239,13 @@ fn item_6_utf8_offsets_after_concat_point_into_merged_buffer() {
     assert_eq!(r100, format!("note-{:04}-extra-padding-text", 100 % 16));
 }
 
-// ---------- §3.5 item 7 — dict column bypasses split ----------
+// ---------- §3.5 item 7 — dict column now splits (ADR 0082) ----------
 
 #[test]
-fn item_7_dict_encoded_column_emits_single_page_even_with_split_set() {
-    // Low-cardinality Utf8 defaults to dict-encoded; the writer
-    // forces single-page for dict columns per ADR 0081 §2 non-goal.
+fn item_7_dict_encoded_column_splits_like_every_other_column() {
+    // ADR 0081 §2 non-goal "dict columns bypass split" is
+    // reversed by ADR 0082: dict columns split like any other.
+    // Every page carries a verbatim copy of the column dict.
     let schema = Schema::new(vec![
         Column::new("id", LogicalType::I64).required(),
         Column::new("tag", LogicalType::Uid).required(),   // dict path
@@ -255,7 +256,7 @@ fn item_7_dict_encoded_column_emits_single_page_even_with_split_set() {
     ]).collect();
 
     let dir = tempdir().unwrap();
-    let path = dir.path().join("dict_bypass.derc");
+    let path = dir.path().join("dict_split.derc");
     let mut w = SegmentWriter::new(schema, opts_with_split(Some(50)));
     for r in &rows { w.append_row(r).unwrap(); }
     w.finish_to_path(&path).unwrap();
@@ -264,7 +265,7 @@ fn item_7_dict_encoded_column_emits_single_page_even_with_split_set() {
     let id_pages = r.columns().iter().find(|c| c.name == "id").unwrap().pages.len();
     let tag_pages = r.columns().iter().find(|c| c.name == "tag").unwrap().pages.len();
     assert_eq!(id_pages, 4, "non-dict id column should split into 4 pages");
-    assert_eq!(tag_pages, 1, "dict-encoded tag column must bypass split");
+    assert_eq!(tag_pages, 4, "ADR 0082: dict column also splits into 4 pages");
 }
 
 // ---------- §3.5 item 8 — reading dict column from multi-page writer ----------

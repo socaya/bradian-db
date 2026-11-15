@@ -88,11 +88,14 @@ impl ColumnBuffer {
         }
     }
 
-    /// ADR 0081 §3.3 — slice a `ColumnBuffer` into an owned
-    /// sub-buffer covering rows `start..end`. Supported for every
-    /// variant EXCEPT `DictIndex32` — multi-page dictionary
-    /// splits are explicitly out of ADR 0081 scope (§2 non-goal).
-    /// Panics on `DictIndex32`; callers must guard against it.
+    /// ADR 0081 §3.3 + ADR 0082 §3.1 — slice a `ColumnBuffer`
+    /// into an owned sub-buffer covering rows `start..end`.
+    /// For `DictIndex32`, the dict bytes are cloned verbatim into
+    /// the sliced buffer; indices and validity are sliced without
+    /// rebasing. This is the conservative shape ADR 0082 adopts:
+    /// every emitted page carries a byte-identical copy of the
+    /// full column dict, so the reader's fast-path concat works
+    /// without dict-union.
     pub fn slice(&self, start: usize, end: usize) -> Self {
         debug_assert!(start <= end && end <= self.len());
         match self {
@@ -145,11 +148,13 @@ impl ColumnBuffer {
                 data: data[start..end].to_vec(),
                 validity: validity.slice(start, end),
             },
-            ColumnBuffer::DictIndex32 { .. } => {
-                panic!(
-                    "ADR 0081 §2 non-goal: multi-page DictIndex32 columns are unsupported; \
-                     writer must bypass dict columns from the split path"
-                );
+            ColumnBuffer::DictIndex32 { indices, validity, dict_offsets, dict_data } => {
+                ColumnBuffer::DictIndex32 {
+                    indices: indices[start..end].to_vec(),
+                    validity: validity.slice(start, end),
+                    dict_offsets: dict_offsets.clone(),
+                    dict_data: dict_data.clone(),
+                }
             }
         }
     }
