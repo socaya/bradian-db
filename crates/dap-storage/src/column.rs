@@ -159,6 +159,120 @@ impl ColumnBuffer {
         }
     }
 
+    /// ADR 0084 §3.1 — concatenate N `DictIndex32` pages into
+    /// one. Fast path when every page's dict bytes are
+    /// byte-identical (the ADR 0082 writer invariant). Slow path
+    /// otherwise: union every page's dict entries by first
+    /// appearance across pages → entries within a page in dict-
+    /// offset order, remap indices, concat. Null sentinel
+    /// `u32::MAX` passes through unchanged.
+    ///
+    /// Requires every page to be `DictIndex32`; mixed types are
+    /// rejected via `Corruption`.
+    pub fn concat_dict_pages(pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
+        if pages.is_empty() {
+            return Err(DapError::corruption("concat_dict_pages: no pages"));
+        }
+        for (i, p) in pages.iter().enumerate() {
+            if !matches!(p, ColumnBuffer::DictIndex32 { .. }) {
+                return Err(DapError::corruption(format!(
+                    "concat_dict_pages: page {i} is not DictIndex32",
+                )));
+            }
+        }
+        if pages.len() == 1 {
+            let mut pages = pages;
+            return Ok(pages.remove(0));
+        }
+
+        // Fast path: identical dicts across every page.
+        let (first_offsets, first_data) = match &pages[0] {
+            ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } => {
+                (dict_offsets, dict_data)
+            }
+            _ => unreachable!(),
+        };
+        let all_same = pages.iter().skip(1).all(|p| {
+            let ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } = p
+                else { unreachable!() };
+            dict_offsets == first_offsets && dict_data == first_data
+        });
+        let total: usize = pages.iter().map(|p| p.len()).sum();
+        if all_same {
+            let mut indices = Vec::with_capacity(total);
+            let mut validity = Bitmap::with_capacity(total);
+            for page in &pages {
+                let ColumnBuffer::DictIndex32 { indices: idx, validity: val, .. } = page
+                    else { unreachable!() };
+                indices.extend_from_slice(idx);
+                validity.extend_from(val);
+            }
+            return Ok(ColumnBuffer::DictIndex32 {
+                indices,
+                validity,
+                dict_offsets: first_offsets.clone(),
+                dict_data: first_data.clone(),
+            });
+        }
+
+        // Slow path: dict-union. Build the union preserving
+        // order of first appearance across pages.
+        let mut union_offsets: Vec<u32> = vec![0];
+        let mut union_data: Vec<u8> = Vec::new();
+        let mut entry_to_idx: std::collections::HashMap<Vec<u8>, u32>
+            = std::collections::HashMap::new();
+        for p in &pages {
+            let ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } = p
+                else { unreachable!() };
+            if dict_offsets.is_empty() { continue; }
+            for i in 0..dict_offsets.len() - 1 {
+                let s = dict_offsets[i] as usize;
+                let e = dict_offsets[i + 1] as usize;
+                let bytes = &dict_data[s..e];
+                if !entry_to_idx.contains_key(bytes) {
+                    let new_idx = (union_offsets.len() - 1) as u32;
+                    entry_to_idx.insert(bytes.to_vec(), new_idx);
+                    union_data.extend_from_slice(bytes);
+                    union_offsets.push(union_data.len() as u32);
+                }
+            }
+        }
+
+        let mut out_indices: Vec<u32> = Vec::with_capacity(total);
+        let mut out_validity = Bitmap::with_capacity(total);
+        for p in &pages {
+            let ColumnBuffer::DictIndex32 {
+                dict_offsets, dict_data, indices, validity,
+            } = p else { unreachable!() };
+            for (row, &old_idx) in indices.iter().enumerate() {
+                if old_idx == u32::MAX {
+                    out_indices.push(u32::MAX);
+                    out_validity.push(validity.is_valid(row));
+                    continue;
+                }
+                let di = old_idx as usize;
+                if di + 1 >= dict_offsets.len() {
+                    return Err(DapError::corruption(format!(
+                        "concat_dict_pages: index {old_idx} out of range in input page",
+                    )));
+                }
+                let s = dict_offsets[di] as usize;
+                let e = dict_offsets[di + 1] as usize;
+                let bytes = &dict_data[s..e];
+                let new_idx = *entry_to_idx.get(bytes)
+                    .expect("union built from exactly these bytes");
+                out_indices.push(new_idx);
+                out_validity.push(validity.is_valid(row));
+            }
+        }
+        Ok(ColumnBuffer::DictIndex32 {
+            indices: out_indices,
+            validity: out_validity,
+            dict_offsets: union_offsets,
+            dict_data: union_data,
+        })
+    }
+
     /// Read a row as a boxed `Value`. Not used on hot paths — see runtime typed operators.
     pub fn value_at(&self, idx: usize) -> DapResult<Value> {
         if idx >= self.len() {

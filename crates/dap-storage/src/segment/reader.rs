@@ -562,72 +562,13 @@ fn concat_buffers(_col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> DapResult<Colu
             Ok(ColumnBuffer::Timestamp { data, validity })
         }
         dap_core::PhysicalType::DictIndex32 => {
-            // ADR 0082 §3.3 — fast path when all pages carry
-            // byte-identical dict bytes (the writer invariant).
-            let (first_offsets, first_data) = match &pages[0] {
-                ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } => {
-                    (dict_offsets, dict_data)
-                }
-                _ => return Err(DapError::corruption(
-                    "DictIndex32 concat: page 0 wrong variant",
-                )),
-            };
-            let mut all_same = true;
-            for p in pages.iter().skip(1) {
-                let ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } = p else {
-                    return Err(DapError::corruption(
-                        "DictIndex32 concat: wrong page variant",
-                    ));
-                };
-                if dict_offsets != first_offsets || dict_data != first_data {
-                    all_same = false;
-                    break;
-                }
-            }
-            if all_same {
-                let mut indices = Vec::with_capacity(total);
-                let mut validity = Bitmap::with_capacity(total);
-                for page in &pages {
-                    let ColumnBuffer::DictIndex32 { indices: idx, validity: val, .. } = page
-                    else { unreachable!() };
-                    indices.extend_from_slice(idx);
-                    validity.extend_from(val);
-                }
-                Ok(ColumnBuffer::DictIndex32 {
-                    indices,
-                    validity,
-                    dict_offsets: first_offsets.clone(),
-                    dict_data: first_data.clone(),
-                })
-            } else {
-                // Fallback: materialize each DictIndex32 page to
-                // Utf8, then concat as Utf8. Forward-compat for a
-                // future writer that emits per-page sub-dicts.
-                let mut offsets: Vec<u32> = vec![0];
-                let mut data: Vec<u8> = Vec::new();
-                let mut validity = Bitmap::with_capacity(total);
-                for page in &pages {
-                    let ColumnBuffer::DictIndex32 {
-                        indices, validity: pv, dict_offsets, dict_data,
-                    } = page else { unreachable!() };
-                    for (i, &dict_idx) in indices.iter().enumerate() {
-                        if pv.is_valid(i) {
-                            let di = dict_idx as usize;
-                            if di + 1 >= dict_offsets.len() {
-                                return Err(DapError::corruption(
-                                    "DictIndex32 concat fallback: dict index out of range",
-                                ));
-                            }
-                            let s = dict_offsets[di] as usize;
-                            let e = dict_offsets[di + 1] as usize;
-                            data.extend_from_slice(&dict_data[s..e]);
-                        }
-                        offsets.push(data.len() as u32);
-                        validity.push(pv.is_valid(i));
-                    }
-                }
-                Ok(ColumnBuffer::Utf8 { offsets, data, validity })
-            }
+            // ADR 0084 §3.2 — delegate to `concat_dict_pages`,
+            // which handles the identical-dict fast path (ADR
+            // 0082 §3.3 writer invariant) and the dict-union
+            // slow path. The ADR 0082 Utf8 fallback is retired;
+            // differing-dict pages now union into one
+            // `DictIndex32` preserving the dict-encoded shape.
+            ColumnBuffer::concat_dict_pages(pages)
         }
     }
 }
