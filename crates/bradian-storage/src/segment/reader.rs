@@ -40,7 +40,7 @@ pub struct SegmentReader {
     /// v1.4 column-dict region. Key: column name. Value:
     /// (dict_offsets, dict_data). Empty when the segment has no
     /// `COLUMN_DICT` feature flag.
-    column_dicts: std::collections::HashMap<String, (Vec<u32>, Vec<u8>)>,
+    column_dicts: ColumnDictRegion,
 }
 
 impl SegmentReader {
@@ -401,7 +401,7 @@ fn decode_page(
     page: &PageMeta,
     bytes: &[u8],
     validity: Bitmap,
-    column_dict: Option<&(Vec<u32>, Vec<u8>)>,
+    column_dict: Option<&SharedDictEntry>,
 ) -> BradianResult<ColumnBuffer> {
     use bradian_core::PhysicalType;
 
@@ -477,8 +477,8 @@ fn decode_page(
             Ok(ColumnBuffer::DictIndex32 {
                 indices,
                 validity,
-                dict_offsets,
-                dict_data,
+                dict_offsets: std::sync::Arc::new(dict_offsets),
+                dict_data: std::sync::Arc::new(dict_data),
             })
         }
         (codec, phys) => Err(BradianError::unsupported(format!(
@@ -926,7 +926,9 @@ fn read_dictionary_pool_at(
 /// region sits before the dict pool (or FOOTER_MAGIC if no pool);
 /// its length is stored in the 4 bytes immediately before
 /// `region_end`.
-type ColumnDictRegion = std::collections::HashMap<String, (Vec<u32>, Vec<u8>)>;
+/// ADR 0095 — one column-dict region entry: (dict_offsets, dict_data).
+pub(crate) type SharedDictEntry = (std::sync::Arc<Vec<u32>>, std::sync::Arc<Vec<u8>>);
+type ColumnDictRegion = std::collections::HashMap<String, SharedDictEntry>;
 
 fn read_column_dict_region_at(
     file: &mut File,
@@ -1005,7 +1007,7 @@ fn read_column_dict_region_at(
                 "column-dict entry for column {name}: last offset does not match data len",
             )));
         }
-        region.insert(name, (dict_offsets, dict_data));
+        region.insert(name, (std::sync::Arc::new(dict_offsets), std::sync::Arc::new(dict_data)));
     }
     if cursor != buf.len() {
         return Err(BradianError::corruption("column-dict region trailing bytes"));

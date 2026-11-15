@@ -18,7 +18,8 @@ fn dict_page(indices: Vec<u32>, valid: Vec<bool>, dict: &[&str]) -> ColumnBuffer
     }
     ColumnBuffer::DictIndex32 {
         indices, validity,
-        dict_offsets: offsets, dict_data: data,
+        dict_offsets: std::sync::Arc::new(offsets),
+        dict_data: std::sync::Arc::new(data),
     }
 }
 
@@ -40,8 +41,8 @@ fn item_2_identical_dicts_fast_path_preserves_dict_bytes() {
     let ColumnBuffer::DictIndex32 { indices, dict_offsets, dict_data, .. } = &out
         else { panic!("expected DictIndex32"); };
     assert_eq!(indices, &vec![0, 1, 1, 0]);
-    assert_eq!(dict_offsets, &vec![0, 1, 2]);
-    assert_eq!(dict_data, b"ab");
+    assert_eq!(dict_offsets.as_slice(), &[0, 1, 2]);
+    assert_eq!(dict_data.as_slice(), b"ab");
     assert_eq!(str_at(&out, 0), Some("a".into()));
     assert_eq!(str_at(&out, 3), Some("a".into()));
 }
@@ -56,8 +57,8 @@ fn item_3_non_overlapping_dicts_produce_unioned_output() {
     let ColumnBuffer::DictIndex32 { indices, dict_offsets, dict_data, .. } = &out
         else { panic!("expected DictIndex32"); };
     // Union order: a, b (from page 1), then c, d (from page 2).
-    assert_eq!(dict_data, b"abcd");
-    assert_eq!(dict_offsets, &vec![0, 1, 2, 3, 4]);
+    assert_eq!(dict_data.as_slice(), b"abcd");
+    assert_eq!(dict_offsets.as_slice(), &[0, 1, 2, 3, 4]);
     // Page 2's indices 0,1 remap to union indices 2,3.
     assert_eq!(indices, &vec![0, 1, 2, 3]);
     assert_eq!(str_at(&out, 0), Some("a".into()));
@@ -76,8 +77,8 @@ fn item_4_partial_overlap_dedups_shared_entries() {
     let ColumnBuffer::DictIndex32 { indices, dict_offsets, dict_data, .. } = &out
         else { panic!("expected DictIndex32"); };
     // Union: a, b (page 1), then c (page 2's new entry; b dedup'd).
-    assert_eq!(dict_data, b"abc");
-    assert_eq!(dict_offsets, &vec![0, 1, 2, 3]);
+    assert_eq!(dict_data.as_slice(), b"abc");
+    assert_eq!(dict_offsets.as_slice(), &[0, 1, 2, 3]);
     // Page 2 row 0 ("b") → union index 1, row 1 ("c") → union index 2.
     assert_eq!(indices, &vec![0, 1, 1, 2]);
     assert_eq!(str_at(&out, 0), Some("a".into()));
@@ -95,8 +96,8 @@ fn item_5_null_sentinel_passthrough() {
     let out = ColumnBuffer::concat_dict_pages(vec![p1, p2]).unwrap();
     let ColumnBuffer::DictIndex32 { indices, dict_offsets, dict_data, .. } = &out
         else { panic!("expected DictIndex32"); };
-    assert_eq!(dict_data, b"abc");
-    assert_eq!(dict_offsets, &vec![0, 1, 2, 3]);
+    assert_eq!(dict_data.as_slice(), b"abc");
+    assert_eq!(dict_offsets.as_slice(), &[0, 1, 2, 3]);
     // Page 1: a, null, b. Page 2: null, c (page 2's "c" → union idx 2).
     assert_eq!(indices, &vec![0, u32::MAX, 1, u32::MAX, 2]);
     assert_eq!(str_at(&out, 0), Some("a".into()));
@@ -125,7 +126,7 @@ fn item_6_union_order_is_stable_across_runs() {
     assert_eq!(ao, bo);
     assert_eq!(ai, bi);
     // Expected order: x, y (page 1), z (page 2 adds z), w (page 3 adds w).
-    assert_eq!(ad, b"xyzw");
+    assert_eq!(ad.as_slice(), b"xyzw");
 }
 
 // ---------- §3.5 item 7 — empty-dict / zero-row page ----------
@@ -137,8 +138,8 @@ fn item_7_empty_dict_page_tolerated() {
     let p_empty = ColumnBuffer::DictIndex32 {
         indices: vec![],
         validity: Bitmap::default(),
-        dict_offsets: vec![0],
-        dict_data: Vec::new(),
+        dict_offsets: std::sync::Arc::new(vec![0]),
+        dict_data: std::sync::Arc::new(Vec::new()),
     };
     let p_data = dict_page(vec![0, 1], vec![true, true], &["a", "b"]);
     let out = ColumnBuffer::concat_dict_pages(vec![p_empty, p_data]).unwrap();
@@ -209,5 +210,5 @@ fn item_1_existing_adr_0082_fast_path_untouched() {
     let out = ColumnBuffer::concat_dict_pages(vec![p1, p2]).unwrap();
     let ColumnBuffer::DictIndex32 { dict_data, .. } = &out
         else { panic!("expected DictIndex32"); };
-    assert_eq!(dict_data, b"xy");
+    assert_eq!(dict_data.as_slice(), b"xy");
 }

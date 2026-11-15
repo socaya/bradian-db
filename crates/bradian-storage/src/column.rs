@@ -5,6 +5,8 @@
 //! vectorized runtime (`bradian-runtime::ColumnBatch`) wraps these with selection-vector and
 //! operator-oriented metadata.
 
+use std::sync::Arc;
+
 use bradian_core::{BradianError, BradianResult, LogicalType, PhysicalType, Value};
 use serde::{Deserialize, Serialize};
 
@@ -27,12 +29,14 @@ pub enum ColumnBuffer {
     /// Millis since Unix epoch, UTC.
     Timestamp { data: Vec<i64>, validity: Bitmap },
     /// Dictionary-encoded column. `indices` references `dictionary`. Dictionary is a
-    /// contiguous Utf8 blob keyed by `dict_offsets`.
+    /// contiguous Utf8 blob keyed by `dict_offsets`. ADR 0095:
+    /// dict bytes are `Arc`-shared so `ColumnBuffer::clone()`
+    /// on dict columns is a cheap ref-count bump.
     DictIndex32 {
         indices: Vec<u32>,
         validity: Bitmap,
-        dict_offsets: Vec<u32>,
-        dict_data: Vec<u8>,
+        dict_offsets: Arc<Vec<u32>>,
+        dict_data: Arc<Vec<u8>>,
     },
 }
 
@@ -268,8 +272,8 @@ impl ColumnBuffer {
         Ok(ColumnBuffer::DictIndex32 {
             indices: out_indices,
             validity: out_validity,
-            dict_offsets: union_offsets,
-            dict_data: union_data,
+            dict_offsets: Arc::new(union_offsets),
+            dict_data: Arc::new(union_data),
         })
     }
 
@@ -628,8 +632,8 @@ impl DictUtf8Builder {
         ColumnBuffer::DictIndex32 {
             indices: self.indices,
             validity: self.validity,
-            dict_offsets,
-            dict_data,
+            dict_offsets: Arc::new(dict_offsets),
+            dict_data: Arc::new(dict_data),
         }
     }
     pub fn cardinality(&self) -> usize {

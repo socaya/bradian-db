@@ -693,13 +693,13 @@ impl SegmentFileWriter {
         if column_dict_active {
             if let ColumnBuffer::DictIndex32 { dict_offsets, dict_data, .. } = &effective_buf {
                 let mut offset_bytes = Vec::with_capacity(dict_offsets.len() * 4);
-                for o in dict_offsets {
+                for o in dict_offsets.iter() {
                     offset_bytes.extend_from_slice(&o.to_le_bytes());
                 }
-                let entry_crc = crc32_parts(&[&offset_bytes, dict_data]);
+                let entry_crc = crc32_parts(&[&offset_bytes, dict_data.as_slice()]);
                 self.column_dicts.insert(
                     name.clone(),
-                    (dict_offsets.clone(), dict_data.clone(), entry_crc),
+                    ((**dict_offsets).clone(), (**dict_data).clone(), entry_crc),
                 );
             }
         }

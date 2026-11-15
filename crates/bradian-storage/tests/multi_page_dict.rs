@@ -216,8 +216,8 @@ fn item_6_differing_dicts_concat_fallback_produces_utf8() {
     let full = ColumnBuffer::DictIndex32 {
         indices: vec![0, 1, 0, 1],
         validity,
-        dict_offsets: vec![0, 1, 2],
-        dict_data: b"ab".to_vec(),
+        dict_offsets: std::sync::Arc::new(vec![0, 1, 2]),
+        dict_data: std::sync::Arc::new(b"ab".to_vec()),
     };
     // ADR 0081 §2 panic removed by ADR 0082 §3.1: slicing a
     // DictIndex32 must now succeed with a sub-buffer.

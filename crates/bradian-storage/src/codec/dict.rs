@@ -29,10 +29,10 @@ pub fn encode(buf: &ColumnBuffer) -> BradianResult<Vec<u8>> {
             for idx in indices {
                 out.extend_from_slice(&idx.to_le_bytes());
             }
-            for off in dict_offsets {
+            for off in dict_offsets.iter() {
                 out.extend_from_slice(&off.to_le_bytes());
             }
-            out.extend_from_slice(dict_data);
+            out.extend_from_slice(dict_data.as_slice());
             Ok(out)
         }
         other => Err(BradianError::unsupported(format!(
