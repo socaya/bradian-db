@@ -336,3 +336,70 @@ fn session_commit_without_begin_and_unsupported_ddl_are_rejected() {
         Ok(())
     }).unwrap();
 }
+
+// ---------- ADR 0071 — SqlEngine BACE open (G14 per-table) ----------
+
+use std::sync::Arc;
+use bradian_relational::bace::codec::raw::RAW_ID;
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+use bradian_relational::bace::policy::{
+    CompressionProfile, InMemoryPolicyService, PlatformBaseline,
+};
+use bradian_relational::bace::registry::BuiltInRegistry;
+use bradian_relational::row_store::BaceWiring;
+
+fn wiring_zstd_balanced() -> BaceWiring {
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![ZSTD_ID, RAW_ID],
+        ..PlatformBaseline::shipped()
+    };
+    BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }
+}
+
+#[test]
+fn sql_engine_open_with_bace_round_trips_ddl_and_dml() {
+    // ADR 0071 §3.5 item 3 — full catalog DDL + per-table DML cycle
+    // under a BACE-opened SqlEngine. Each table_store() call must
+    // thread the wiring through to TableStore::open_with_bace.
+    let dir = tempdir().unwrap();
+    let engine = SqlEngine::open_with_bace(dir.path(), wiring_zstd_balanced()).unwrap();
+    setup(&engine);
+    command(&engine,
+        "INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(1,'ACME',10.50,false,NULL)",
+        1);
+    match engine.execute("SELECT amount FROM billing.public.invoices WHERE id=1").unwrap() {
+        SqlResultSet::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}
+
+#[test]
+fn sql_engine_open_with_bace_tolerates_legacy_v1_only_tables() {
+    // ADR 0071 §3.5 item 7 — a per-table directory written through
+    // the legacy SqlEngine::open path can be read by an engine
+    // opened with BACE wiring (ADR 0065 §3.5 mixed-generation rule
+    // applied through TableStore::open_with_bace).
+    let dir = tempdir().unwrap();
+    {
+        let legacy = SqlEngine::open(dir.path()).unwrap();
+        setup(&legacy);
+        command(&legacy,
+            "INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES(42,'LEGACY',99.00,true,NULL)",
+            1);
+    }
+    // Reopen under BACE wiring; existing v1 rows are visible.
+    let engine = SqlEngine::open_with_bace(dir.path(), wiring_zstd_balanced()).unwrap();
+    match engine.execute("SELECT customer FROM billing.public.invoices WHERE id=42").unwrap() {
+        SqlResultSet::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0], vec![Value::String("LEGACY".into())]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+}

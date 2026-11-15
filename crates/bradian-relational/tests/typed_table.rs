@@ -301,3 +301,45 @@ fn typed_point_read_fails_when_published_index_is_corrupt() {
     let table = TableStore::open(dir.path(), table_def).unwrap();
     assert!(matches!(table.get(&[Value::Int64(5)]), Err(TableError::Storage(_))));
 }
+
+// ---------- ADR 0071 — TableStore BACE open ----------
+
+use bradian_relational::bace::codec::raw::RAW_ID;
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+use bradian_relational::bace::policy::{
+    CompressionProfile, InMemoryPolicyService, PlatformBaseline,
+};
+use bradian_relational::bace::registry::BuiltInRegistry;
+use bradian_relational::row_store::BaceWiring;
+
+fn wiring_zstd_balanced() -> BaceWiring {
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![ZSTD_ID, RAW_ID],
+        ..PlatformBaseline::shipped()
+    };
+    BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }
+}
+
+#[test]
+fn table_store_open_with_bace_round_trips_a_typed_put_get_commit_cycle() {
+    // ADR 0071 §3.5 item 1 — TableStore::open_with_bace is the thin
+    // wrapper over RowStore::open_with_bace; META_KEY schema-pin
+    // reconciliation is unchanged.
+    let dir = tempdir().unwrap();
+    let table_def = schema();
+    let table = TableStore::open_with_bace(dir.path(), table_def.clone(), wiring_zstd_balanced()).unwrap();
+    let row = vec![
+        Value::Int64(1),
+        Value::String("inv-1".into()),
+        Value::Decimal(12345),
+        Value::Boolean(true),
+        Value::Null,
+    ];
+    table.insert(&row).unwrap();
+    let got = table.get(&[Value::Int64(1)]).unwrap().unwrap();
+    assert_eq!(got, row);
+}

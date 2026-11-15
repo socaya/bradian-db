@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::{Column, DataType, PrimaryKey, Table, TableSpec};
 use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
+use crate::row_store::BaceWiring;
 use crate::typed_table::{TableError, TableStore, TableTransaction, Value};
 
 #[derive(Debug, Error)]
@@ -397,19 +398,42 @@ pub struct SqlEngine {
     root: PathBuf,
     catalog: PersistentCatalog,
     operation: Mutex<()>,
+    /// ADR 0071 — present when the engine was opened via
+    /// `open_with_bace`. Each lazy `TableStore::open_with_bace`
+    /// in `table_store()` consults this.
+    bace_wiring: Option<BaceWiring>,
 }
 
 impl SqlEngine {
     pub fn open(root: impl AsRef<Path>) -> SqlResult<Self> {
-        if root.as_ref().join("history-domain").exists() {
+        Self::open_inner(root.as_ref(), None)
+    }
+
+    /// ADR 0071 — open the G14 per-table SQL engine under BACE
+    /// wiring. The wiring is captured on the engine so each lazy
+    /// `TableStore` open reaches `TableStore::open_with_bace`.
+    pub fn open_with_bace(root: impl AsRef<Path>, wiring: BaceWiring) -> SqlResult<Self> {
+        Self::open_inner(root.as_ref(), Some(wiring))
+    }
+
+    fn open_inner(root: &Path, wiring: Option<BaceWiring>) -> SqlResult<Self> {
+        if root.join("history-domain").exists() {
             return Err(SqlError::Unsupported(
                 "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
             ));
         }
-        std::fs::create_dir_all(root.as_ref())?;
-        std::fs::create_dir_all(root.as_ref().join("tables"))?;
-        let catalog = PersistentCatalog::open(root.as_ref().join("catalog"))?;
-        Ok(Self { root: root.as_ref().to_owned(), catalog, operation: Mutex::new(()) })
+        std::fs::create_dir_all(root)?;
+        std::fs::create_dir_all(root.join("tables"))?;
+        let catalog = match &wiring {
+            Some(w) => PersistentCatalog::open_with_bace(root.join("catalog"), w.clone())?,
+            None    => PersistentCatalog::open(root.join("catalog"))?,
+        };
+        Ok(Self {
+            root: root.to_owned(),
+            catalog,
+            operation: Mutex::new(()),
+            bace_wiring: wiring,
+        })
     }
 
     fn resolve(&self, parts: &[String]) -> SqlResult<Table> {
@@ -427,7 +451,15 @@ impl SqlEngine {
     fn table_store(&self, table: &Table) -> SqlResult<TableStore> {
         // Only supported schemas reach TableStore; secondary runtime constraints
         // are rejected by its own validator, never silently ignored.
-        Ok(TableStore::open(self.root.join("tables").join(table.id.0.to_string()), table.clone())?)
+        //
+        // ADR 0071 — when the SqlEngine was opened with BACE wiring, each
+        // lazy TableStore open threads the wiring through so the per-
+        // table RowStore decodes v2 pages and emits v2 on checkpoint.
+        let path = self.root.join("tables").join(table.id.0.to_string());
+        Ok(match &self.bace_wiring {
+            Some(w) => TableStore::open_with_bace(path, table.clone(), w.clone())?,
+            None    => TableStore::open(path, table.clone())?,
+        })
     }
 
     /// Execute application-defined typed operations as one durable transaction

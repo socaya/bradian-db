@@ -233,3 +233,91 @@ fn sql_session_rejects_multi_statement_and_unqualified_references() {
         Ok(())
     }).unwrap();
 }
+
+// ---------- ADR 0071 — DomainSqlEngine BACE open ----------
+
+use std::sync::Arc;
+use bradian_relational::bace::codec::raw::RAW_ID;
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+use bradian_relational::bace::policy::{
+    CompressionProfile, InMemoryPolicyService, PlatformBaseline,
+};
+use bradian_relational::bace::registry::BuiltInRegistry;
+use bradian_relational::row_store::BaceWiring;
+
+fn wiring_zstd_balanced() -> BaceWiring {
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![ZSTD_ID, RAW_ID],
+        ..PlatformBaseline::shipped()
+    };
+    BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }
+}
+
+#[test]
+fn domain_sql_engine_open_with_bace_round_trips_ddl_and_dml() {
+    // ADR 0071 §3.5 item 2 — full catalog DDL + domain DML flow
+    // under a BACE-opened DomainSqlEngine.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let db = DomainSqlEngine::open_with_bace(dir.path(), wiring_zstd_balanced()).unwrap();
+    for name in ["accounts", "movements"] {
+        db.register_catalog_table(&format!("banking.public.{name}")).unwrap();
+    }
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("INSERT INTO banking.public.accounts(id,balance) VALUES(1,100)")?;
+        s.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        let rows = s.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?;
+        match rows {
+            SqlResultSet::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(100)]]);
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn domain_sql_engine_open_with_bace_tolerates_legacy_v1_only_directory() {
+    // ADR 0071 §3.5 item 6 — wiring tolerated on v1-only legacy
+    // directories per ADR 0065 §3.5 mixed-generation rule.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    {
+        let legacy = DomainSqlEngine::open(dir.path()).unwrap();
+        for name in ["accounts", "movements"] {
+            legacy.register_catalog_table(&format!("banking.public.{name}")).unwrap();
+        }
+        legacy.with_session(|s| {
+            s.execute("BEGIN")?;
+            s.execute("INSERT INTO banking.public.accounts(id,balance) VALUES(7,77)")?;
+            s.execute("COMMIT")?;
+            Ok(())
+        }).unwrap();
+    }
+    // Reopen the same directory under BACE wiring — reads of v1
+    // pages still succeed.
+    let db = DomainSqlEngine::open_with_bace(dir.path(), wiring_zstd_balanced()).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        let rows = s.execute("SELECT balance FROM banking.public.accounts WHERE id=7")?;
+        match rows {
+            SqlResultSet::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(77)]]);
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}

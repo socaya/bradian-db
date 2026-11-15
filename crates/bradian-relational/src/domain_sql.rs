@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 
 use crate::Table;
 use crate::persistent_catalog::PersistentCatalog;
+use crate::row_store::BaceWiring;
 use crate::sql::{
     coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
 };
@@ -46,12 +47,39 @@ impl DomainSqlEngine {
         domain_limits: crate::runtime_limits::DomainLimits,
         catalog_limits: crate::runtime_limits::CatalogLimits,
     ) -> SqlResult<Self> {
-        if root.as_ref().join("history-domain").exists() {
+        Self::open_inner(root.as_ref(), domain_limits, catalog_limits, None)
+    }
+
+    /// ADR 0071 — open the shared-domain SQL engine under BACE wiring.
+    /// The wiring is cloned into both component stores at open time;
+    /// no wiring is stored on the engine itself.
+    pub fn open_with_bace(root: impl AsRef<Path>, wiring: BaceWiring) -> SqlResult<Self> {
+        Self::open_with_bace_and_limits(
+            root, wiring,
+            crate::runtime_limits::DomainLimits::default(),
+            crate::runtime_limits::CatalogLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_limits(
+        root: impl AsRef<Path>, wiring: BaceWiring,
+        domain_limits: crate::runtime_limits::DomainLimits,
+        catalog_limits: crate::runtime_limits::CatalogLimits,
+    ) -> SqlResult<Self> {
+        Self::open_inner(root.as_ref(), domain_limits, catalog_limits, Some(wiring))
+    }
+
+    fn open_inner(
+        root: &Path,
+        domain_limits: crate::runtime_limits::DomainLimits,
+        catalog_limits: crate::runtime_limits::CatalogLimits,
+        wiring: Option<BaceWiring>,
+    ) -> SqlResult<Self> {
+        if root.join("history-domain").exists() {
             return Err(SqlError::Unsupported(
                 "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
             ));
         }
-        let root = root.as_ref();
         // Refuse opening a root with ANY legacy per-table data. No implicit
         // migration, dual writes, or ambiguous source of truth is allowed.
         let old_tables = root.join("tables");
@@ -61,8 +89,20 @@ impl DomainSqlEngine {
             ));
         }
         fs::create_dir_all(root)?;
-        let catalog = PersistentCatalog::open_with_limits(root.join("catalog"), catalog_limits)?;
-        let domain = MultiTableStore::open_with_limits(root.join("shared-domain"), domain_limits)?;
+        let (catalog, domain) = match wiring {
+            Some(w) => (
+                PersistentCatalog::open_with_bace_and_limits(
+                    root.join("catalog"), w.clone(), catalog_limits,
+                )?,
+                MultiTableStore::open_with_bace_and_limits(
+                    root.join("shared-domain"), w, domain_limits,
+                )?,
+            ),
+            None => (
+                PersistentCatalog::open_with_limits(root.join("catalog"), catalog_limits)?,
+                MultiTableStore::open_with_limits(root.join("shared-domain"), domain_limits)?,
+            ),
+        };
         Ok(Self { catalog, domain, operation: Mutex::new(()), _root: root.to_owned() })
     }
 

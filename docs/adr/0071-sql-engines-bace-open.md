@@ -1,17 +1,36 @@
-# ADR 0071 — SQL engines BACE open (implementation; **PROPOSED**)
+# ADR 0071 — SQL engines BACE open (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE prerequisite stack (0060–0063), the
-accepted row-store integration (0065), the accepted coordinator
-writer-side work (0069, 0070), and the matching component
-`open_with_bace` entry points they shipped. This ADR adds the
-operator-facing SQL engine `open_with_bace` entry points so a
-Bradian database that Bradian Studio or an SQL client opens via
-`SqlEngine` or `DomainSqlEngine` actually reaches the BACE
-plumbing landed under ADRs 0065–0070.
+Operator-facing SQL engines now reach the BACE plumbing landed
+under ADRs 0065–0070:
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+- `TableStore::open_with_bace` — thin wrapper around
+  `RowStore::open_with_bace`, preserves schema-pin reconciliation.
+- `DomainSqlEngine::open_with_bace` + `_and_limits` — threads
+  shared wiring to `PersistentCatalog::open_with_bace` and
+  `MultiTableStore::open_with_bace`. No wiring stored on engine.
+- `SqlEngine::open_with_bace` — stores
+  `bace_wiring: Option<BaceWiring>` on the engine; lazy
+  `table_store()` threads it through to
+  `TableStore::open_with_bace`.
+
+No new error variants, no on-disk format change, no backup
+paths added. Operators who want coordinator backup still go
+through `CatalogLifecycle::backup_database_to` (ADR 0069).
+
+Implementation summary:
+
+- `crates/bradian-relational/src/typed_table.rs`
+- `crates/bradian-relational/src/domain_sql.rs`
+- `crates/bradian-relational/src/sql.rs`
+- `crates/bradian-relational/tests/typed_table.rs` — 1 new test
+- `crates/bradian-relational/tests/domain_sql.rs` — 2 new tests
+- `crates/bradian-relational/tests/sql_execution.rs` — 2 new tests
+
+970 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
 
 ## 1. Context
 

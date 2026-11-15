@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{Column, DataType, Table};
-use crate::runtime_limits::{ScanControl, ResourceError};
-use crate::row_store::{RowMutation, RowStore, StoreError};
+use crate::runtime_limits::{ScanControl, ResourceError, StorageLimits};
+use crate::row_store::{BaceWiring, RowMutation, RowStore, StoreError};
 
 const ROW_MAGIC: &[u8; 4] = b"BRRW";
 const KEY_MAGIC: &[u8; 4] = b"BRPK";
@@ -98,8 +98,26 @@ pub struct TableStore {
 
 impl TableStore {
     pub fn open(path: impl AsRef<Path>, table: Table) -> TableResult<Self> {
+        Self::open_inner(path.as_ref(), table, None)
+    }
+
+    /// ADR 0071 — open the per-table store under BACE wiring. The
+    /// stored META_KEY schema-pin reconciliation that follows the
+    /// storage open is unchanged.
+    pub fn open_with_bace(
+        path: impl AsRef<Path>, table: Table, wiring: BaceWiring,
+    ) -> TableResult<Self> {
+        Self::open_inner(path.as_ref(), table, Some(wiring))
+    }
+
+    fn open_inner(
+        path: &Path, table: Table, wiring: Option<BaceWiring>,
+    ) -> TableResult<Self> {
         let pk_positions = validate_table(&table)?;
-        let storage = RowStore::open(path)?;
+        let storage = match wiring {
+            Some(w) => RowStore::open_with_bace(path, StorageLimits::default(), w)?,
+            None    => RowStore::open(path)?,
+        };
         let expected = serde_json::to_vec(&table)
             .map_err(|e| TableError::Schema(format!("cannot serialize table definition: {e}")))?;
         let stored = storage.get(META_KEY);
