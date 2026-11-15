@@ -370,10 +370,148 @@ fn decode_bace_v1_page(
     Ok(out)
 }
 
-fn concat_buffers(_col: &ColumnMeta, _pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
-    Err(DapError::unsupported(
-        "multi-page column concatenation not implemented in v1 (single-page writer)",
-    ))
+/// ADR 0081 §3.4 — concatenate N ColumnBuffers of the same
+/// physical type into one. Dict columns are explicitly
+/// unsupported (§2 non-goal): the writer bypasses the split for
+/// dict-encoded columns, so a multi-page dict column is itself
+/// a corruption.
+fn concat_buffers(_col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
+    if pages.is_empty() {
+        return Err(DapError::corruption("concat_buffers called with no pages"));
+    }
+    if pages.len() == 1 {
+        let mut pages = pages;
+        return Ok(pages.remove(0));
+    }
+
+    // Check all pages share a physical type.
+    let first_physical = pages[0].physical_type();
+    for (i, p) in pages.iter().enumerate().skip(1) {
+        if p.physical_type() != first_physical {
+            return Err(DapError::corruption(format!(
+                "concat page {i} physical_type {:?} differs from page 0 {:?}",
+                p.physical_type(), first_physical,
+            )));
+        }
+    }
+
+    use crate::bitmap::Bitmap;
+    let total: usize = pages.iter().map(|p| p.len()).sum();
+
+    match first_physical {
+        dap_core::PhysicalType::Bool => {
+            let mut data = vec![0u8; total.div_ceil(8)];
+            let mut validity = Bitmap::with_capacity(total);
+            let mut out_row = 0usize;
+            for page in &pages {
+                let ColumnBuffer::Bool { data: pdata, validity: pval, len: plen } = page else {
+                    return Err(DapError::corruption("Bool concat: non-Bool page"));
+                };
+                for i in 0..*plen {
+                    let bit = (pdata[i / 8] >> (i % 8)) & 1;
+                    data[out_row / 8] |= bit << (out_row % 8);
+                    validity.push(pval.is_valid(i));
+                    out_row += 1;
+                }
+            }
+            Ok(ColumnBuffer::Bool { data, validity, len: total })
+        }
+        dap_core::PhysicalType::I32 => {
+            let mut data = Vec::with_capacity(total);
+            let mut validity = Bitmap::with_capacity(total);
+            for page in &pages {
+                let ColumnBuffer::I32 { data: pd, validity: pv } = page else {
+                    return Err(DapError::corruption("I32 concat: wrong page variant"));
+                };
+                data.extend_from_slice(pd);
+                validity.extend_from(pv);
+            }
+            Ok(ColumnBuffer::I32 { data, validity })
+        }
+        dap_core::PhysicalType::I64 => {
+            let mut data = Vec::with_capacity(total);
+            let mut validity = Bitmap::with_capacity(total);
+            for page in &pages {
+                let ColumnBuffer::I64 { data: pd, validity: pv } = page else {
+                    return Err(DapError::corruption("I64 concat: wrong page variant"));
+                };
+                data.extend_from_slice(pd);
+                validity.extend_from(pv);
+            }
+            Ok(ColumnBuffer::I64 { data, validity })
+        }
+        dap_core::PhysicalType::F64 => {
+            let mut data = Vec::with_capacity(total);
+            let mut validity = Bitmap::with_capacity(total);
+            for page in &pages {
+                let ColumnBuffer::F64 { data: pd, validity: pv } = page else {
+                    return Err(DapError::corruption("F64 concat: wrong page variant"));
+                };
+                data.extend_from_slice(pd);
+                validity.extend_from(pv);
+            }
+            Ok(ColumnBuffer::F64 { data, validity })
+        }
+        dap_core::PhysicalType::Decimal128 => {
+            let mut data = Vec::with_capacity(total);
+            let mut validity = Bitmap::with_capacity(total);
+            let mut shared_scale: Option<u8> = None;
+            for page in &pages {
+                let ColumnBuffer::Decimal128 { data: pd, validity: pv, scale } = page else {
+                    return Err(DapError::corruption("Decimal128 concat: wrong page variant"));
+                };
+                match shared_scale {
+                    None => shared_scale = Some(*scale),
+                    Some(s) if s != *scale => return Err(DapError::corruption(
+                        "Decimal128 concat: conflicting scales across pages",
+                    )),
+                    _ => {}
+                }
+                data.extend_from_slice(pd);
+                validity.extend_from(pv);
+            }
+            Ok(ColumnBuffer::Decimal128 {
+                data, validity,
+                scale: shared_scale.unwrap_or(0),
+            })
+        }
+        dap_core::PhysicalType::Utf8 => {
+            let mut offsets: Vec<u32> = Vec::with_capacity(total + 1);
+            let mut data = Vec::new();
+            let mut validity = Bitmap::with_capacity(total);
+            offsets.push(0);
+            for page in &pages {
+                let ColumnBuffer::Utf8 { offsets: pofs, data: pd, validity: pv } = page else {
+                    return Err(DapError::corruption("Utf8 concat: wrong page variant"));
+                };
+                let base = *offsets.last().unwrap();
+                // Skip the first offset (always 0) and rebase the rest.
+                for o in &pofs[1..] {
+                    offsets.push(base + o);
+                }
+                data.extend_from_slice(pd);
+                validity.extend_from(pv);
+            }
+            Ok(ColumnBuffer::Utf8 { offsets, data, validity })
+        }
+        dap_core::PhysicalType::Timestamp => {
+            let mut data = Vec::with_capacity(total);
+            let mut validity = Bitmap::with_capacity(total);
+            for page in &pages {
+                let ColumnBuffer::Timestamp { data: pd, validity: pv } = page else {
+                    return Err(DapError::corruption("Timestamp concat: wrong page variant"));
+                };
+                data.extend_from_slice(pd);
+                validity.extend_from(pv);
+            }
+            Ok(ColumnBuffer::Timestamp { data, validity })
+        }
+        dap_core::PhysicalType::DictIndex32 => {
+            Err(DapError::unsupported(
+                "multi-page DictIndex32 columns are an ADR 0081 §2 non-goal; writer must bypass dict columns from the split path",
+            ))
+        }
+    }
 }
 
 /// ADR 0076 + ADR 0079 — returns

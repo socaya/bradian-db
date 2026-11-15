@@ -34,6 +34,12 @@ pub struct SegmentWriterOptions {
     pub watermark_ms: i64,
     pub data_revision: u64,
     pub metadata_revision: Option<Fingerprint>,
+    /// ADR 0081 §3.1 — if `Some(n)`, non-dict columns are
+    /// split into ceil(rows / n) pages. `None` (default)
+    /// emits one page per column, preserving byte-identical
+    /// pre-ADR-0081 output. Dict-encoded columns always emit
+    /// one page regardless (§2 non-goal).
+    pub max_rows_per_page: Option<usize>,
 }
 
 impl Default for SegmentWriterOptions {
@@ -47,6 +53,7 @@ impl Default for SegmentWriterOptions {
             watermark_ms: 0,
             data_revision: 0,
             metadata_revision: None,
+            max_rows_per_page: None,
         }
     }
 }
@@ -402,6 +409,27 @@ fn wrap_page_in_baca_envelope(
     Ok(buf)
 }
 
+/// ADR 0081 §3.2 — convert a dict-builder-produced `DictIndex32`
+/// buffer into a `Utf8` buffer so the writer can slice it across
+/// pages. Only called when the chosen codec is `PlainUtf8` but
+/// the buffer is still in the dict-builder shape. Panics on
+/// non-DictIndex32 input (the caller guards).
+fn materialize_dict_to_utf8(buf: &ColumnBuffer) -> ColumnBuffer {
+    let ColumnBuffer::DictIndex32 { indices, validity, dict_offsets, dict_data } = buf else {
+        panic!("materialize_dict_to_utf8 requires a DictIndex32 buffer");
+    };
+    let mut offsets = Vec::with_capacity(indices.len() + 1);
+    let mut data = Vec::new();
+    offsets.push(0u32);
+    for idx in indices {
+        let s = dict_offsets[*idx as usize] as usize;
+        let e = dict_offsets[*idx as usize + 1] as usize;
+        data.extend_from_slice(&dict_data[s..e]);
+        offsets.push(data.len() as u32);
+    }
+    ColumnBuffer::Utf8 { offsets, data, validity: validity.clone() }
+}
+
 /// ADR 0079 §3.3 — encode `inner_payload` with the supplied BACE
 /// dictionary (via ADR 0078's `encode_zstd_with_dictionary`) and
 /// wrap the result in a BACE v1 envelope with `codec_id = ZSTD_ID`.
@@ -602,6 +630,63 @@ impl SegmentFileWriter {
             _ => PageCodec::Plain,
         };
 
+        // ADR 0081 §3.2 — multi-page split decision. Dict-encoded
+        // columns bypass the split (multi-page dict is a §2
+        // non-goal); non-dict columns split into pages of at most
+        // `max_rows_per_page` rows when the option is set.
+        //
+        // The Utf8-family builders produce a DictIndex32 buffer by
+        // default (for low-cardinality friendly columns). When the
+        // chosen codec is PlainUtf8 but the buffer is still
+        // DictIndex32, materialize to Utf8 before slicing so the
+        // slice path produces sliceable variants only.
+        let is_dict = matches!(codec, PageCodec::Dictionary);
+        let effective_buf = if matches!(codec, PageCodec::PlainUtf8)
+            && matches!(&buf, ColumnBuffer::DictIndex32 { .. })
+        {
+            materialize_dict_to_utf8(&buf)
+        } else {
+            buf
+        };
+        let total_rows = effective_buf.len();
+        let page_size = match (is_dict, self.options.max_rows_per_page) {
+            (false, Some(limit)) if limit > 0 && limit < total_rows => limit,
+            _ => total_rows.max(1),   // single page
+        };
+
+        let mut pages = Vec::new();
+        let mut merged_zone = ZoneMap::empty();
+        let mut row_cursor = 0usize;
+        while row_cursor < total_rows {
+            let slice_end = (row_cursor + page_size).min(total_rows);
+            let page_buf = if page_size >= total_rows {
+                effective_buf.clone()
+            } else {
+                effective_buf.slice(row_cursor, slice_end)
+            };
+            let (page_meta, page_zone) = self.emit_one_page(
+                &name, col, page_buf, codec,
+            )?;
+            merged_zone = merged_zone.merge(&page_zone);
+            pages.push(page_meta);
+            row_cursor = slice_end;
+            if page_size >= total_rows { break; }
+        }
+        Ok((pages, merged_zone))
+    }
+
+    /// ADR 0081 §3.2 — emit exactly one page. All prior logic
+    /// (BACE/BACA/dict envelope dispatch, CRC, trailer byte, zone
+    /// map) is the same as before this ADR; the only change is
+    /// the wrapping loop in `write_column` that may invoke this
+    /// helper multiple times per column.
+    fn emit_one_page(
+        &mut self,
+        name: &str,
+        col: &dap_core::Column,
+        buf: ColumnBuffer,
+        codec: PageCodec,
+    ) -> DapResult<(PageMeta, ZoneMap)> {
         let (inner_payload, row_count) = encode_page(&buf, codec)?;
         // Writer policy: for nullable columns we always write the validity bitmap. For
         // non-nullable columns we omit it entirely (validity_len = 0). CRC must cover exactly
@@ -618,7 +703,7 @@ impl SegmentFileWriter {
         //   plain BACE no auth   → ADR 0076 trailer=1 (BACE)
         //   no BACE              → legacy v1.0 path, no trailer
         let dict_for_column = if self.bace_active {
-            self.bace_dictionaries.get(&name).cloned()
+            self.bace_dictionaries.get(name).cloned()
         } else {
             None
         };
@@ -691,7 +776,8 @@ impl SegmentFileWriter {
             zone_map: zone.clone(),
             crc32: crc,
         };
-        Ok((vec![page], zone))
+        let _ = col;   // reserved for future per-column decisions
+        Ok((page, zone))
     }
 
     /// ADR 0079 §3.1 — write the dictionary pool between the last

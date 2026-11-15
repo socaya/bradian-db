@@ -88,6 +88,72 @@ impl ColumnBuffer {
         }
     }
 
+    /// ADR 0081 §3.3 — slice a `ColumnBuffer` into an owned
+    /// sub-buffer covering rows `start..end`. Supported for every
+    /// variant EXCEPT `DictIndex32` — multi-page dictionary
+    /// splits are explicitly out of ADR 0081 scope (§2 non-goal).
+    /// Panics on `DictIndex32`; callers must guard against it.
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        debug_assert!(start <= end && end <= self.len());
+        match self {
+            ColumnBuffer::Bool { data, validity, .. } => {
+                // Rebuild from bits to avoid byte-alignment issues.
+                let mut out_bytes = vec![0u8; (end - start).div_ceil(8)];
+                for i in start..end {
+                    let bit = (data[i / 8] >> (i % 8)) & 1;
+                    let out_bit = i - start;
+                    out_bytes[out_bit / 8] |= bit << (out_bit % 8);
+                }
+                ColumnBuffer::Bool {
+                    data: out_bytes,
+                    validity: validity.slice(start, end),
+                    len: end - start,
+                }
+            }
+            ColumnBuffer::I32 { data, validity } => ColumnBuffer::I32 {
+                data: data[start..end].to_vec(),
+                validity: validity.slice(start, end),
+            },
+            ColumnBuffer::I64 { data, validity } => ColumnBuffer::I64 {
+                data: data[start..end].to_vec(),
+                validity: validity.slice(start, end),
+            },
+            ColumnBuffer::F64 { data, validity } => ColumnBuffer::F64 {
+                data: data[start..end].to_vec(),
+                validity: validity.slice(start, end),
+            },
+            ColumnBuffer::Decimal128 { data, validity, scale } => ColumnBuffer::Decimal128 {
+                data: data[start..end].to_vec(),
+                validity: validity.slice(start, end),
+                scale: *scale,
+            },
+            ColumnBuffer::Utf8 { offsets, data, validity } => {
+                let s = offsets[start] as usize;
+                let e = offsets[end] as usize;
+                let sub_data = data[s..e].to_vec();
+                // Rebase offsets so the first is 0.
+                let base = offsets[start];
+                let sub_offsets: Vec<u32> = offsets[start..=end]
+                    .iter().map(|o| o - base).collect();
+                ColumnBuffer::Utf8 {
+                    offsets: sub_offsets,
+                    data: sub_data,
+                    validity: validity.slice(start, end),
+                }
+            }
+            ColumnBuffer::Timestamp { data, validity } => ColumnBuffer::Timestamp {
+                data: data[start..end].to_vec(),
+                validity: validity.slice(start, end),
+            },
+            ColumnBuffer::DictIndex32 { .. } => {
+                panic!(
+                    "ADR 0081 §2 non-goal: multi-page DictIndex32 columns are unsupported; \
+                     writer must bypass dict columns from the split path"
+                );
+            }
+        }
+    }
+
     /// Read a row as a boxed `Value`. Not used on hot paths — see runtime typed operators.
     pub fn value_at(&self, idx: usize) -> DapResult<Value> {
         if idx >= self.len() {

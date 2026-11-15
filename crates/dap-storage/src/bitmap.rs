@@ -89,6 +89,28 @@ impl Bitmap {
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
+
+    /// ADR 0081 §3.3 — produce a new bitmap containing bits
+    /// `start..end` of `self`. Uses a per-bit copy to avoid
+    /// byte-alignment pitfalls; not a hot path.
+    pub fn slice(&self, start: usize, end: usize) -> Self {
+        debug_assert!(start <= end && end <= self.len);
+        let len = end - start;
+        let mut b = Self::with_capacity(len);
+        for i in start..end {
+            b.push(self.is_valid(i));
+        }
+        b
+    }
+
+    /// ADR 0081 §3.3 — concatenate another bitmap onto `self`
+    /// in place. The result has `self.len() + other.len()`
+    /// bits; byte alignment is handled by re-pushing each bit.
+    pub fn extend_from(&mut self, other: &Self) {
+        for i in 0..other.len {
+            self.push(other.is_valid(i));
+        }
+    }
 }
 
 #[cfg(test)]
