@@ -24,8 +24,14 @@ use crate::checkpoint_manifest;
 use crate::row_store::{BaceWiring, RowStore, StoreError, StoreResult};
 
 const MAGIC: &[u8; 8] = b"BRBKv001";
+/// ADR 0089 — v2 descriptor magic. Writer emits when wiring has
+/// `authentication`. Adds 16-byte BLAKE3-128 MAC over the v1
+/// 36-byte body.
+const MAGIC_V2: &[u8; 8] = b"BRBKv002";
 const META_FILE: &str = "backup.info";
 const DESCRIPTOR_LENGTH: usize = 40;
+/// ADR 0089 — v2 descriptor length = v1 40 bytes + 16 MAC.
+const DESCRIPTOR_LENGTH_V2: usize = DESCRIPTOR_LENGTH + 16;
 
 /// ADR 0067 §3.2 — backup descriptor flags, stored as u32 LE at
 /// bytes 32..36 of the 40-byte on-disk descriptor. Legacy
@@ -86,12 +92,74 @@ impl BackupReceipt {
     }
 
     pub fn decode(bytes: &[u8]) -> StoreResult<Self> {
-        if bytes.len() != DESCRIPTOR_LENGTH || &bytes[..8] != MAGIC {
-            return Err(StoreError::Corruption("invalid backup descriptor header".into()));
+        Self::decode_with_auth(bytes, None)
+    }
+
+    /// ADR 0089 §3.3 — version-dispatching decode. `BRBKv001`
+    /// takes the legacy CRC-only path (ignores `auth`).
+    /// `BRBKv002` verifies the 16-byte MAC trailer under the
+    /// supplied authentication; absent auth → error.
+    pub fn decode_with_auth(
+        bytes: &[u8],
+        auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+    ) -> StoreResult<Self> {
+        if bytes.len() < 8 {
+            return Err(StoreError::Corruption("backup descriptor truncated".into()));
+        }
+        match &bytes[..8] {
+            m if m == MAGIC => Self::decode_v1(bytes),
+            m if m == MAGIC_V2 => Self::decode_v2(bytes, auth),
+            _ => Err(StoreError::Corruption(
+                "backup descriptor has unknown magic (expected BRBKv001 or BRBKv002)".into(),
+            )),
+        }
+    }
+
+    fn decode_v1(bytes: &[u8]) -> StoreResult<Self> {
+        if bytes.len() != DESCRIPTOR_LENGTH {
+            return Err(StoreError::Corruption(
+                "backup descriptor v1 wrong length".into(),
+            ));
         }
         if u32::from_le_bytes(bytes[36..40].try_into().unwrap()) != hash(&bytes[..36]) {
             return Err(StoreError::Corruption("backup descriptor checksum mismatch".into()));
         }
+        Self::decode_body_fields(bytes)
+    }
+
+    fn decode_v2(
+        bytes: &[u8],
+        auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+    ) -> StoreResult<Self> {
+        if bytes.len() != DESCRIPTOR_LENGTH_V2 {
+            return Err(StoreError::Corruption(
+                "backup descriptor v2 wrong length".into(),
+            ));
+        }
+        // CRC still covers v1 body for bit-rot fast-fail.
+        if u32::from_le_bytes(bytes[36..40].try_into().unwrap()) != hash(&bytes[..36]) {
+            return Err(StoreError::Corruption("backup descriptor checksum mismatch".into()));
+        }
+        let auth = auth.ok_or_else(|| StoreError::Corruption(
+            "backup descriptor is v2 (authenticated) but no BaceWiring::authentication supplied; use restore_backup_with_bace with a wiring that carries authentication".into(),
+        ))?;
+        // Compute BLAKE3 keyed MAC over the 36-byte body and
+        // compare against the trailing 16 bytes in constant time.
+        let mut hasher = blake3::Hasher::new_keyed(auth.key_bytes());
+        hasher.update(&bytes[..36]);
+        let computed = hasher.finalize();
+        let expected = &bytes[40..56];
+        let eq: bool = subtle::ConstantTimeEq::ct_eq(&computed.as_bytes()[..16], expected).into();
+        if !eq {
+            return Err(StoreError::Corruption(format!(
+                "backup descriptor v2 MAC mismatch (wrong key or tampered backup; key label {:?})",
+                auth.label(),
+            )));
+        }
+        Self::decode_body_fields(bytes)
+    }
+
+    fn decode_body_fields(bytes: &[u8]) -> StoreResult<Self> {
         let flag_bits = u32::from_le_bytes(bytes[32..36].try_into().unwrap());
         let flags = BackupFlags::from_u32(flag_bits)?;
         let receipt = Self {
@@ -105,6 +173,30 @@ impl BackupReceipt {
         }
         Ok(receipt)
     }
+
+    /// ADR 0089 §3.2 — v2 encode. Produces 56 bytes: first 40
+    /// bytes are the v1 descriptor with magic replaced by
+    /// `BRBKv002`; last 16 bytes are the BLAKE3-128 MAC over the
+    /// first 36 bytes.
+    pub fn encode_v2(
+        self,
+        auth: &crate::bace::authenticated::BaceAuthentication,
+    ) -> [u8; DESCRIPTOR_LENGTH_V2] {
+        let mut v1 = self.encode();
+        // Replace magic with v2.
+        v1[..8].copy_from_slice(MAGIC_V2);
+        // Re-compute CRC over the new 36-byte body (magic bytes changed).
+        let checksum = hash(&v1[..36]);
+        v1[36..40].copy_from_slice(&checksum.to_le_bytes());
+        // Compute MAC over the 36-byte body.
+        let mut hasher = blake3::Hasher::new_keyed(auth.key_bytes());
+        hasher.update(&v1[..36]);
+        let mac = hasher.finalize();
+        let mut out = [0u8; DESCRIPTOR_LENGTH_V2];
+        out[..40].copy_from_slice(&v1);
+        out[40..56].copy_from_slice(&mac.as_bytes()[..16]);
+        out
+    }
 }
 
 /// ADR 0068 — exposes the on-disk `backup.info` descriptor so
@@ -112,11 +204,43 @@ impl BackupReceipt {
 /// probe each sub-archive's `BackupFlags` without reopening the
 /// RowStore.
 pub fn read_receipt(path:&Path)->StoreResult<BackupReceipt> {
-    let bytes=crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH>(path).map_err(|e|match e {
-        crate::metadata_io::FixedError::Io(e)=>StoreError::Io(e),
-        crate::metadata_io::FixedError::Length=>StoreError::Corruption("invalid backup descriptor header".into()),
-    })?;
-    BackupReceipt::decode(&bytes)
+    read_receipt_with_auth(path, None)
+}
+
+/// ADR 0089 §3.3 — version-dispatching receipt reader. Reads
+/// the 8-byte magic prefix first, then the appropriate length
+/// (40 for v1, 56 for v2). v2 requires `auth`.
+pub fn read_receipt_with_auth(
+    path: &Path,
+    auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+) -> StoreResult<BackupReceipt> {
+    // Enforce exact-length reads (pre-ADR-0089 contract):
+    // files with trailing bytes or short files all fail with
+    // Corruption. We try the 40-byte path first; if the first 8
+    // bytes are BRBKv002, retry with the 56-byte path.
+    let file_len = fs::metadata(path)?.len();
+    if file_len == DESCRIPTOR_LENGTH as u64 {
+        let bytes = crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH>(path).map_err(|e| match e {
+            crate::metadata_io::FixedError::Io(e) => StoreError::Io(e),
+            crate::metadata_io::FixedError::Length => StoreError::Corruption(
+                "invalid backup descriptor header".into(),
+            ),
+        })?;
+        return BackupReceipt::decode_with_auth(&bytes, auth);
+    }
+    if file_len == DESCRIPTOR_LENGTH_V2 as u64 {
+        let bytes = crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH_V2>(path).map_err(|e| match e {
+            crate::metadata_io::FixedError::Io(e) => StoreError::Io(e),
+            crate::metadata_io::FixedError::Length => StoreError::Corruption(
+                "invalid backup descriptor header".into(),
+            ),
+        })?;
+        return BackupReceipt::decode_with_auth(&bytes, auth);
+    }
+    Err(StoreError::Corruption(format!(
+        "backup descriptor file has wrong length {} (expected {} or {})",
+        file_len, DESCRIPTOR_LENGTH, DESCRIPTOR_LENGTH_V2,
+    )))
 }
 
 /// Reject potentially dangerous overlap and return a sibling staging path.
@@ -201,7 +325,11 @@ pub(crate) fn create_backup(
     }
     let mut metadata = fs::OpenOptions::new().write(true).create_new(true)
         .open(staged.join(META_FILE))?;
-    metadata.write_all(&receipt.encode())?;
+    // ADR 0089 §3.2 — emit v2 descriptor when wiring has auth.
+    match bace.and_then(|w| w.authentication.as_ref()) {
+        Some(auth) => metadata.write_all(&receipt.encode_v2(auth))?,
+        None => metadata.write_all(&receipt.encode())?,
+    }
     metadata.sync_all()?;
     sync_directory(&staged)?;
     // Validate the copied database independently: page CRCs, WAL sequencing,
@@ -221,7 +349,11 @@ fn verify_directory(
     policies: StorageLimits,
     bace: Option<&BaceWiring>,
 ) -> StoreResult<()> {
-    let stored = read_receipt(&path.join(META_FILE))?;
+    // ADR 0089 §3.3 — verify v2 MAC when wiring has auth.
+    let stored = read_receipt_with_auth(
+        &path.join(META_FILE),
+        bace.and_then(|w| w.authentication.as_ref()),
+    )?;
     if stored != receipt {
         return Err(StoreError::Corruption("backup descriptor differs from intended state".into()));
     }
@@ -308,7 +440,12 @@ fn restore_backup_inner(
     if !backup.is_dir() {
         return Err(StoreError::Corruption("backup source is not a directory".into()));
     }
-    let receipt = read_receipt(&backup.join(META_FILE))?;
+    // ADR 0089 §3.3 — read with auth when wiring provides it so
+    // a v2 descriptor's MAC is verified BEFORE any staging work.
+    let receipt = read_receipt_with_auth(
+        &backup.join(META_FILE),
+        wiring.as_ref().and_then(|w| w.authentication.as_ref()),
+    )?;
     // ADR 0067 §3.4 — reject BACE backups on the legacy path BEFORE
     // creating any staging directory. Operators see exactly which
     // entry point to use; nothing on disk is touched.
