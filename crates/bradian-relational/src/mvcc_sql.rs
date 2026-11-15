@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Table;
 use crate::persistent_catalog::PersistentCatalog;
+use crate::row_store::BaceWiring;
 use crate::sql::{
     coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
 };
@@ -44,12 +45,41 @@ impl MvccSqlEngine {
         mvcc_limits: crate::runtime_limits::MvccStoreLimits,
         catalog_limits: crate::runtime_limits::CatalogLimits,
     ) -> SqlResult<Self> {
-        if root.as_ref().join("history-domain").exists() {
+        Self::open_inner(root.as_ref(), mvcc_limits, catalog_limits, None)
+    }
+
+    /// ADR 0072 — open the opt-in G21 MVCC SQL engine under BACE
+    /// wiring. The wiring is cloned into both component stores at
+    /// open time; the G18 lifecycle pre-flight (when present) also
+    /// uses `CatalogLifecycle::open_with_bace` so the temporary
+    /// coordinator reconcile matches the subsequent eager opens.
+    pub fn open_with_bace(root: impl AsRef<Path>, wiring: BaceWiring) -> SqlResult<Self> {
+        Self::open_with_bace_and_limits(
+            root, wiring,
+            crate::runtime_limits::MvccStoreLimits::default(),
+            crate::runtime_limits::CatalogLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_limits(
+        root: impl AsRef<Path>, wiring: BaceWiring,
+        mvcc_limits: crate::runtime_limits::MvccStoreLimits,
+        catalog_limits: crate::runtime_limits::CatalogLimits,
+    ) -> SqlResult<Self> {
+        Self::open_inner(root.as_ref(), mvcc_limits, catalog_limits, Some(wiring))
+    }
+
+    fn open_inner(
+        root: &Path,
+        mvcc_limits: crate::runtime_limits::MvccStoreLimits,
+        catalog_limits: crate::runtime_limits::CatalogLimits,
+        wiring: Option<BaceWiring>,
+    ) -> SqlResult<Self> {
+        if root.join("history-domain").exists() {
             return Err(SqlError::Unsupported(
                 "G23 durable history root requires HistorySqlEngine; legacy SQL ownership refused".into()
             ));
         }
-        let root = root.as_ref();
         // Refuse opening a root with ANY legacy per-table data. No implicit
         // migration, dual writes, or ambiguous source of truth is allowed.
         let old_tables = root.join("tables");
@@ -72,18 +102,41 @@ impl MvccSqlEngine {
         // domain for MVCC. The temporary coordinator releases every file
         // lock before this engine opens its own exclusive RowStore.
         if root.join("lifecycle").exists() {
-            crate::lifecycle::CatalogLifecycle::open(root)
-                .map_err(|e| SqlError::Unsupported(format!(
-                    "G18 lifecycle reconciliation failed: {e}"
-                )))?;
+            match &wiring {
+                Some(w) => crate::lifecycle::CatalogLifecycle::open_with_bace(root, w.clone())
+                    .map_err(|e| SqlError::Unsupported(format!(
+                        "G18 lifecycle reconciliation failed: {e}"
+                    )))?,
+                None => crate::lifecycle::CatalogLifecycle::open(root)
+                    .map_err(|e| SqlError::Unsupported(format!(
+                        "G18 lifecycle reconciliation failed: {e}"
+                    )))?,
+            };
         }
-        let catalog = PersistentCatalog::open_with_limits(root.join("catalog"), catalog_limits)?;
-        let definitions = catalog.snapshot().tables()
-            .map(|table| (table.id, table.clone()))
-            .collect::<BTreeMap<_,_>>();
-        let domain = TypedMvccStore::open_with_limits(
-            root.join("shared-domain"), &definitions, mvcc_limits,
-        )?;
+        let (catalog, domain) = match wiring {
+            Some(w) => {
+                let catalog = PersistentCatalog::open_with_bace_and_limits(
+                    root.join("catalog"), w.clone(), catalog_limits,
+                )?;
+                let definitions = catalog.snapshot().tables()
+                    .map(|table| (table.id, table.clone()))
+                    .collect::<BTreeMap<_,_>>();
+                let domain = TypedMvccStore::open_with_bace_and_limits(
+                    root.join("shared-domain"), &definitions, w, mvcc_limits,
+                )?;
+                (catalog, domain)
+            }
+            None => {
+                let catalog = PersistentCatalog::open_with_limits(root.join("catalog"), catalog_limits)?;
+                let definitions = catalog.snapshot().tables()
+                    .map(|table| (table.id, table.clone()))
+                    .collect::<BTreeMap<_,_>>();
+                let domain = TypedMvccStore::open_with_limits(
+                    root.join("shared-domain"), &definitions, mvcc_limits,
+                )?;
+                (catalog, domain)
+            }
+        };
         Ok(Self { catalog, domain, _root: root.to_owned() })
     }
 

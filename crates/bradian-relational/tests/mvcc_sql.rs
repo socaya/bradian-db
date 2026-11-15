@@ -348,3 +348,99 @@ fn multiple_read_only_sessions_pin_their_own_snapshots() {
     }).unwrap();
     assert_eq!(engine.mvcc_stats().active_snapshots, 0);
 }
+
+// ---------- ADR 0072 — MvccSqlEngine BACE open ----------
+
+use bradian_relational::bace::codec::raw::RAW_ID;
+use bradian_relational::bace::codec::zstd::ZSTD_ID;
+use bradian_relational::bace::policy::{
+    CompressionProfile, InMemoryPolicyService, PlatformBaseline,
+};
+use bradian_relational::bace::registry::BuiltInRegistry;
+use bradian_relational::mvcc::MvccStore;
+use bradian_relational::row_store::BaceWiring;
+
+fn wiring_zstd_balanced() -> BaceWiring {
+    let baseline = PlatformBaseline {
+        profile: CompressionProfile::Balanced,
+        allowed_codecs: vec![ZSTD_ID, RAW_ID],
+        ..PlatformBaseline::shipped()
+    };
+    BaceWiring {
+        policy_service: Arc::new(InMemoryPolicyService::new(baseline, BuiltInRegistry::new())),
+        registry: Arc::new(BuiltInRegistry::new()),
+    }
+}
+
+#[test]
+fn mvcc_store_open_with_bace_round_trips_a_put_get_commit() {
+    // ADR 0072 §3.5 item 1 — the thin RowStore wrapper preserves
+    // in-memory version seeding across a BACE open.
+    let dir = tempdir().unwrap();
+    let store = MvccStore::open_with_bace(dir.path(), wiring_zstd_balanced()).unwrap();
+    let mut tx = store.begin();
+    tx.insert(b"key", b"value").unwrap();
+    tx.commit().unwrap();
+    let rtx = store.begin();
+    assert_eq!(rtx.get(b"key"), Some(b"value".to_vec()));
+}
+
+#[test]
+fn mvcc_sql_engine_open_with_bace_round_trips_full_mvcc_session() {
+    // ADR 0072 §3.5 items 2 and 3 — end-to-end MVCC SQL session
+    // through a _with_bace open; TypedMvccStore is exercised
+    // transitively since the engine opens it.
+    let base = tempdir().unwrap();
+    setup(base.path());
+    let engine = MvccSqlEngine::open_with_bace(base.path(), wiring_zstd_balanced()).unwrap();
+    assert_eq!(engine.registered_table_ids().len(), 2);
+    engine.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("INSERT INTO banking.public.accounts(id,balance) VALUES(7,777)")?;
+        s.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    engine.with_session(|s| {
+        s.execute("BEGIN")?;
+        let rows = s.execute("SELECT balance FROM banking.public.accounts WHERE id=7")?;
+        match rows {
+            SqlResultSet::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(777)]]);
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn mvcc_sql_engine_open_with_bace_tolerates_legacy_v1_only_directory() {
+    // ADR 0072 §3.5 item 4 — opening with BACE wiring on a v1-only
+    // provisioned root succeeds (ADR 0065 §3.5 mixed-generation
+    // tolerance applied through the component chain).
+    let base = tempdir().unwrap();
+    setup(base.path());
+    {
+        let legacy = MvccSqlEngine::open(base.path()).unwrap();
+        legacy.with_session(|s| {
+            s.execute("BEGIN")?;
+            s.execute("INSERT INTO banking.public.accounts(id,balance) VALUES(9,99)")?;
+            s.execute("COMMIT")?;
+            Ok(())
+        }).unwrap();
+    }
+    let engine = MvccSqlEngine::open_with_bace(base.path(), wiring_zstd_balanced()).unwrap();
+    engine.with_session(|s| {
+        s.execute("BEGIN")?;
+        let rows = s.execute("SELECT balance FROM banking.public.accounts WHERE id=9")?;
+        match rows {
+            SqlResultSet::Rows { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(99)]]);
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+        s.execute("ROLLBACK")?;
+        Ok(())
+    }).unwrap();
+}

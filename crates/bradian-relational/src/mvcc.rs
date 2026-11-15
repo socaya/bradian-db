@@ -22,8 +22,8 @@ use std::path::Path;
 use parking_lot::Mutex;
 use thiserror::Error;
 
-use crate::row_store::{RowMutation, RowStore, StoreError};
-use crate::runtime_limits::{MvccStoreLimits, ResourceError};
+use crate::row_store::{BaceWiring, RowMutation, RowStore, StoreError};
+use crate::runtime_limits::{MvccStoreLimits, ResourceError, StorageLimits};
 
 #[derive(Debug, Error)]
 pub enum MvccError {
@@ -118,7 +118,30 @@ impl MvccStore {
     pub fn open_with_limits(root: impl AsRef<Path>, limits: MvccStoreLimits)
         -> MvccResult<Self>
     {
-        let storage = RowStore::open(root)?;
+        Self::open_inner(root.as_ref(), limits, None)
+    }
+
+    /// ADR 0072 — open the MVCC store under BACE wiring. The in-memory
+    /// version seed afterwards is unchanged.
+    pub fn open_with_bace(
+        root: impl AsRef<Path>, wiring: BaceWiring,
+    ) -> MvccResult<Self> {
+        Self::open_with_bace_and_limits(root, wiring, MvccStoreLimits::default())
+    }
+
+    pub fn open_with_bace_and_limits(
+        root: impl AsRef<Path>, wiring: BaceWiring, limits: MvccStoreLimits,
+    ) -> MvccResult<Self> {
+        Self::open_inner(root.as_ref(), limits, Some(wiring))
+    }
+
+    fn open_inner(
+        root: &Path, limits: MvccStoreLimits, wiring: Option<BaceWiring>,
+    ) -> MvccResult<Self> {
+        let storage = match wiring {
+            Some(w) => RowStore::open_with_bace(root, StorageLimits::default(), w)?,
+            None    => RowStore::open(root)?,
+        };
         let (committed_lsn, rows) = storage.snapshot_with_lsn();
         let mut history = History {
             committed_lsn,

@@ -1,16 +1,31 @@
-# ADR 0072 — MvccSqlEngine BACE open (implementation; **PROPOSED**)
+# ADR 0072 — MvccSqlEngine BACE open (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE prerequisite stack (0060–0063), the
-accepted row-store integration (0065), the accepted G19/G24
-coordinator writer-side work (0069, 0070), and the accepted
-operator-facing SQL opens (0071). This ADR is the last SQL
-engine without BACE opens: `MvccSqlEngine` (G21) and its
-component `TypedMvccStore` / `MvccStore` chain. With it, all
-four SQL engines accept BACE wiring.
+The last SQL engine without BACE opens is now wired. All four
+SQL engines — `SqlEngine`, `DomainSqlEngine`, `HistorySqlEngine`,
+`MvccSqlEngine` — accept `BaceWiring`.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+Implementation summary:
+
+- `crates/bradian-relational/src/mvcc.rs` —
+  `MvccStore::open_with_bace` + `_with_bace_and_limits`.
+  Shared `open_inner` delegates to `RowStore::open_with_bace`
+  when wiring is present; in-memory history seeding unchanged.
+- `crates/bradian-relational/src/typed_mvcc.rs` —
+  `TypedMvccStore::open_with_bace` + `_with_bace_and_limits`.
+  Shared `open_inner` delegates to
+  `MvccStore::open_with_bace_and_limits`.
+- `crates/bradian-relational/src/mvcc_sql.rs` —
+  `MvccSqlEngine::open_with_bace` + `_with_bace_and_limits`.
+  G18 lifecycle pre-flight uses
+  `CatalogLifecycle::open_with_bace` when wiring is supplied.
+  No wiring stored on the engine.
+- `crates/bradian-relational/tests/mvcc_sql.rs` — 3 new tests.
+
+973 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
 
 ## 1. Context
 

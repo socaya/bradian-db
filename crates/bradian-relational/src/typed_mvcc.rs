@@ -12,6 +12,7 @@ use std::path::Path;
 
 use crate::{Table, TableId};
 use crate::mvcc::{MvccError, MvccStats, MvccStore, MvccTransaction};
+use crate::row_store::BaceWiring;
 use crate::typed_table::{
     decode_row, encode_key, encode_row, validate_table, TableError, Value,
 };
@@ -72,7 +73,40 @@ impl TypedMvccStore {
         catalog_tables: &BTreeMap<TableId, Table>,
         mvcc_limits: crate::runtime_limits::MvccStoreLimits,
     ) -> Result<Self, DomainError> {
-        let store = MvccStore::open_with_limits(domain_root, mvcc_limits).map_err(map_mvcc)?;
+        Self::open_inner(domain_root.as_ref(), catalog_tables, mvcc_limits, None)
+    }
+
+    /// ADR 0072 — open the typed MVCC store under BACE wiring.
+    pub fn open_with_bace(
+        domain_root: impl AsRef<Path>,
+        catalog_tables: &BTreeMap<TableId, Table>,
+        wiring: BaceWiring,
+    ) -> Result<Self, DomainError> {
+        Self::open_with_bace_and_limits(
+            domain_root, catalog_tables, wiring,
+            crate::runtime_limits::MvccStoreLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_limits(
+        domain_root: impl AsRef<Path>,
+        catalog_tables: &BTreeMap<TableId, Table>,
+        wiring: BaceWiring,
+        mvcc_limits: crate::runtime_limits::MvccStoreLimits,
+    ) -> Result<Self, DomainError> {
+        Self::open_inner(domain_root.as_ref(), catalog_tables, mvcc_limits, Some(wiring))
+    }
+
+    fn open_inner(
+        domain_root: &Path,
+        catalog_tables: &BTreeMap<TableId, Table>,
+        mvcc_limits: crate::runtime_limits::MvccStoreLimits,
+        wiring: Option<BaceWiring>,
+    ) -> Result<Self, DomainError> {
+        let store = match wiring {
+            Some(w) => MvccStore::open_with_bace_and_limits(domain_root, w, mvcc_limits).map_err(map_mvcc)?,
+            None    => MvccStore::open_with_limits(domain_root, mvcc_limits).map_err(map_mvcc)?,
+        };
         let mut snapshot = store.begin();
         let records = snapshot.scan();
         snapshot.rollback();
