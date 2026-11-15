@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::{Column, Table};
+use crate::row_store::BaceWiring;
 use crate::runtime_limits::{ScanControl, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage, TransactionLimits};
 use crate::schema_activation::SchemaActivationReceipt;
 use crate::persistent_catalog::PersistentCatalog;
@@ -23,6 +24,11 @@ pub struct HistorySqlEngine {
     domain: DurableTypedStore,
     _root: PathBuf,
     failed_ddl: bool,
+    /// ADR 0070 — present when the G24 engine was opened via
+    /// `open_with_bace`. `backup_to` passes this to
+    /// `history_backup::backup_history_database` so staging-side
+    /// verification routes through `_with_bace` opens.
+    bace_wiring: Option<BaceWiring>,
 }
 
 impl HistorySqlEngine {
@@ -35,7 +41,34 @@ impl HistorySqlEngine {
     }
 
     pub fn open_with_resource_limits(root:impl AsRef<Path>, limits:HistoryLimits, transactions:TransactionLimits) -> SqlResult<Self> {
-        let root = root.as_ref();
+        Self::open_inner(root.as_ref(), limits, transactions, None)
+    }
+
+    /// ADR 0070 — open the G24 engine under BACE wiring. One shared
+    /// wiring threads through the catalog + history-domain stores.
+    pub fn open_with_bace(root: impl AsRef<Path>, wiring: BaceWiring) -> SqlResult<Self> {
+        Self::open_with_bace_and_history_limits(root, wiring, HistoryLimits::default())
+    }
+
+    pub fn open_with_bace_and_history_limits(
+        root: impl AsRef<Path>, wiring: BaceWiring, limits: HistoryLimits,
+    ) -> SqlResult<Self> {
+        Self::open_with_bace_and_resource_limits(
+            root, wiring, limits, TransactionLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_resource_limits(
+        root: impl AsRef<Path>, wiring: BaceWiring,
+        limits: HistoryLimits, transactions: TransactionLimits,
+    ) -> SqlResult<Self> {
+        Self::open_inner(root.as_ref(), limits, transactions, Some(wiring))
+    }
+
+    fn open_inner(
+        root: &Path, limits: HistoryLimits, transactions: TransactionLimits,
+        wiring: Option<BaceWiring>,
+    ) -> SqlResult<Self> {
         // Refuse opening a root with ANY legacy per-table data. No implicit
         // migration, dual writes, or ambiguous source of truth is allowed.
         let old_tables = root.join("tables");
@@ -61,10 +94,29 @@ impl HistorySqlEngine {
                 "G23 requires a separate history database root; G15/G18 data must be migrated".into(),
             ));
         }
-        let catalog = PersistentCatalog::open(root.join("catalog"))?;
-        let domain = DurableTypedStore::open_coordinated(root.join("history-domain"), &catalog, limits, transactions)?;
+        let (catalog, domain, bace_wiring) = match wiring {
+            Some(w) => {
+                let catalog = PersistentCatalog::open_with_bace(
+                    root.join("catalog"), w.clone(),
+                )?;
+                let domain = DurableTypedStore::open_coordinated_with_bace(
+                    root.join("history-domain"), &catalog, w.clone(), limits, transactions,
+                )?;
+                (catalog, domain, Some(w))
+            }
+            None => {
+                let catalog = PersistentCatalog::open(root.join("catalog"))?;
+                let domain = DurableTypedStore::open_coordinated(
+                    root.join("history-domain"), &catalog, limits, transactions,
+                )?;
+                (catalog, domain, None)
+            }
+        };
         domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
-        Ok(Self { catalog, domain, _root: root.to_owned(), failed_ddl: false })
+        Ok(Self {
+            catalog, domain, _root: root.to_owned(),
+            failed_ddl: false, bace_wiring,
+        })
     }
 
     fn resolve(&self, parts: &[String]) -> SqlResult<Table> {
@@ -355,6 +407,21 @@ impl HistorySqlEngine {
         }
         crate::history_backup::backup_history_database(
             &self._root, destination.as_ref(), &self.catalog, &self.domain, metadata,
+            self.bace_wiring.as_ref(),
+        )
+    }
+
+    /// ADR 0070 — explicit BACE-aware G24 backup. Honestly
+    /// equivalent to `backup_to` on a `_with_bace`-opened engine
+    /// because `self.bace_wiring` is already threaded through
+    /// both the component stores and `backup_history_database`.
+    /// Kept for API clarity and to anchor future BACE-specific
+    /// G24 backup options.
+    pub fn backup_to_with_bace(
+        &self, destination: impl AsRef<Path>,
+    ) -> crate::history_backup::HistoryBackupResult<crate::history_backup::HistoryBackupReport> {
+        self.backup_to_with_metadata_limits(
+            destination, crate::runtime_limits::MetadataLimits::default(),
         )
     }
 

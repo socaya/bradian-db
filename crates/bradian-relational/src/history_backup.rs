@@ -179,16 +179,29 @@ fn catalog_tables(catalog: &PersistentCatalog) -> BTreeMap<TableId, Table> {
     catalog.snapshot().tables().map(|t| (t.id, t.clone())).collect()
 }
 
-fn verify_root(root: &Path, expected: &HistoryBackupReport, limits: HistoryLimits) -> HistoryBackupResult<()> {
+fn verify_root(
+    root: &Path, expected: &HistoryBackupReport, limits: HistoryLimits,
+    bace: Option<&BaceWiring>,
+) -> HistoryBackupResult<()> {
     // This check also rejects legacy ownership and unregistered historical rows.
     if root.join("shared-domain").exists() || root.join("lifecycle").exists() ||
         root.join("tables").exists()
     {
         return Err(HistoryBackupError::Corruption("mixed legacy storage root".into()));
     }
-    let catalog = PersistentCatalog::open(root.join("catalog"))?;
+    let catalog = match bace {
+        Some(w) => PersistentCatalog::open_with_bace(root.join("catalog"), w.clone())?,
+        None => PersistentCatalog::open(root.join("catalog"))?,
+    };
     let definitions = catalog_tables(&catalog);
-    let domain = DurableTypedStore::open_with_history_limits(root.join("history-domain"), &definitions, limits)?;
+    let domain = match bace {
+        Some(w) => DurableTypedStore::open_with_bace_and_history_limits(
+            root.join("history-domain"), &definitions, w.clone(), limits,
+        )?,
+        None => DurableTypedStore::open_with_history_limits(
+            root.join("history-domain"), &definitions, limits,
+        )?,
+    };
     domain.verify_ddl_catalog_horizon(catalog.last_lsn())?;
     let stats = domain.stats();
     if catalog.last_lsn() != expected.catalog.last_lsn ||
@@ -213,12 +226,14 @@ fn receipt_matches(actual: BackupReceipt, expected: HistoryComponentReceipt) -> 
 /// Source holders must maintain both independent file locks throughout this call.
 /// Schema DDL requires mutable engine access and cannot overlap backup. G22
 /// receipt statistics describe the archived snapshot even as row writers resume.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn backup_history_database(
     source: &Path,
     destination: &Path,
     catalog: &PersistentCatalog,
     history: &DurableTypedStore,
     metadata: MetadataLimits,
+    bace: Option<&BaceWiring>,
 ) -> HistoryBackupResult<HistoryBackupReport> {
     if source.join("lifecycle").exists() || source.join("shared-domain").exists()
         || source.join("tables").exists()
@@ -243,9 +258,23 @@ pub(crate) fn backup_history_database(
     write_manifest(&stage, &report, metadata)?;
     let verify = stage.join("verified-root");
     fs::create_dir(&verify)?;
-    RowStore::restore_backup(stage.join(COMPONENTS[0]), verify.join(COMPONENTS[0]))?;
-    RowStore::restore_backup(stage.join(COMPONENTS[1]), verify.join(COMPONENTS[1]))?;
-    verify_root(&verify, &report, history.history_limits())?;
+    // ADR 0070 — when the G24 engine was opened with BACE wiring, the
+    // sub-archives carry BACE v2 pages (flag set on each backup.info);
+    // restore via _with_bace variants.
+    for component in COMPONENTS {
+        match bace {
+            Some(w) => {
+                RowStore::restore_backup_with_bace(
+                    stage.join(component), verify.join(component),
+                    StorageLimits::default(), w.clone(),
+                )?;
+            }
+            None => {
+                RowStore::restore_backup(stage.join(component), verify.join(component))?;
+            }
+        }
+    }
+    verify_root(&verify, &report, history.history_limits(), bace)?;
     fs::remove_dir_all(&verify)?;
     sync_dir(&stage)?;
     if fs::symlink_metadata(&dest).is_ok() {
@@ -351,7 +380,7 @@ fn restore_history_database_inner(
             return Err(HistoryBackupError::Corruption(format!("{component} receipt mismatch")));
         }
     }
-    verify_root(&stage, &report, limits)?;
+    verify_root(&stage, &report, limits, wiring.as_ref())?;
     sync_dir(&stage)?;
     if fs::symlink_metadata(&dest).is_ok() {
         return Err(HistoryBackupError::Invalid("destination appeared before restore publish".into()));

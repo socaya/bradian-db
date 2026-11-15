@@ -13,6 +13,7 @@ use crate::persistent_catalog::{PersistentCatalog, PersistentCatalogError};
 use crate::schema_activation::{self, ActivationCommit, ActivationIntent, ActivationStage,
     PendingActivation, SchemaActivationReceipt, SchemaChanges, SchemaTimeline, LegacyDdlRetirement, LegacyDdlRetirementReceipt};
 use crate::durable_mvcc::{DurableMvccError, DurableMvccStats, DurableMvccStore, DurableMvccTransaction};
+use crate::row_store::BaceWiring;
 use crate::typed_table::{
     encode_key, encode_row, validate_table, decoded_row_bytes, TableError, Value,
 };
@@ -178,11 +179,57 @@ impl DurableTypedStore {
         Self::from_store(store,Some(catalog_tables))
     }
 
+    /// ADR 0070 — open the typed history store under BACE wiring.
+    pub fn open_with_bace(
+        domain_root: impl AsRef<Path>, catalog_tables: &BTreeMap<TableId, Table>,
+        wiring: BaceWiring,
+    ) -> Result<Self, DomainError> {
+        Self::open_with_bace_and_history_limits(
+            domain_root, catalog_tables, wiring, HistoryLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_history_limits(
+        domain_root: impl AsRef<Path>, catalog_tables: &BTreeMap<TableId, Table>,
+        wiring: BaceWiring, limits: HistoryLimits,
+    ) -> Result<Self, DomainError> {
+        Self::open_with_bace_and_resource_limits(
+            domain_root, catalog_tables, wiring, limits, TransactionLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_resource_limits(
+        domain_root: impl AsRef<Path>, catalog_tables: &BTreeMap<TableId, Table>,
+        wiring: BaceWiring, limits: HistoryLimits, transactions: TransactionLimits,
+    ) -> Result<Self, DomainError> {
+        let store = DurableMvccStore::open_with_bace_and_resource_limits(
+            domain_root, wiring, limits, transactions,
+        ).map_err(map_mvcc)?;
+        Self::from_store(store, Some(catalog_tables))
+    }
+
     /// Recovery owns both locks and validates history before changing the catalog.
     pub(crate) fn open_coordinated(
         domain_root: impl AsRef<Path>, catalog: &PersistentCatalog, limits: HistoryLimits, transactions: TransactionLimits,
     ) -> Result<Self, DomainError> {
         let store = DurableMvccStore::open_with_resource_limits(domain_root, limits, transactions).map_err(map_mvcc)?;
+        Self::finish_open_coordinated(store, catalog)
+    }
+
+    /// ADR 0070 — coordinated open under BACE wiring.
+    pub(crate) fn open_coordinated_with_bace(
+        domain_root: impl AsRef<Path>, catalog: &PersistentCatalog, wiring: BaceWiring,
+        limits: HistoryLimits, transactions: TransactionLimits,
+    ) -> Result<Self, DomainError> {
+        let store = DurableMvccStore::open_with_bace_and_resource_limits(
+            domain_root, wiring, limits, transactions,
+        ).map_err(map_mvcc)?;
+        Self::finish_open_coordinated(store, catalog)
+    }
+
+    fn finish_open_coordinated(
+        store: DurableMvccStore, catalog: &PersistentCatalog,
+    ) -> Result<Self, DomainError> {
         let mut owner = Self::from_store(store, None)?;
         if owner.pending_activation.is_some() {
             owner.finish_activation(catalog, &mut |_| Ok(()))?;

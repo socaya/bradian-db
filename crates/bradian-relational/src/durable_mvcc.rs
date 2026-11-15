@@ -16,9 +16,9 @@ use std::path::Path;
 
 use parking_lot::Mutex;
 use thiserror::Error;
-use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage, TransactionLimits};
+use crate::runtime_limits::{ScanControl, ScanMeter, ResourceError, HistoryLimits, HistoryUsage, StagingLimits, StagingUsage, StorageLimits, TransactionLimits};
 
-use crate::row_store::{RowMutation, RowStore, StoreError};
+use crate::row_store::{BaceWiring, RowMutation, RowStore, StoreError};
 use crate::backup::BackupReceipt;
 
 const FORMAT_KEY: &[u8] = b"\0bradian.durable-mvcc.format";
@@ -212,7 +212,33 @@ impl DurableMvccStore {
     }
 
     pub fn open_with_resource_limits(path: impl AsRef<Path>, limits: HistoryLimits, transactions: TransactionLimits) -> DurableMvccResult<Self> {
-        let rows = RowStore::open(path)?;
+        Self::open_inner(path.as_ref(), limits, transactions, None)
+    }
+
+    /// ADR 0070 — open the durable MVCC store with BACE wiring.
+    pub fn open_with_bace(
+        path: impl AsRef<Path>, wiring: BaceWiring,
+    ) -> DurableMvccResult<Self> {
+        Self::open_with_bace_and_resource_limits(
+            path, wiring, HistoryLimits::default(), TransactionLimits::default(),
+        )
+    }
+
+    pub fn open_with_bace_and_resource_limits(
+        path: impl AsRef<Path>, wiring: BaceWiring,
+        limits: HistoryLimits, transactions: TransactionLimits,
+    ) -> DurableMvccResult<Self> {
+        Self::open_inner(path.as_ref(), limits, transactions, Some(wiring))
+    }
+
+    fn open_inner(
+        path: &Path, limits: HistoryLimits, transactions: TransactionLimits,
+        wiring: Option<BaceWiring>,
+    ) -> DurableMvccResult<Self> {
+        let rows = match wiring {
+            Some(w) => RowStore::open_with_bace(path, StorageLimits::default(), w)?,
+            None    => RowStore::open(path)?,
+        };
         if rows.is_empty() && rows.last_lsn() == 0 {
             rows.commit_batch(None, &[
                 RowMutation::Put { key: FORMAT_KEY.to_vec(), value: FORMAT.to_vec() },

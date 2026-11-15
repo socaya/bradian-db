@@ -145,3 +145,119 @@ fn restore_history_database_legacy_fails_closed_when_sub_archive_declares_bace()
     }
     assert!(!dest.exists());
 }
+
+// ---------- ADR 0070 — HistorySqlEngine BACE open (end-to-end) ----------
+
+#[test]
+fn history_sql_engine_open_with_bace_round_trips_a_legacy_migrated_root() {
+    // ADR 0070 §3.6 item 3 — opening with BACE on a directory that
+    // was written by the legacy history migration (all v1 pages)
+    // works per ADR 0065 §3.5 mixed-generation rule, and SELECT
+    // returns the expected rows.
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open_with_bace(&root, wiring_zstd_balanced()).unwrap();
+    let rows = query(&db, "SELECT id,balance FROM bank.public.accounts WHERE id=1");
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn backup_to_with_bace_emits_flag_set_sub_archives_for_history_coordinator() {
+    // ADR 0070 §3.6 items 4 and 8 — backup through a _with_bace-
+    // opened engine writes BACE sub-archives, and the honest Q3
+    // behaviour: legacy backup_to on a _with_bace-opened engine
+    // also produces BACE sub-archives.
+    let (dir, root) = migrated();
+    let archive = dir.path().join("archive");
+    {
+        let db = HistorySqlEngine::open_with_bace(&root, wiring_zstd_balanced()).unwrap();
+        db.backup_to_with_bace(&archive).unwrap();
+    }
+    for component in ["catalog", "history-domain"] {
+        let r = bradian_relational::backup::read_receipt(
+            &archive.join(component).join("backup.info"),
+        ).unwrap();
+        assert!(
+            r.flags.payload_has_bace_pages,
+            "{component} sub-archive must carry BACE flag",
+        );
+    }
+    // Same for the legacy coordinator backup entry point on a
+    // _with_bace-opened engine.
+    let archive_legacy = dir.path().join("archive-legacy-entry");
+    {
+        let db = HistorySqlEngine::open_with_bace(&root, wiring_zstd_balanced()).unwrap();
+        db.backup_to(&archive_legacy).unwrap();
+    }
+    for component in ["catalog", "history-domain"] {
+        let r = bradian_relational::backup::read_receipt(
+            &archive_legacy.join(component).join("backup.info"),
+        ).unwrap();
+        assert!(r.flags.payload_has_bace_pages);
+    }
+}
+
+#[test]
+fn bace_history_backup_round_trips_through_restore_history_database_with_bace() {
+    // ADR 0070 §3.6 item 5 — end-to-end G24 BACE loop closes.
+    let (dir, root) = migrated();
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    let last_lsn = {
+        let db = HistorySqlEngine::open_with_bace(&root, wiring_zstd_balanced()).unwrap();
+        db.backup_to_with_bace(&archive).unwrap();
+        db.last_lsn()
+    };
+
+    restore_history_database_with_bace(&archive, &restored, wiring_zstd_balanced()).unwrap();
+
+    let db = HistorySqlEngine::open_with_bace(&restored, wiring_zstd_balanced()).unwrap();
+    assert_eq!(db.last_lsn(), last_lsn);
+    let rows = query(&db, "SELECT id,balance FROM bank.public.accounts WHERE id=1");
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn bace_flag_is_preserved_across_history_coordinator_round_trip() {
+    // ADR 0070 §3.6 item 6 adjusted — the drafted test asserted
+    // legacy HistorySqlEngine::open on a BACE-restored destination
+    // fails closed. Reaching that scenario requires the restored
+    // sub-stores to contain actual v2 pages. In the current G24
+    // fixture (migrated()), the catalog and history-domain are
+    // checkpointed once during migration at a fixed LSN and have
+    // no further mutations before `backup_to`. Per the ADR 0065
+    // checkpoint-is-idempotent-at-current-LSN rule, backup_to
+    // reuses the existing v1 snapshot; no v2 pages are produced.
+    //
+    // Producing v2 pages through G24 requires either the DDL
+    // coordinator (enable_epoch_row_writes + execute_ddl) which
+    // ADR 0070 §5 Q2 explicitly defers, or a post-migration row
+    // mutation path that also lives behind the DDL coordinator.
+    //
+    // The still-observable behavior we can assert today: the
+    // BackupFlags are preserved in the sub-archive descriptors
+    // through backup → restore, so when the DDL coordinator ADR
+    // lands and v2 pages are producible, this path is already
+    // wired correctly.
+    let (dir, root) = migrated();
+    let archive = dir.path().join("archive");
+    let restored = dir.path().join("restored");
+    {
+        let db = HistorySqlEngine::open_with_bace(&root, wiring_zstd_balanced()).unwrap();
+        db.backup_to_with_bace(&archive).unwrap();
+    }
+    for component in ["catalog", "history-domain"] {
+        let r = bradian_relational::backup::read_receipt(
+            &archive.join(component).join("backup.info"),
+        ).unwrap();
+        assert!(r.flags.payload_has_bace_pages,
+            "pre-restore {component} sub-archive must carry BACE flag");
+    }
+    restore_history_database_with_bace(&archive, &restored, wiring_zstd_balanced()).unwrap();
+    for component in ["catalog", "history-domain"] {
+        let r = bradian_relational::backup::read_receipt(
+            &restored.join(component).join("backup.info"),
+        ).unwrap();
+        assert!(r.flags.payload_has_bace_pages,
+            "post-restore {component} backup.info must still carry BACE flag");
+    }
+}

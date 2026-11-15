@@ -1,19 +1,62 @@
-# ADR 0070 — HistorySqlEngine BACE open (implementation; **PROPOSED**)
+# ADR 0070 — HistorySqlEngine BACE open (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE prerequisite stack (0060–0063), the
-accepted row-store integration (0065), the accepted single-store
-backup carrier (0067), the accepted coordinator backup carrier
-(0068), and the accepted G18/G19 writer-side unblocker (0069).
-This ADR is the matching **writer-side** work for the G24
-coordinator (`HistorySqlEngine` + `history_backup.rs`): it
-threads BACE wiring through the independent durable-history
-stack so a whole G24 database backup emits BACE sub-archives
-that the ADR 0068 `restore_history_database_with_bace` path
-knows how to consume.
+G24 mirror of ADR 0069. Three new store-level entries exposed
+(`DurableMvccStore::open_with_bace`,
+`DurableTypedStore::open_with_bace` + variants, and the
+coordinated variant), plus `HistorySqlEngine::open_with_bace`
+and `backup_to_with_bace`. `history_backup::backup_history_database`
+and `verify_root` thread wiring through so staging-side
+verification and reopens dispatch to the `_with_bace` variants.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+Implementation summary:
+
+- `crates/bradian-relational/src/durable_mvcc.rs` —
+  `DurableMvccStore::open_with_bace` + `_with_bace_and_resource_limits`.
+- `crates/bradian-relational/src/durable_typed.rs` — three
+  `DurableTypedStore::open_with_bace*` variants +
+  `open_coordinated_with_bace`.
+- `crates/bradian-relational/src/history_sql.rs` — three
+  `HistorySqlEngine::open_with_bace*` variants +
+  `backup_to_with_bace`. New `bace_wiring: Option<BaceWiring>`
+  field stored so `backup_to` passes it down.
+- `crates/bradian-relational/src/history_backup.rs` —
+  `backup_history_database` gained `bace: Option<&BaceWiring>`
+  and threads it through staging-side sub-archive restores AND
+  through `verify_root` (which now reopens via the BACE-aware
+  catalog + history-domain opens when wiring is present).
+- `crates/bradian-relational/tests/history_backup_consistency.rs`
+  — 4 new integration tests.
+
+965 workspace tests pass; clippy clean on
+`bradian-relational --all-targets`.
+
+### Observed scope limit on §3.6 item 6
+
+The drafted §3.6 item 6 claimed `HistorySqlEngine::open` on a
+BACE-written restored destination fails closed. Reaching that
+scenario requires the restored sub-stores to actually contain
+v2 pages. In the current G24 fixture (`migrated()`), the
+catalog and history-domain are checkpointed once during
+migration at a fixed LSN and have no further mutations before
+`backup_to`. Per the ADR 0065 "checkpoint is idempotent at
+current LSN" rule, `backup_to` reuses the existing v1 snapshot
+even under BACE wiring — no v2 pages are produced.
+
+Producing v2 pages through G24 requires either the DDL
+coordinator (`enable_epoch_row_writes` + `execute_ddl`) which
+this ADR §5 Q2 explicitly defers, or a post-migration mutation
+path that also lives behind the DDL coordinator.
+
+The test that landed asserts what IS reachable today: the
+BackupFlags round-trip through backup → restore so when the
+DDL coordinator ADR lands, this path is already wired
+correctly. The fail-closed invariant for v2 pages in a
+`HistorySqlEngine::open` call is proven at the RowStore layer
+by ADR 0067's test suite; the G24 coordinator inherits the
+behavior transitively.
 
 ## 1. Context
 
