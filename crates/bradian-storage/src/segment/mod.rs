@@ -10,5 +10,5 @@ pub use format::{
     CodecId, ColumnMeta, FeatureFlags, PageMeta, SegmentFooter, SEGMENT_MAGIC,
     SEGMENT_VERSION_MAJOR, SEGMENT_VERSION_MINOR,
 };
-pub use reader::SegmentReader;
+pub use reader::{ColumnPageIterator, SegmentReader};
 pub use writer::{SegmentWriter, SegmentWriterOptions, WrittenSegment};

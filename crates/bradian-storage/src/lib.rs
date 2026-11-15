@@ -22,8 +22,8 @@ pub use partition::{
     Snapshot, WalReader, WalRecord, WalWriter,
 };
 pub use segment::{
-    CodecId, ColumnMeta, FeatureFlags, PageMeta, SegmentFooter, SegmentReader, SegmentWriter,
-    SegmentWriterOptions, WrittenSegment, SEGMENT_MAGIC, SEGMENT_VERSION_MAJOR,
+    CodecId, ColumnMeta, ColumnPageIterator, FeatureFlags, PageMeta, SegmentFooter, SegmentReader,
+    SegmentWriter, SegmentWriterOptions, WrittenSegment, SEGMENT_MAGIC, SEGMENT_VERSION_MAJOR,
     SEGMENT_VERSION_MINOR,
 };
 pub use snapshot_export::{export_snapshot, restore_snapshot, SnapshotHeader};

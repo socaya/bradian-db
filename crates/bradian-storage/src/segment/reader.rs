@@ -116,6 +116,16 @@ impl SegmentReader {
             .ok_or_else(|| BradianError::NotFound(format!("column {name}")))
     }
 
+    /// ADR 0088 — streaming page iterator. Yields one
+    /// `BradianResult<ColumnBuffer>` per page in declared order.
+    /// Iterator stops on first error. CRC + BACE/BACA +
+    /// dict-bounds checks per page are preserved (delegates to
+    /// `read_page`).
+    pub fn iter_pages(&mut self, name: &str) -> BradianResult<ColumnPageIterator<'_>> {
+        let col = self.column(name)?.clone();
+        Ok(ColumnPageIterator { reader: self, col, cursor: 0, done: false })
+    }
+
     /// Materialise the entire column as a single `ColumnBuffer`. Multi-page concatenation is
     /// handled transparently.
     pub fn read_column(&mut self, name: &str) -> BradianResult<ColumnBuffer> {
@@ -330,6 +340,44 @@ impl SegmentReader {
 
         let column_dict = self.column_dicts.get(&col.name);
         decode_page(col, page, &inner, validity, column_dict)
+    }
+}
+
+/// ADR 0088 — streaming page iterator. Yields one page per
+/// `next()` as a standalone `ColumnBuffer`. Holds a `&mut
+/// SegmentReader` so no concurrent `read_column` call is
+/// possible mid-iteration (compile-time enforced).
+pub struct ColumnPageIterator<'r> {
+    reader: &'r mut SegmentReader,
+    col: ColumnMeta,
+    cursor: usize,
+    done: bool,
+}
+
+impl<'r> std::fmt::Debug for ColumnPageIterator<'r> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColumnPageIterator")
+            .field("column", &self.col.name)
+            .field("cursor", &self.cursor)
+            .field("done", &self.done)
+            .field("total_pages", &self.col.pages.len())
+            .finish()
+    }
+}
+
+impl<'r> Iterator for ColumnPageIterator<'r> {
+    type Item = BradianResult<ColumnBuffer>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done || self.cursor >= self.col.pages.len() {
+            return None;
+        }
+        let page = self.col.pages[self.cursor].clone();
+        self.cursor += 1;
+        let result = self.reader.read_page(&self.col, &page);
+        if result.is_err() {
+            self.done = true;
+        }
+        Some(result)
     }
 }
 
