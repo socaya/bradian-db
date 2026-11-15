@@ -130,6 +130,15 @@ impl SegmentReader {
         if col.pages.is_empty() {
             return Err(BradianError::corruption(format!("column {name} has no pages")));
         }
+        // ADR 0087 §3 — v1.4 column-dict fast path: clone the
+        // column dict ONCE, decode each page as indices only,
+        // concat into a single DictIndex32. Avoids ADR 0083's
+        // per-page clone + ADR 0084's fast-path byte compare.
+        if self.column_dicts.contains_key(&col.name)
+            && col.pages.iter().all(|p| p.codec == CodecId::Dictionary)
+        {
+            return self.read_v14_dict_column(&col);
+        }
         if col.pages.len() == 1 {
             return self.read_page(&col, &col.pages[0]);
         }
@@ -139,6 +148,47 @@ impl SegmentReader {
             pages.push(self.read_page(&col, p)?);
         }
         concat_buffers(&col, pages)
+    }
+
+    /// ADR 0087 §3 — v1.4 single-clone fast path. Preserves CRC +
+    /// index-bounds checks per page and produces a single
+    /// `ColumnBuffer::DictIndex32` with one copy of the dict.
+    fn read_v14_dict_column(&mut self, col: &ColumnMeta) -> BradianResult<ColumnBuffer> {
+        let (shared_offsets, shared_data) = self.column_dicts
+            .get(&col.name)
+            .cloned()
+            .ok_or_else(|| BradianError::corruption(format!(
+                "read_v14_dict_column: no column-dict entry for {}", col.name,
+            )))?;
+        let n_dict_actual = (shared_offsets.len() - 1) as u32;
+
+        let total_rows: usize = col.pages.iter().map(|p| p.row_count as usize).sum();
+        let mut indices: Vec<u32> = Vec::with_capacity(total_rows);
+        let mut validity = crate::bitmap::Bitmap::with_capacity(total_rows);
+
+        for page in &col.pages {
+            // Decode page payload exactly like read_page (CRC
+            // check, BACE/BACA envelope dispatch), then use the
+            // v1.4 indices-only decode.
+            let ColumnBuffer::DictIndex32 { indices: page_idx, validity: page_val, .. }
+                = self.read_page(col, page)? else {
+                    return Err(BradianError::corruption(format!(
+                        "read_v14_dict_column: page did not decode to DictIndex32 on column {}",
+                        col.name,
+                    )));
+                };
+            // read_page already bounded-checked indices against the
+            // shared dict (decode_page §3.4). Still concat.
+            let _ = n_dict_actual;   // bound-check was in decode_page
+            indices.extend_from_slice(&page_idx);
+            validity.extend_from(&page_val);
+        }
+        Ok(ColumnBuffer::DictIndex32 {
+            indices,
+            validity,
+            dict_offsets: shared_offsets,
+            dict_data: shared_data,
+        })
     }
 
     fn read_page(&mut self, col: &ColumnMeta, page: &PageMeta) -> BradianResult<ColumnBuffer> {
