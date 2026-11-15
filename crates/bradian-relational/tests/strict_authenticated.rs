@@ -26,6 +26,7 @@ fn wiring(auth: Option<BaceAuthentication>, strict: bool) -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: auth,
         strict_authenticated: strict,
+        previous_authentication: None,
     }
 }
 

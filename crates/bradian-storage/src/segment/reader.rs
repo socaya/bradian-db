@@ -779,8 +779,19 @@ fn decode_baca_page(
         max_decoded_length: max_decoded,
         max_encoded_length: payload.len() as u32,
     };
-    let env = read_authenticated_envelope(payload, caps, auth)
-        .map_err(|e| e.to_string())?;
+    // ADR 0093 §3.2 — rotation fallback.
+    let env = match read_authenticated_envelope(payload, caps, auth) {
+        Ok(env) => env,
+        Err(bradian_relational::bace::authenticated::AuthenticatedEnvelopeError::MacMismatch { .. })
+            if !wiring.strict_authenticated
+            && wiring.previous_authentication.is_some()
+        => {
+            let prev = wiring.previous_authentication.as_ref().unwrap();
+            read_authenticated_envelope(payload, caps, prev)
+                .map_err(|e| format!("primary and previous keys both failed: {e}"))?
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     if env.header.decoded_length != uncompressed_len {
         return Err(format!(
             "BACA envelope decoded_length {} disagrees with page uncompressed_len {}",

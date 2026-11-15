@@ -296,6 +296,7 @@ fn wiring_with_profile(profile: CompressionProfile) -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 
@@ -310,6 +311,7 @@ fn wiring_zstd_balanced() -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 
@@ -505,6 +507,7 @@ fn bace_backup_restore_fails_closed_when_wiring_lacks_source_codec() {
         registry: registry_raw_only,
         authentication: None,
         strict_authenticated: false,
+        previous_authentication: None,
     };
 
     let err = RowStore::restore_backup_with_bace(

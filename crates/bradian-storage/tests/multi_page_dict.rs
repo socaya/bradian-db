@@ -33,6 +33,7 @@ fn wiring_zstd_balanced() -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 
@@ -47,6 +48,7 @@ fn wiring_with_baca(key: [u8; 32]) -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: Some(BaceAuthentication::new(key, "adr-0082-test")),
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 

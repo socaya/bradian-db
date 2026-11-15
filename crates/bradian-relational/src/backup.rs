@@ -116,6 +116,16 @@ impl BackupReceipt {
         auth: Option<&crate::bace::authenticated::BaceAuthentication>,
         strict: bool,
     ) -> StoreResult<Self> {
+        Self::decode_with_full_rotation(bytes, auth, None, strict)
+    }
+
+    /// ADR 0093 §3.2 — full rotation-aware decode.
+    pub fn decode_with_full_rotation(
+        bytes: &[u8],
+        auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+        previous: Option<&crate::bace::authenticated::BaceAuthentication>,
+        strict: bool,
+    ) -> StoreResult<Self> {
         if bytes.len() < 8 {
             return Err(StoreError::Corruption("backup descriptor truncated".into()));
         }
@@ -128,7 +138,7 @@ impl BackupReceipt {
                 }
                 Self::decode_v1(bytes)
             }
-            m if m == MAGIC_V2 => Self::decode_v2(bytes, auth),
+            m if m == MAGIC_V2 => Self::decode_v2_with_rotation(bytes, auth, previous, strict),
             _ => Err(StoreError::Corruption(
                 "backup descriptor has unknown magic (expected BRBKv001 or BRBKv002)".into(),
             )),
@@ -147,36 +157,46 @@ impl BackupReceipt {
         Self::decode_body_fields(bytes)
     }
 
-    fn decode_v2(
+    fn decode_v2_with_rotation(
         bytes: &[u8],
         auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+        previous: Option<&crate::bace::authenticated::BaceAuthentication>,
+        strict: bool,
     ) -> StoreResult<Self> {
         if bytes.len() != DESCRIPTOR_LENGTH_V2 {
             return Err(StoreError::Corruption(
                 "backup descriptor v2 wrong length".into(),
             ));
         }
-        // CRC still covers v1 body for bit-rot fast-fail.
         if u32::from_le_bytes(bytes[36..40].try_into().unwrap()) != hash(&bytes[..36]) {
             return Err(StoreError::Corruption("backup descriptor checksum mismatch".into()));
         }
         let auth = auth.ok_or_else(|| StoreError::Corruption(
             "backup descriptor is v2 (authenticated) but no BaceWiring::authentication supplied; use restore_backup_with_bace with a wiring that carries authentication".into(),
         ))?;
-        // Compute BLAKE3 keyed MAC over the 36-byte body and
-        // compare against the trailing 16 bytes in constant time.
-        let mut hasher = blake3::Hasher::new_keyed(auth.key_bytes());
-        hasher.update(&bytes[..36]);
-        let computed = hasher.finalize();
         let expected = &bytes[40..56];
-        let eq: bool = subtle::ConstantTimeEq::ct_eq(&computed.as_bytes()[..16], expected).into();
-        if !eq {
-            return Err(StoreError::Corruption(format!(
-                "backup descriptor v2 MAC mismatch (wrong key or tampered backup; key label {:?})",
-                auth.label(),
-            )));
+        let verify = |a: &crate::bace::authenticated::BaceAuthentication| -> bool {
+            let mut hasher = blake3::Hasher::new_keyed(a.key_bytes());
+            hasher.update(&bytes[..36]);
+            let computed = hasher.finalize();
+            let eq: bool = subtle::ConstantTimeEq::ct_eq(&computed.as_bytes()[..16], expected).into();
+            eq
+        };
+        if verify(auth) {
+            return Self::decode_body_fields(bytes);
         }
-        Self::decode_body_fields(bytes)
+        // ADR 0093 §3.2 — rotation fallback (unless strict).
+        if !strict {
+            if let Some(prev) = previous {
+                if verify(prev) {
+                    return Self::decode_body_fields(bytes);
+                }
+            }
+        }
+        Err(StoreError::Corruption(format!(
+            "backup descriptor v2 MAC mismatch (wrong key or tampered backup; key label {:?})",
+            auth.label(),
+        )))
     }
 
     fn decode_body_fields(bytes: &[u8]) -> StoreResult<Self> {
@@ -244,6 +264,17 @@ pub fn read_receipt_with_strict_auth(
     auth: Option<&crate::bace::authenticated::BaceAuthentication>,
     strict: bool,
 ) -> StoreResult<BackupReceipt> {
+    read_receipt_with_rotation(path, auth, None, strict)
+}
+
+/// ADR 0093 §3.2 — rotation-aware receipt reader. Falls back to
+/// `previous` on primary-key MAC mismatch unless `strict`.
+pub fn read_receipt_with_rotation(
+    path: &Path,
+    auth: Option<&crate::bace::authenticated::BaceAuthentication>,
+    previous: Option<&crate::bace::authenticated::BaceAuthentication>,
+    strict: bool,
+) -> StoreResult<BackupReceipt> {
     // Enforce exact-length reads (pre-ADR-0089 contract):
     // files with trailing bytes or short files all fail with
     // Corruption. We try the 40-byte path first; if the first 8
@@ -256,7 +287,7 @@ pub fn read_receipt_with_strict_auth(
                 "invalid backup descriptor header".into(),
             ),
         })?;
-        return BackupReceipt::decode_with_strict_auth(&bytes, auth, strict);
+        return BackupReceipt::decode_with_full_rotation(&bytes, auth, previous, strict);
     }
     if file_len == DESCRIPTOR_LENGTH_V2 as u64 {
         let bytes = crate::metadata_io::read_fixed::<DESCRIPTOR_LENGTH_V2>(path).map_err(|e| match e {
@@ -265,7 +296,7 @@ pub fn read_receipt_with_strict_auth(
                 "invalid backup descriptor header".into(),
             ),
         })?;
-        return BackupReceipt::decode_with_strict_auth(&bytes, auth, strict);
+        return BackupReceipt::decode_with_full_rotation(&bytes, auth, previous, strict);
     }
     Err(StoreError::Corruption(format!(
         "backup descriptor file has wrong length {} (expected {} or {})",
@@ -379,12 +410,12 @@ fn verify_directory(
     policies: StorageLimits,
     bace: Option<&BaceWiring>,
 ) -> StoreResult<()> {
-    // ADR 0089 §3.3 + ADR 0091 — verify v2 MAC when wiring has
-    // auth; reject legacy v1 under strict mode.
+    // ADR 0089/0091/0093 — verify v2 MAC with rotation fallback.
     let strict = bace.map(|w| w.strict_authenticated).unwrap_or(false);
-    let stored = read_receipt_with_strict_auth(
+    let stored = read_receipt_with_rotation(
         &path.join(META_FILE),
         bace.and_then(|w| w.authentication.as_ref()),
+        bace.and_then(|w| w.previous_authentication.as_ref()),
         strict,
     )?;
     if stored != receipt {
@@ -477,9 +508,10 @@ fn restore_backup_inner(
     // provides it (v2 MAC verified); reject legacy v1 descriptor
     // under strict mode.
     let strict = wiring.as_ref().map(|w| w.strict_authenticated).unwrap_or(false);
-    let receipt = read_receipt_with_strict_auth(
+    let receipt = read_receipt_with_rotation(
         &backup.join(META_FILE),
         wiring.as_ref().and_then(|w| w.authentication.as_ref()),
+        wiring.as_ref().and_then(|w| w.previous_authentication.as_ref()),
         strict,
     )?;
     // ADR 0067 §3.4 — reject BACE backups on the legacy path BEFORE

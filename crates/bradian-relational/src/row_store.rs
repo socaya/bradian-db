@@ -72,6 +72,11 @@ pub struct BaceWiring {
     /// pages remain tolerated in this ADR; follow-up ADRs may
     /// extend strict mode to those carriers.
     pub strict_authenticated: bool,
+    /// ADR 0093 — previous-key fallback for rotation windows.
+    /// When a MAC check under `authentication` fails and this
+    /// is `Some`, the reader retries under `previous`. Ignored
+    /// under `strict_authenticated`.
+    pub previous_authentication: Option<crate::bace::BaceAuthentication>,
 }
 
 impl std::fmt::Debug for BaceWiring {
@@ -1193,10 +1198,24 @@ fn decode_baca_wal_envelope(
         max_decoded_length,
         max_encoded_length: envelope_bytes.len() as u32,
     };
-    let env = read_authenticated_envelope(envelope_bytes, caps, auth)
-        .map_err(|e| StoreError::Corruption(format!(
+    // ADR 0093 §3.2 — rotation fallback. On MAC mismatch under
+    // primary, retry under previous (unless strict).
+    let env = match read_authenticated_envelope(envelope_bytes, caps, auth) {
+        Ok(env) => env,
+        Err(crate::bace::authenticated::AuthenticatedEnvelopeError::MacMismatch { .. })
+            if !wiring.strict_authenticated
+            && wiring.previous_authentication.is_some()
+        => {
+            let prev = wiring.previous_authentication.as_ref().unwrap();
+            read_authenticated_envelope(envelope_bytes, caps, prev)
+                .map_err(|e| StoreError::Corruption(format!(
+                    "WAL BACA envelope at byte {offset} failed MAC under primary and previous keys: {e}"
+                )))?
+        }
+        Err(e) => return Err(StoreError::Corruption(format!(
             "WAL BACA envelope at byte {offset} failed MAC verification or decode: {e}"
-        )))?;
+        ))),
+    };
     let codec = wiring.registry.codec(env.header.codec_id).ok_or(
         StoreError::BaceCodecUnavailable { codec_id: env.header.codec_id },
     )?;
@@ -1335,11 +1354,26 @@ pub(crate) fn decode_data_page_payload(
             max_decoded_length,
             max_encoded_length: PAGE_SIZE as u32,
         };
-        let env = crate::bace::authenticated::read_authenticated_envelope(
+        // ADR 0093 §3.2 — rotation fallback for BRPG BACA pages.
+        let env = match crate::bace::authenticated::read_authenticated_envelope(
             &page.payload, caps, auth,
-        ).map_err(|e| StoreError::Corruption(format!(
-            "BRPG page {page_id} BACA MAC verification or decode failed: {e}"
-        )))?;
+        ) {
+            Ok(env) => env,
+            Err(crate::bace::authenticated::AuthenticatedEnvelopeError::MacMismatch { .. })
+                if !w.strict_authenticated
+                && w.previous_authentication.is_some()
+            => {
+                let prev = w.previous_authentication.as_ref().unwrap();
+                crate::bace::authenticated::read_authenticated_envelope(
+                    &page.payload, caps, prev,
+                ).map_err(|e| StoreError::Corruption(format!(
+                    "BRPG page {page_id} BACA MAC failed under primary and previous keys: {e}"
+                )))?
+            }
+            Err(e) => return Err(StoreError::Corruption(format!(
+                "BRPG page {page_id} BACA MAC verification or decode failed: {e}"
+            ))),
+        };
         let codec = w.registry.codec(env.header.codec_id)
             .ok_or(StoreError::BaceCodecUnavailable { codec_id: env.header.codec_id })?;
         let build_supports = codec.capability().format_version;

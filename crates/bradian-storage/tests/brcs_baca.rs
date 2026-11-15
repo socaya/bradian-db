@@ -35,6 +35,7 @@ fn wiring_with_auth(key: [u8; 32], label: &str) -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: Some(BaceAuthentication::new(key, label)),
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn wiring_no_auth() -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 

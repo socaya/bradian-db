@@ -31,6 +31,7 @@ fn wiring_zstd(auth: Option<BaceAuthentication>) -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: auth,
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 

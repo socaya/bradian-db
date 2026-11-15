@@ -94,6 +94,7 @@ fn wiring_zstd_balanced() -> BaceWiring {
         registry: Arc::new(BuiltInRegistry::new()),
         authentication: None,
         strict_authenticated: false,
+        previous_authentication: None,
     }
 }
 
