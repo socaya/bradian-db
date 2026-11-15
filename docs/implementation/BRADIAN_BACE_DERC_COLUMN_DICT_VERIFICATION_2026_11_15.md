@@ -14,8 +14,8 @@ Clippy clean on `cargo clippy --workspace --all-targets
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-storage --locked` | Passed |
-| `cargo test -p dap-storage --test column_dict --locked` | 10 passed |
+| `cargo check -p bradian-storage --locked` | Passed |
+| `cargo test -p bradian-storage --test column_dict --locked` | 10 passed |
 | `cargo test --workspace --locked` | 1076 passed, 0 failed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
@@ -139,7 +139,7 @@ Added `use_column_dict: false` to all existing
      covered by any page MAC; it carries its own CRC32.
 3. Every §3.5 item 1–10 covered by at least one test.
 4. §3.5 item 10 PASSED with 82.3% size reduction.
-5. No regressions in any dap-storage, bradian-relational, or
+5. No regressions in any bradian-storage, bradian-relational, or
    workspace test; 1066 → 1076 tests (10 new).
 6. Feature-flag superset check preserved
    (`ALL_SUPPORTED_V1_3` ⊂ `ALL_SUPPORTED_V1_4`).

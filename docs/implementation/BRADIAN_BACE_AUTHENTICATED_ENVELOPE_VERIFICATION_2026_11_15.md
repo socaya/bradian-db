@@ -156,7 +156,7 @@ pub use authenticated::{
   (`RowStore`, `MvccStore`, `DurableMvccStore`,
   `TypedMvccStore`, `DurableTypedStore`, the SQL engines,
   the backup carriers, the lifecycle coordinator, the
-  analytical `dap-storage` crate).
+  analytical `bradian-storage` crate).
 - Extend `BaceWiring`.
 - Add CLI exposure.
 - Make a production security claim.
@@ -177,7 +177,7 @@ pub use authenticated::{
 ## Remaining BACE workstream candidates
 
 - **`.derc` carrier BACE** — analytical column segments in
-  `dap-storage` crate; format version bump; cross-crate.
+  `bradian-storage` crate; format version bump; cross-crate.
 - **BRWL carrier BACE** — WAL frame compression on
   latency-sensitive write path; benchmarking required.
 - **Dictionary scope** — BACE §4.2 dictionary mode with

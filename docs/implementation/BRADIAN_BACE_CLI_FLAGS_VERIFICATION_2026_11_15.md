@@ -12,14 +12,14 @@ the entire workspace.
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-admin` | Passed |
+| `cargo check -p bradian-admin` | Passed |
 | `cargo test --workspace --locked` | 978 passed, 0 failed |
-| `cargo test -p dap-admin` | 12 passed (existing + 5 new ADR 0073) |
+| `cargo test -p bradian-admin` | 12 passed (existing + 5 new ADR 0073) |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## What landed
 
-### `crates/dap-admin/src/local_sql.rs`
+### `crates/bradian-admin/src/local_sql.rs`
 
 New clap enum:
 

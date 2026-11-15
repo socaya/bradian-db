@@ -2,21 +2,21 @@
 resolver = "2"
 members = [
     "crates/bradian-relational",
-    "crates/dap-core",
-    "crates/dap-catalog",
-    "crates/dap-storage",
-    "crates/dap-runtime",
-    "crates/dap-planner",
-    "crates/dap-ingest",
-    "crates/dap-views",
-    "crates/dap-dhis2",
-    "crates/dap-security",
-    "crates/dap-serving",
-    "crates/dap-admin",
-    "crates/dap-benchmark",
-    "crates/dap-distributed",
-    "crates/dap-sources",
-    "tests/dap-e2e",
+    "crates/bradian-core",
+    "crates/bradian-catalog",
+    "crates/bradian-storage",
+    "crates/bradian-runtime",
+    "crates/bradian-planner",
+    "crates/bradian-ingest",
+    "crates/bradian-views",
+    "crates/bradian-dhis2",
+    "crates/bradian-security",
+    "crates/bradian-serving",
+    "crates/bradian-admin",
+    "crates/bradian-benchmark",
+    "crates/bradian-distributed",
+    "crates/bradian-sources",
+    "tests/bradian-e2e",
 ]
 
 [workspace.metadata.bradian]
@@ -35,20 +35,20 @@ readme = "README.md"
 
 [workspace.dependencies]
 # intra-workspace
-dap-core      = { path = "crates/dap-core" }
-dap-catalog   = { path = "crates/dap-catalog" }
-dap-storage   = { path = "crates/dap-storage" }
-dap-runtime   = { path = "crates/dap-runtime" }
-dap-planner   = { path = "crates/dap-planner" }
-dap-ingest    = { path = "crates/dap-ingest" }
-dap-views     = { path = "crates/dap-views" }
-dap-dhis2     = { path = "crates/dap-dhis2" }
-dap-distributed = { path = "crates/dap-distributed" }
-dap-sources = { path = "crates/dap-sources" }
+bradian-core      = { path = "crates/bradian-core" }
+bradian-catalog   = { path = "crates/bradian-catalog" }
+bradian-storage   = { path = "crates/bradian-storage" }
+bradian-runtime   = { path = "crates/bradian-runtime" }
+bradian-planner   = { path = "crates/bradian-planner" }
+bradian-ingest    = { path = "crates/bradian-ingest" }
+bradian-views     = { path = "crates/bradian-views" }
+bradian-dhis2     = { path = "crates/bradian-dhis2" }
+bradian-distributed = { path = "crates/bradian-distributed" }
+bradian-sources = { path = "crates/bradian-sources" }
 
-dap-security  = { path = "crates/dap-security" }
-dap-serving   = { path = "crates/dap-serving" }
-dap-admin     = { path = "crates/dap-admin" }
+bradian-security  = { path = "crates/bradian-security" }
+bradian-serving   = { path = "crates/bradian-serving" }
+bradian-admin     = { path = "crates/bradian-admin" }
 
 # external
 serde            = { version = "1", features = ["derive"] }

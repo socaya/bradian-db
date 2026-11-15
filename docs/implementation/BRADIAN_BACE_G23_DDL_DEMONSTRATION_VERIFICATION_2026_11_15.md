@@ -107,7 +107,7 @@ G24 relational coordinator:
 - **Authenticated envelope (`BACA`)** — new security primitive
   with HMAC/signatures; needs threat modeling per CLAUDE.md §6.
 - **`.derc` carrier BACE** — analytical column segments in
-  `dap-storage` crate; format version bump.
+  `bradian-storage` crate; format version bump.
 - **BRWL carrier BACE** — WAL frame compression on the
   latency-sensitive write path; needs benchmarking.
 - **Dictionary scope** — BACE §4.2 dictionary mode with

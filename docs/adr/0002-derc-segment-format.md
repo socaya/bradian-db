@@ -58,7 +58,7 @@ are in bytes.
   - optional dictionary (offset + len + element count).
 - segment-level zone map (merged min/max per column).
 - ingest watermark (source system LSN / timestamp).
-- metadata revision pointer (from `dap-catalog`).
+- metadata revision pointer (from `bradian-catalog`).
 
 ### Required feature flags
 

@@ -16,8 +16,8 @@ manual-only. Existing unused manifest dependency/field advisories remain.
 | `cargo check --workspace --all-features --locked` | Passed |
 | `cargo test --workspace --all-features --locked --no-fail-fast` | 658 passed; no failures or ignored tests |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `npm run typecheck` in `apps/dap-ui` | Passed |
-| `npm run build` in `apps/dap-ui` | Passed |
+| `npm run typecheck` in `apps/bradian-ui` | Passed |
+| `npm run build` in `apps/bradian-ui` | Passed |
 
 ## Delivered and verified
 

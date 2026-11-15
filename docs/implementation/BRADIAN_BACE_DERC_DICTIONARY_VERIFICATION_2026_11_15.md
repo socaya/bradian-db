@@ -20,9 +20,9 @@ Clippy clean on `cargo clippy --workspace --all-targets
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-storage` | Passed |
+| `cargo check -p bradian-storage` | Passed |
 | `cargo test --workspace --locked` | 1036 passed, 0 failed |
-| `cargo test -p dap-storage --test derc_dictionary` | 10 passed |
+| `cargo test -p bradian-storage --test derc_dictionary` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## Size-reduction observation (§3.5 item 9)
@@ -30,7 +30,7 @@ Clippy clean on `cargo clippy --workspace --all-targets
 Reproduce with:
 
 ```sh
-cargo test -p dap-storage --test derc_dictionary item_9 -- --nocapture
+cargo test -p bradian-storage --test derc_dictionary item_9 -- --nocapture
 ```
 
 Observed on 1024 identical rows of `DHIS2-ORGANISATIONUNIT-COMMON-PREFIX-012`:
@@ -63,7 +63,7 @@ the benefit awaits:
 
 ### R.1 — v1.2 format bits
 
-`crates/dap-storage/src/segment/format.rs`:
+`crates/bradian-storage/src/segment/format.rs`:
 
 ```rust
 pub const SEGMENT_VERSION_MINOR_V1_2: u16 = 2;
@@ -174,7 +174,7 @@ and `open_with_bace` (full v1.2 reader). No public
    observation that the dict doesn't pay for itself on
    single-page-per-column segments. Documented in ADR §10
    and in this doc.
-5. No regressions in `dap-storage` or any consumer tests.
+5. No regressions in `bradian-storage` or any consumer tests.
 
 ## What this ADR explicitly does NOT do (unchanged)
 

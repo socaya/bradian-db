@@ -5,7 +5,7 @@ shared helper and used by the native SQL CLI. Gate 1 remains active. This
 does not accept the full master G1-LOCAL-ACCESS exit (owner-UID enforcement,
 POSIX ACL inspection, parent-path trust, Windows ACL and enterprise identity).
 
-Local-access enforcement had grown inside `dap-admin/src/local_sql.rs::private_root`,
+Local-access enforcement had grown inside `bradian-admin/src/local_sql.rs::private_root`,
 making it unreachable from library callers. Direct consumers of
 `bradian_relational::row_store::RowStore::open` could not invoke the same
 invariants without re-implementing them. This created a second, implicit
@@ -40,7 +40,7 @@ Enforced invariants (POSIX):
 On non-Unix platforms the helper returns `Unsupported`; the native CLI retains
 its existing `bail!` so no platform silently skips enforcement.
 
-`dap-admin`'s `private_root` delegates to the helper so there is now exactly
+`bradian-admin`'s `private_root` delegates to the helper so there is now exactly
 one implementation of the invariants; CLI behavior is byte-identical (the CLI
 maps `LocalAccessError` to the same `anyhow::ensure!` messages it used before,
 so error strings remain compatible with existing tests).

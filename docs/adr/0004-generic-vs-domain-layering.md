@@ -5,8 +5,8 @@
 
 ## Context
 
-DAP ships alongside DHIS2-specific metadata and indicator semantics (`dap-dhis2`,
-`dap-catalog::dhis2_adapter`), but the core engine is not DHIS2-dependent. Any data system
+DAP ships alongside DHIS2-specific metadata and indicator semantics (`bradian-dhis2`,
+`bradian-catalog::dhis2_adapter`), but the core engine is not DHIS2-dependent. Any data system
 that can describe its facts as `(key, attributes, value)` rows can plug in. We want that
 boundary explicit so operators and future adapters have a single place to look.
 
@@ -44,9 +44,9 @@ Layers top-down:
 The two adapter wings below `storage/core` are what make the platform ship-ready for a
 given deployment.
 
-## Generic sources (`dap-sources`)
+## Generic sources (`bradian-sources`)
 
-Per-format readers that produce canonical `dap_ingest::Change` envelopes. v1 modules:
+Per-format readers that produce canonical `bradian_ingest::Change` envelopes. v1 modules:
 
 - `csv` — RFC 4180-ish parser with escape rules; `read_csv_bytes` + `rows_to_changes`.
 - `jsonl` — `read_jsonl` for pre-shaped envelopes, `read_jsonl_with` for projection.
@@ -61,10 +61,10 @@ pull in a CSV or Arrow crate.
 A domain adapter answers two questions:
 
 1. **Metadata** — what does a "dataset", "program", "indicator" look like in this domain,
-   and how do I load them into the generic [`Catalog`]? `dap-catalog::dhis2_adapter`
+   and how do I load them into the generic [`Catalog`]? `bradian-catalog::dhis2_adapter`
    demonstrates the pattern for DHIS2.
 2. **Analytical semantics** — any domain-specific expression grammar, aggregation rules,
-   or fact models live in a dedicated crate. `dap-dhis2` holds the full DHIS2 analytical
+   or fact models live in a dedicated crate. `bradian-dhis2` holds the full DHIS2 analytical
    surface (expressions, aggregate / event / tracker programs, indicators, custom
    aggregation). An OpenMRS or FHIR adapter would be a sibling crate at this level.
 
@@ -76,9 +76,9 @@ refactor.
 
 | Deployment | Needs | Does not need |
 |---|---|---|
-| DHIS2 ministry stack | `dap-dhis2`, catalog DHIS2 adapter | nothing else |
-| HMIS data lake with CDC | `dap-sources::sql_cdc`, domain-neutral queries | DHIS2 crate |
-| Research cohort study | `dap-sources::csv` + a cohort-specific metadata loader | DHIS2 crate |
+| DHIS2 ministry stack | `bradian-dhis2`, catalog DHIS2 adapter | nothing else |
+| HMIS data lake with CDC | `bradian-sources::sql_cdc`, domain-neutral queries | DHIS2 crate |
+| Research cohort study | `bradian-sources::csv` + a cohort-specific metadata loader | DHIS2 crate |
 | FHIR analytics | new `dap-fhir` crate + optional JSONL source | DHIS2 crate |
 | Offline edge site (e.g. refugee camp registry) | core engine + any source adapter | serving cluster, distributed federation |
 
@@ -87,11 +87,11 @@ query planner. Only the wings on either side of the core differ.
 
 ## Consequences
 
-- `dap-dhis2` is a leaf crate — nothing in the core, planner, runtime, or serving layers
+- `bradian-dhis2` is a leaf crate — nothing in the core, planner, runtime, or serving layers
   depends on it. We enforce this via `cargo test --workspace` on CI; a build regression
   there would surface immediately.
-- `dap-sources` grows one module per format. New modules only depend on
-  `dap-core`/`dap-ingest`/`dap-storage`; they never pull in a domain crate.
+- `bradian-sources` grows one module per format. New modules only depend on
+  `bradian-core`/`bradian-ingest`/`bradian-storage`; they never pull in a domain crate.
 - The HTTP API carries DHIS2-flavoured query names (`ProgramIndicatorQuery`) but the
   payloads are plain UIDs + expression strings; a non-DHIS2 adapter can register its own
   catalog entries under the same shape without changing the API surface.

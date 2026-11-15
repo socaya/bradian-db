@@ -1,0 +1,21 @@
+[package]
+name = "bradian-dhis2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "DHIS2 aggregate/event/tracker/indicator semantics"
+
+[dependencies]
+bradian-core    = { workspace = true }
+ahash       = { workspace = true }
+bradian-catalog = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+regex       = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }

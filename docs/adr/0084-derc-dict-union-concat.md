@@ -49,7 +49,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
 - The fast path (identical dicts) is unchanged — same code
   path, same output.
 - A new public `ColumnBuffer::concat_dict_pages(pages:
-  Vec<ColumnBuffer>) -> DapResult<ColumnBuffer>` helper
+  Vec<ColumnBuffer>) -> BradianResult<ColumnBuffer>` helper
   exposed for integration tests. The reader's internal
   `concat_buffers` delegates to this when the physical type
   is `DictIndex32` and pages need union. Public exposure keeps
@@ -80,14 +80,14 @@ Owner review required before any code lands per CLAUDE.md §4.9.
 
 ```rust
 impl ColumnBuffer {
-    pub fn concat_dict_pages(pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
+    pub fn concat_dict_pages(pages: Vec<ColumnBuffer>) -> BradianResult<ColumnBuffer> {
         if pages.is_empty() {
-            return Err(DapError::corruption("concat_dict_pages: no pages"));
+            return Err(BradianError::corruption("concat_dict_pages: no pages"));
         }
         // Every page must be DictIndex32.
         for (i, p) in pages.iter().enumerate() {
             if !matches!(p, ColumnBuffer::DictIndex32 { .. }) {
-                return Err(DapError::corruption(format!(
+                return Err(BradianError::corruption(format!(
                     "concat_dict_pages: page {i} is not DictIndex32",
                 )));
             }
@@ -313,7 +313,7 @@ None (uses existing HashMap + Bitmap types).
 4. All pre-ADR-0084 tests (1076 workspace tests) pass
    unchanged.
 5. New §3.5 tests added, all passing.
-6. No regressions in any dap-storage, bradian-relational, or
+6. No regressions in any bradian-storage, bradian-relational, or
    workspace test.
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.

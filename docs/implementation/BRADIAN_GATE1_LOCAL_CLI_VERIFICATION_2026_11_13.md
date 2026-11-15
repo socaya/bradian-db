@@ -20,16 +20,16 @@ package dependency. Automatic CI stays manual-only by owner instruction.
 | `cargo check --workspace --all-features --locked` | Passed |
 | `cargo test --workspace --all-features --locked --no-fail-fast` | 672 passed |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `cargo test -p dap-admin --all-features --locked` | Final CLI recheck passed |
-| `cargo clippy -p dap-admin --all-targets --all-features --locked -- -D warnings` | Final CLI recheck passed |
+| `cargo test -p bradian-admin --all-features --locked` | Final CLI recheck passed |
+| `cargo clippy -p bradian-admin --all-targets --all-features --locked -- -D warnings` | Final CLI recheck passed |
 | Studio `npm run typecheck` and `npm run build` | Passed |
 | `python3 scripts/verify_roadmap.py` | 60 unique requirements, fixed Gate 0–9 sequence, source links exist |
-| `cargo install --path crates/dap-admin --bin bradian-db --locked --offline --debug --target-dir target --root /tmp/bradian-gate1-install` | Installed canonical development executable |
+| `cargo install --path crates/bradian-admin --bin bradian-db --locked --offline --debug --target-dir target --root /tmp/bradian-gate1-install` | Installed canonical development executable |
 | Installed executable create/insert/commit/reopen | Separate processes returned the persisted expected value |
 
 ## Implemented and tested
 
-The canonical bradian-db and retained dap-admin executable share the existing
+The canonical bradian-db and retained bradian-admin executable share the existing
 operator command implementation. Native sql embeds the relational engines, reads
 bounded UTF-8 execute/file/stdin scripts, preserves quoted semicolons and escaped
 quotes, and emits one typed JSON result per successful statement. Wide integers,

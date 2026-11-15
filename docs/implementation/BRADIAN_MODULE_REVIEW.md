@@ -168,7 +168,7 @@ Direct-coverage matrix (module → test file whose name maps clearly):
 | `lifecycle` | `catalog_lifecycle.rs` |
 | `schema_evolution` / `schema_activation` | `schema_sql.rs`, `schema_retirement.rs`, `defaults_sql.rs`, `nullability_sql.rs` |
 | `runtime_limits` | 12 dedicated `*_limits.rs` suites |
-| `local_access` | In-module unit tests + CLI tests in `dap-admin` |
+| `local_access` | In-module unit tests + CLI tests in `bradian-admin` |
 
 ## 5. Cross-cutting observations
 
@@ -187,7 +187,7 @@ Each layer has its own error enum (`StoreError`, `CatalogError`,
 `PersistentCatalogError`, `DomainError`, `SqlError`, `MvccError`, …),
 and each wraps `ResourceError` via `#[from]`. Callers can match on
 the specific layer error or walk down to the resource variant. No
-`anyhow` in the library layer (`anyhow` is confined to `dap-admin`
+`anyhow` in the library layer (`anyhow` is confined to `bradian-admin`
 bins per CLAUDE.md §5).
 
 ### 5.3 Immutability of published artefacts
@@ -211,7 +211,7 @@ investigate a forgotten session.
 
 ### 5.5 Legacy identifiers retained by policy
 
-`dap-*` crate names, the `.derc` analytical format and `apps/dap-ui/`
+`dap-*` crate names, the `.derc` analytical format and `apps/bradian-ui/`
 remain intentionally. CLAUDE.md §4.17 forbids a bulk rename until a
 documented migration and compatibility suite exist. The visible
 brand (README, Studio title, published GitHub URL) is Bradian.

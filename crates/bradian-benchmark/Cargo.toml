@@ -1,0 +1,30 @@
+[package]
+name = "bradian-benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reproducible benchmark harness (criterion) + synthetic fact generator"
+
+[dependencies]
+bradian-core    = { workspace = true }
+bradian-storage = { workspace = true }
+bradian-runtime = { workspace = true }
+bradian-catalog = { workspace = true }
+serde       = { workspace = true }
+rand        = { workspace = true }
+rand_chacha = { workspace = true }
+tempfile    = { workspace = true }
+
+[dev-dependencies]
+criterion   = { workspace = true }
+
+[[bench]]
+name = "scan_filter_aggregate"
+harness = false
+
+[[bench]]
+name = "capture_coload"
+harness = false

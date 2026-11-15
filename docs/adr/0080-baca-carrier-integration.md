@@ -13,22 +13,22 @@ Implementation summary:
   (new field). All 14 existing `BaceWiring { ... }`
   construction sites across the workspace updated to the
   new field with `None`.
-- `crates/dap-storage/src/segment/format.rs` —
+- `crates/bradian-storage/src/segment/format.rs` —
   `SEGMENT_VERSION_MINOR_V1_3 = 3`, `BACE_PAGE_AUTHENTICATED
   = 1 << 7`, `ALL_SUPPORTED_V1_3`, `is_subset_supported_v1_3`,
   `BaceEnvelopeTag::BacaV1 = 2` (activated from `BacaV1Reserved`).
-- `crates/dap-storage/src/segment/writer.rs` — four-way BACE
+- `crates/bradian-storage/src/segment/writer.rs` — four-way BACE
   write-path dispatch: dict (ADR 0079 trailer 3, ignores auth),
   BACE + auth (ADR 0080 trailer 2 = BACA), BACE no auth (ADR
   0076 trailer 1), legacy. `wrap_page_in_baca_envelope` helper
   using `bace::authenticated::write_authenticated_envelope`.
-- `crates/dap-storage/src/segment/reader.rs` — v1.3 feature-
+- `crates/bradian-storage/src/segment/reader.rs` — v1.3 feature-
   flag superset accepted; trailer 2 dispatches to
   `decode_baca_page` using
   `bace::authenticated::read_authenticated_envelope`. Missing
   wiring, missing authentication, and MAC mismatch all fail
   closed with specific error messages.
-- `crates/dap-storage/tests/derc_baca.rs` — 10 §3.5
+- `crates/bradian-storage/tests/derc_baca.rs` — 10 §3.5
   integration tests.
 
 1046 workspace tests pass (1036 → 1046); clippy clean on
@@ -333,7 +333,7 @@ reachable path.
 
 ## 7. Dependencies this ADR would add
 
-None. `dap-storage` already deps on `bradian-relational`
+None. `bradian-storage` already deps on `bradian-relational`
 (ADR 0076). Imports from
 `bradian_relational::bace::authenticated` (ADR 0075).
 
@@ -358,7 +358,7 @@ None. `dap-storage` already deps on `bradian-relational`
    is acceptable for a narrow local integrity claim.
 3. §5 open design questions resolved.
 4. Implementation satisfying every item in §3.5.
-5. No regressions in `dap-storage` or any consumer tests.
+5. No regressions in `bradian-storage` or any consumer tests.
 6. Review-level inspection confirming:
    - MAC primitive used is `bace::authenticated::read_authenticated_envelope`
      (no custom MAC code).

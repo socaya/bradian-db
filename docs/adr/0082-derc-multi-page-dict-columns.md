@@ -326,7 +326,7 @@ None.
    size that's not a strict win vs plain-Utf8-multi-page is
    acceptable; the claim this ADR makes is reachability +
    correctness, not a new size win beyond ADR 0081's.
-5. No regressions in any dap-storage, bradian-relational,
+5. No regressions in any bradian-storage, bradian-relational,
    or workspace test.
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.

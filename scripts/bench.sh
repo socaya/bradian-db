@@ -26,7 +26,7 @@ cat > "$out/context.json" <<EOF
 }
 EOF
 
-cargo bench -p dap-benchmark --bench scan_filter_aggregate -- \
+cargo bench -p bradian-benchmark --bench scan_filter_aggregate -- \
   --warm-up-time 1 \
   --measurement-time 3 \
   --sample-size 20 \

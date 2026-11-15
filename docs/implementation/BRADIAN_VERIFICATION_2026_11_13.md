@@ -20,8 +20,8 @@ use the committed package-lock.json. Automatic CI remains manual-only.
 | `cargo check --workspace --all-features --locked` | Passed |
 | `cargo test --workspace --all-features --locked --no-fail-fast` | 588 passed; no failed or ignored tests |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `npm run typecheck` in `apps/dap-ui` | Passed |
-| `npm run build` in `apps/dap-ui` | Passed; 99 modules transformed |
+| `npm run typecheck` in `apps/bradian-ui` | Passed |
+| `npm run build` in `apps/bradian-ui` | Passed; 99 modules transformed |
 | `git diff --cached --check` | Passed before publication |
 
 Cargo emits existing unused manifest dependency/field advisories. There are no

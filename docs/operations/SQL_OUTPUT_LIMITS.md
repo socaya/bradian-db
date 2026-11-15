@@ -1,7 +1,7 @@
 # Native SQL CLI output limits
 
 This fixed Master Gate 1 / G1-MEMORY control applies to bradian-db sql and the legacy
-dap-admin sql entry point in default, --table and --history modes.
+bradian-admin sql entry point in default, --table and --history modes.
 
 | Budget | Default | Accounting |
 |---|---|---|

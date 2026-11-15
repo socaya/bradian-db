@@ -1,14 +1,14 @@
 # Native local SQL command
 
-The canonical executable is bradian-db. The existing dap-admin executable is retained
+The canonical executable is bradian-db. The existing bradian-admin executable is retained
 for compatibility and uses the same operator command implementation. The sql command
 embeds native Rust relational engines and does not start an HTTP service.
 
 ## Build and development install
 
 ```sh
-cargo build -p dap-admin --bin bradian-db --locked
-cargo install --path crates/dap-admin --bin bradian-db --locked --debug --root /tmp/bradian-install
+cargo build -p bradian-admin --bin bradian-db --locked
+cargo install --path crates/bradian-admin --bin bradian-db --locked --debug --root /tmp/bradian-install
 /tmp/bradian-install/bin/bradian-db version
 ```
 

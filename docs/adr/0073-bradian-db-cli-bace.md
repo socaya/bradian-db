@@ -11,7 +11,7 @@ flags; `SqlEngine::open` and
 
 Implementation summary:
 
-- `crates/dap-admin/src/local_sql.rs` — new
+- `crates/bradian-admin/src/local_sql.rs` — new
   `BaceProfileArg` clap enum, two new fields on `SqlArgs`
   (`bace_profile`, `bace_codecs`), a `build_bace_wiring`
   helper that constructs an `Option<BaceWiring>` or fails
@@ -26,10 +26,10 @@ warnings`).
 
 ## 1. Context
 
-- `dap-admin` ships the canonical `bradian-db` executable
+- `bradian-admin` ships the canonical `bradian-db` executable
   (CLAUDE.md §2 §4 + the Gate 1 native local SQL command).
   Its `sql` subcommand (`SqlArgs` in
-  `crates/dap-admin/src/local_sql.rs`) opens either
+  `crates/bradian-admin/src/local_sql.rs`) opens either
   `SqlEngine::open(root)` or
   `HistorySqlEngine::open_with_resource_limits(root, ...)`.
 - After ADRs 0065–0072, every one of those engine opens has
@@ -56,7 +56,7 @@ warnings`).
     → `RAW_ID`, `zstd` → `ZSTD_ID`. First-preference order
     matches ADR 0067 pick-codec semantics.
 - Wiring construction helper
-  (`dap-admin::local_sql::build_bace_wiring(args) ->
+  (`bradian-admin::local_sql::build_bace_wiring(args) ->
   Option<BaceWiring>`).
 - Route `SqlEngine::open` →
   `SqlEngine::open_with_bace(root, wiring)` when wiring is
@@ -75,7 +75,7 @@ follow-up):
   `RestoreSnapshot`, `InspectSnapshot`,
   `LoadDhis2Metadata`, `FetchDhis2Metadata`,
   `CompactPartition`, `Serve` all operate on the analytical
-  stack (`dap-storage`), not the relational `bradian-
+  stack (`bradian-storage`), not the relational `bradian-
   relational` engines. Analytical BACE is a separate
   workstream.
 - **`DomainSqlEngine` / `MvccSqlEngine` / coordinator-level
@@ -283,11 +283,11 @@ preference-with-fallback; it matches the ADR 0067 /
 
 ## 7. Dependencies this ADR would add
 
-- `dap-admin` already depends on `bradian-relational`. This
+- `bradian-admin` already depends on `bradian-relational`. This
   ADR adds explicit imports from
   `bradian_relational::bace::*` and
   `bradian_relational::row_store::BaceWiring` inside
-  `dap-admin/src/local_sql.rs`.
+  `bradian-admin/src/local_sql.rs`.
 - No new workspace deps.
 
 ## 8. What this ADR explicitly does NOT do
@@ -308,7 +308,7 @@ preference-with-fallback; it matches the ADR 0067 /
 2. Owner sign-off on §5 open design questions.
 3. Implementation satisfying items 1, 2, 4, 5 in §3.5
    (item 3 was merged with item 2).
-4. No regressions in `dap-admin` tests and
+4. No regressions in `bradian-admin` tests and
    `bradian-relational` tests.
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.

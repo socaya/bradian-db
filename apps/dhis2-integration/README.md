@@ -55,11 +55,11 @@ DAP exposes the HTTP endpoints DHIS2 posts to during the analytics-table build:
 - `POST /api/analytics/v1/ingest` — accept a batch of canonical `Change` envelopes
   (DHIS2's analytics-table rebuild path lands here instead of running SQL DDL).
 - `POST /api/analytics.json` and friends — the DHIS2-shape analytics query endpoints
-  (`dap-serving::dhis2_compat`, documented in ADR 0005).
+  (`bradian-serving::dhis2_compat`, documented in ADR 0005).
 
 The ingest endpoint is new in this cycle — see the Rust side under
-`crates/dap-serving/src/dhis2_compat.rs` and the integration test in
-`crates/dap-serving/tests/dhis2_compat.rs`.
+`crates/bradian-serving/src/dhis2_compat.rs` and the integration test in
+`crates/bradian-serving/tests/dhis2_compat.rs`.
 
 ### Operator configuration
 

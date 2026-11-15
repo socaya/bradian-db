@@ -8,8 +8,8 @@ Earlier BRD-G1–BRD-G44 files are historical implementation records, not a sepa
 roadmap. They retain their paths and identities for compatibility. New tasks belong
 to the fixed master gate rather than receiving another G-number.
 
-The existing dap-admin operator functions become a shared library used by both the
-legacy dap-admin executable and a canonical bradian-db executable. Analytical commands
+The existing bradian-admin operator functions become a shared library used by both the
+legacy bradian-admin executable and a canonical bradian-db executable. Analytical commands
 and on-disk identifiers remain unchanged. A new sql command embeds the existing native
 relational engines; it does not call an external database or open a network listener.
 

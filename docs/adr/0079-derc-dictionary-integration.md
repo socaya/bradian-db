@@ -9,7 +9,7 @@ pool across pages. Honest observation recorded below.
 
 Implementation summary:
 
-- `crates/dap-storage/src/segment/format.rs` — new
+- `crates/bradian-storage/src/segment/format.rs` — new
   `SEGMENT_VERSION_MINOR_V1_2 = 2`, `BACE_PAGE_DICTIONARY =
   1 << 6` feature flag, `ALL_SUPPORTED_V1_2` superset,
   `is_subset_supported_v1_2` helper, `BaceEnvelopeTag::BaceV1WithDict
@@ -19,16 +19,16 @@ Implementation summary:
   `BaceDictionary::raw_bytes_for_carrier()` with a clear
   `ADR 0079 §3.3` comment. Bends the ADR 0078 "no casual
   raw-bytes access" culture for the legitimate carrier case.
-- `crates/dap-storage/src/segment/writer.rs` —
+- `crates/bradian-storage/src/segment/writer.rs` —
   `SegmentWriter::new_with_bace_and_dictionaries`, the
   three-way BACE write path dispatch (dict / no-dict /
   legacy), `write_dictionary_pool` between last page and
   footer with deterministic column-name ordering.
-- `crates/dap-storage/src/segment/reader.rs` — pool parsing
+- `crates/bradian-storage/src/segment/reader.rs` — pool parsing
   on segments with the v1.2 feature flag, trailer=3 dispatch
   to `decode_bace_v1_page_with_dict`, fingerprint-mismatch
   and missing-pool-entry fail-closed paths.
-- `crates/dap-storage/tests/derc_dictionary.rs` — 10 §3.5
+- `crates/bradian-storage/tests/derc_dictionary.rs` — 10 §3.5
   integration tests.
 
 1036 workspace tests pass (1026 → 1036); clippy clean on
@@ -382,7 +382,7 @@ expensive. Minor bump + feature-flag reject is cleaner.
 
 ## 7. Dependencies this ADR would add
 
-None. `dap-storage` already deps on `bradian-relational`
+None. `bradian-storage` already deps on `bradian-relational`
 (ADR 0076). Imports from `bradian_relational::bace::dictionary`
 (ADR 0078).
 
@@ -407,7 +407,7 @@ None. `dap-storage` already deps on `bradian-relational`
 4. §3.5 item 9 (size-reduction demonstration) PASSES —
    a dict-equipped v1.2 segment must be strictly smaller
    than the equivalent v1.1 segment on the test payload.
-5. No regressions in `dap-storage` or any consumer tests.
+5. No regressions in `bradian-storage` or any consumer tests.
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.
 If item 4 fails (dict storage cost exceeds per-page

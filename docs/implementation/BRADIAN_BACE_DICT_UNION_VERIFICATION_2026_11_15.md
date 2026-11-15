@@ -14,8 +14,8 @@ Clippy clean on `cargo clippy --workspace --all-targets
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-storage --locked` | Passed |
-| `cargo test -p dap-storage --test dict_union --locked` | 10 passed |
+| `cargo check -p bradian-storage --locked` | Passed |
+| `cargo test -p bradian-storage --test dict_union --locked` | 10 passed |
 | `cargo test --workspace --locked` | 1086 passed, 0 failed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 

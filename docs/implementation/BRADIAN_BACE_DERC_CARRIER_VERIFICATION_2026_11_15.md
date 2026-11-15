@@ -1,7 +1,7 @@
 # BACE `.derc` carrier adapter verification (ADR 0076)
 
 15 November 2026. Baseline: `aa2555e`. First BACE ADR that
-touches `dap-storage`. `.derc` format minor-version bump
+touches `bradian-storage`. `.derc` format minor-version bump
 v1.0 → v1.1 with additive feature flag and per-page trailer
 byte.
 
@@ -13,16 +13,16 @@ Clippy clean on `cargo clippy --workspace --all-targets
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-storage` | Passed |
+| `cargo check -p bradian-storage` | Passed |
 | `cargo test --workspace --locked` | 1005 passed, 0 failed |
-| `cargo test -p dap-storage --test derc_bace` | 10 passed |
+| `cargo test -p bradian-storage --test derc_bace` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## What landed
 
 ### R.1 — cross-crate dep + entry points
 
-`crates/dap-storage/Cargo.toml`:
+`crates/bradian-storage/Cargo.toml`:
 
 ```toml
 bradian-relational = { path = "../bradian-relational" }
@@ -33,7 +33,7 @@ added, storing an `Option<BaceWiring>` on each struct.
 
 ### R.2 — v1.1 format bits
 
-`crates/dap-storage/src/segment/format.rs`:
+`crates/bradian-storage/src/segment/format.rs`:
 
 ```rust
 pub const SEGMENT_VERSION_MINOR_V1_1: u16 = 1;
@@ -141,7 +141,7 @@ landed here.
 
 ## Architectural note (§5 Q2 landed as drafted)
 
-`dap-storage` now directly depends on `bradian-relational`.
+`bradian-storage` now directly depends on `bradian-relational`.
 This flips the historical direction (relational on analytical)
 but is the minimum-churn path per the ADR §4 alternative A
 rejection. If future coupling becomes a problem, carving
@@ -156,7 +156,7 @@ in this ADR locks in the current module layout.
   writes.
 - Add encryption.
 - Rewrite any existing v1.0 segment.
-- Extend `dap-admin` CLI for `.derc` BACE.
+- Extend `bradian-admin` CLI for `.derc` BACE.
 - Touch the `.derc` partition WAL, manifest, zone-map, or
   compaction code beyond the writer/reader entry points.
 - Make a tamper-evidence security claim.

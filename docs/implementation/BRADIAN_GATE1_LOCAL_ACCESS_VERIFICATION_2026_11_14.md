@@ -6,7 +6,7 @@ Stable task G1-LOCAL-ACCESS in fixed Gates 0–9. Gate 1 remains active.
 ## Executed result
 
 **792 Rust tests passed, 0 failed, 0 ignored**. Workspace compilation and
-Clippy (`-p bradian-relational -p dap-admin --all-targets -- -D warnings`)
+Clippy (`-p bradian-relational -p bradian-admin --all-targets -- -D warnings`)
 passed. CI remains manual-only. No dependency, lockfile, persistent format,
 SQL grammar or default isolation changed.
 
@@ -15,15 +15,15 @@ The checkout was restored from published `main` before implementation.
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p bradian-relational -p dap-admin` | Passed |
+| `cargo check -p bradian-relational -p bradian-admin` | Passed |
 | `cargo test --workspace` | 792 passed, 0 failed, 0 ignored |
 | `cargo test -p bradian-relational --lib local_access` | 7 passed |
-| `cargo test -p dap-admin` | 20 passed (existing CLI private-root test still green under the delegated helper) |
-| `cargo clippy -p bradian-relational -p dap-admin --all-targets -- -D warnings` | Passed |
+| `cargo test -p bradian-admin` | 20 passed (existing CLI private-root test still green under the delegated helper) |
+| `cargo clippy -p bradian-relational -p bradian-admin --all-targets -- -D warnings` | Passed |
 
 ## Implemented and exercised
 
-The POSIX private-root invariants previously embedded in `dap-admin` now live
+The POSIX private-root invariants previously embedded in `bradian-admin` now live
 in `bradian_relational::local_access`. The helper exposes:
 
 - `PrivateRootPolicy::RequireExisting` and `PrivateRootPolicy::CreateIfMissing`.
@@ -33,7 +33,7 @@ in `bradian_relational::local_access`. The helper exposes:
   `symlink_metadata`, non-directories, any `mode & 0o077 != 0`, and
   creating the directory with mode `0o700` on `CreateIfMissing`.
 
-`dap-admin/src/local_sql.rs::private_root` delegates to the helper and maps
+`bradian-admin/src/local_sql.rs::private_root` delegates to the helper and maps
 each `LocalAccessError` variant to the same `anyhow` message the CLI used
 before, so existing CLI tests (`public_symlink_and_non_directory_roots_are_refused_without_changing_permissions`, mode-0o755 refusal, 0o700 creation)
 remain byte-compatible.

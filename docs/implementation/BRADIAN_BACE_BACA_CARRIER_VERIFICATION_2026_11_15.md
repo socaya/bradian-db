@@ -22,7 +22,7 @@ Clippy clean on `cargo clippy --workspace --all-targets
 |---|---|
 | `cargo check --workspace --tests` | Passed |
 | `cargo test --workspace --locked` | 1046 passed, 0 failed |
-| `cargo test -p dap-storage --test derc_baca` | 10 passed |
+| `cargo test -p bradian-storage --test derc_baca` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## What landed
@@ -46,7 +46,7 @@ test.
 
 ### R.2 — Format bits + writer/reader
 
-`dap-storage/src/segment/format.rs`:
+`bradian-storage/src/segment/format.rs`:
 
 ```rust
 pub const SEGMENT_VERSION_MINOR_V1_3: u16 = 3;

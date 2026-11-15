@@ -4,7 +4,7 @@
 drafted defaults; implementation landed in the same commit as
 the R.1–R.4 sub-slices from §3.6.
 
-First ADR in the BACE series that touches `dap-storage`. `.derc`
+First ADR in the BACE series that touches `bradian-storage`. `.derc`
 format minor-version bump v1.0 → v1.1. New
 `FeatureFlags::BACE_PAGE_ENVELOPE` plus per-page trailer byte
 infrastructure. Legacy v1.0 segments stay byte-identical; v1.0
@@ -13,24 +13,24 @@ readers accept both.
 
 Implementation summary:
 
-- `crates/dap-storage/Cargo.toml` — direct dep on
+- `crates/bradian-storage/Cargo.toml` — direct dep on
   `bradian-relational` (first cross-crate BACE dep).
-- `crates/dap-storage/src/segment/format.rs` — new
+- `crates/bradian-storage/src/segment/format.rs` — new
   `SEGMENT_VERSION_MINOR_V1_1 = 1`, new
   `FeatureFlags::BACE_PAGE_ENVELOPE = 1 << 5`,
   `ALL_SUPPORTED_V1_1` superset, `is_subset_supported_v1_1`
   helper, new `BaceEnvelopeTag` enum.
-- `crates/dap-storage/src/segment/writer.rs` —
+- `crates/bradian-storage/src/segment/writer.rs` —
   `SegmentWriter::new_with_bace`, `bace_wiring` field, writer
   emits BACE v1 envelope (via
   `bradian_relational::bace::envelope::write_envelope`) when
   `bace_active`, plus per-page trailer byte.
-- `crates/dap-storage/src/segment/reader.rs` —
+- `crates/bradian-storage/src/segment/reader.rs` —
   `SegmentReader::open_with_bace`, `_bace_feature_active` flag,
   reader reads trailer byte and dispatches on
   `BaceEnvelopeTag::{None, BaceV1, BacaV1Reserved}` with clean
   errors for unknown/reserved values.
-- `crates/dap-storage/tests/derc_bace.rs` — 10 new integration
+- `crates/bradian-storage/tests/derc_bace.rs` — 10 new integration
   tests covering §3.5 compliance.
 
 1005 workspace tests pass (995 → 1005); clippy clean on
@@ -93,7 +93,7 @@ Implementation summary:
   - `1` — BACE v1 (`BACE` magic from ADR 0062)
   - `2` — reserved for BACA (ADR 0075); not emitted by this
     ADR.
-- **Cross-crate dep:** `dap-storage/Cargo.toml` gains a direct
+- **Cross-crate dep:** `bradian-storage/Cargo.toml` gains a direct
   dep on `bradian-relational` (currently has no such
   dependency). This is a significant architectural coupling
   and is called out in §5 Q2 for explicit owner review.
@@ -124,7 +124,7 @@ Implementation summary:
   `Dictionary`, etc.). BACE is an outer wrapper around
   whatever the inner codec produces.
 - **Dictionary-scope integration** (BACE §4.2). Separate ADR.
-- **CLI exposure on `dap-admin` operator commands that touch
+- **CLI exposure on `bradian-admin` operator commands that touch
   `.derc`** (`ExportSnapshot`, `RestoreSnapshot`,
   `CompactPartition`). Follow-up ADR extends the CLI; this
   ADR adds only library APIs.
@@ -221,12 +221,12 @@ minimal. Specifically:
 pub struct SegmentWriter { ... }
 
 impl SegmentWriter {
-    pub fn new(file: File, options: SegmentOptions) -> DapResult<Self>;
+    pub fn new(file: File, options: SegmentOptions) -> BradianResult<Self>;
     pub fn new_with_bace(
         file: File,
         options: SegmentOptions,
         wiring: BaceWiring,
-    ) -> DapResult<Self>;
+    ) -> BradianResult<Self>;
 }
 ```
 
@@ -257,8 +257,8 @@ Per-page write path:
 
 ```rust
 impl SegmentReader {
-    pub fn open(path: &Path) -> DapResult<Self>;
-    pub fn open_with_bace(path: &Path, wiring: BaceWiring) -> DapResult<Self>;
+    pub fn open(path: &Path) -> BradianResult<Self>;
+    pub fn open_with_bace(path: &Path, wiring: BaceWiring) -> BradianResult<Self>;
 }
 ```
 
@@ -284,7 +284,7 @@ Reader flow:
 
 ### 3.4 Cross-crate dependency
 
-`dap-storage/Cargo.toml` gains:
+`bradian-storage/Cargo.toml` gains:
 
 ```toml
 bradian-relational = { path = "../bradian-relational" }
@@ -301,9 +301,9 @@ Imports used:
 
 **This coupling is non-trivial.** It flips the historical
 boundary that `bradian-relational` (the relational engine)
-could depend on `dap-storage` (the analytical engine) but not
+could depend on `bradian-storage` (the analytical engine) but not
 the other way around. The coupling is actually *away* from
-`bradian-relational` — `dap-storage` depends on it. If this
+`bradian-relational` — `bradian-storage` depends on it. If this
 is objectionable, the alternative is to move the BACE
 subsystem to its own crate (`bradian-bace`) that both
 engines consume. See §4 and §5 Q2.
@@ -355,7 +355,7 @@ R.x-style implementation workflow analogous to ADR 0065:
 
 **A. Move BACE to its own crate (`bradian-bace`).** Cleaner
 dependency direction — both `bradian-relational` and
-`dap-storage` depend on `bradian-bace` separately. Rejected
+`bradian-storage` depend on `bradian-bace` separately. Rejected
 for v1 ADR scope: `bradian-relational::bace` is already
 depended on by every consumer within that crate; splitting
 it to a sibling now is a separate refactor. Future ADR can
@@ -385,7 +385,7 @@ future BACA tamper-evidence path.
 1. **Per-page trailer byte vs bincode PageMeta field.**
    Draft: trailer byte (Option C) for v1.0 compat.
    Confirm.
-2. **Cross-crate dep: `dap-storage → bradian-relational`.**
+2. **Cross-crate dep: `bradian-storage → bradian-relational`.**
    Draft: YES, direct `path = "../bradian-relational"`
    addition. Alternative: carve `bradian-bace` out as a
    sibling crate. Confirm the coupling direction.
@@ -420,7 +420,7 @@ future BACA tamper-evidence path.
 
 ## 7. Dependencies this ADR would add
 
-- `dap-storage` → `bradian-relational` (new path dep). The
+- `bradian-storage` → `bradian-relational` (new path dep). The
   biggest architectural item in this ADR.
 - No new workspace crate pins.
 
@@ -432,7 +432,7 @@ future BACA tamper-evidence path.
   writes.
 - Add encryption.
 - Rewrite any existing v1.0 segment.
-- Extend `dap-admin` CLI for `.derc` BACE.
+- Extend `bradian-admin` CLI for `.derc` BACE.
 - Touch the `.derc` partition WAL, manifest, zone-map, or
   compaction code beyond the writer/reader entry points.
 - Make a tamper-evidence security claim (that comes with
@@ -446,7 +446,7 @@ future BACA tamper-evidence path.
    direction).
 3. Implementation satisfying every item in §3.5, delivered
    as the R.1–R.4 sub-slices from §3.6 if accepted.
-4. No regressions in `dap-storage` test suite or any
-   consumer tests (`dap-planner`, `dap-views`, etc.).
+4. No regressions in `bradian-storage` test suite or any
+   consumer tests (`bradian-planner`, `bradian-views`, etc.).
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.

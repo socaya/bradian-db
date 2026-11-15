@@ -17,9 +17,9 @@ Clippy clean on `cargo clippy --workspace --all-targets
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-storage` | Passed |
+| `cargo check -p bradian-storage` | Passed |
 | `cargo test --workspace --locked` | 1056 passed, 0 failed |
-| `cargo test -p dap-storage --test multi_page` | 10 passed |
+| `cargo test -p bradian-storage --test multi_page` | 10 passed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
 ## What landed
@@ -140,7 +140,7 @@ concrete.
 3. Every §3.5 item 1–10 covered by at least one test.
 4. §3.5 item 10 PASSED with the small-page adjustment
    recorded.
-5. No regressions in any existing dap-storage, bradian-
+5. No regressions in any existing bradian-storage, bradian-
    relational, or workspace test.
 
 ## What this ADR explicitly does NOT do (unchanged)

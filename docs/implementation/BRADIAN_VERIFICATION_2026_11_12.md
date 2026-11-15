@@ -16,9 +16,9 @@ resolution. Automatic GitHub Actions triggers remain disabled.
 | `cargo check --workspace --all-features --locked` | Passed |
 | `cargo test --workspace --all-features --locked --no-fail-fast` | 550 passed; no failures/ignored tests |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `npm ci --no-audit --no-fund` in `apps/dap-ui` | Passed; tested lockfile reproduced |
-| `npm run typecheck` in `apps/dap-ui` | Passed |
-| `npm run build` in `apps/dap-ui` | Passed; 99 modules built |
+| `npm ci --no-audit --no-fund` in `apps/bradian-ui` | Passed; tested lockfile reproduced |
+| `npm run typecheck` in `apps/bradian-ui` | Passed |
+| `npm run build` in `apps/bradian-ui` | Passed; 99 modules built |
 
 Cargo 1.100 emits unused manifest dependency/field advisories. There are no failing
 Rust compiler or Clippy diagnostics. Studio's build is static verification; there is

@@ -9,16 +9,16 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 | Source | Implemented responsibility | Important boundary |
 |---|---|---|
 | `bradian-relational` | Native catalog, typed rows, WAL, immutable checkpoint B+tree, caching, bounded SQL and opt-in durable historical transactions | Query/history/staging, backing/recovery maps, builds and serialized archive metadata are bounded; directory/I/O/cache/decoded metadata workspace, catalog/aggregate transaction/global admission and alternate engines remain open; no production isolation qualification |
-| `dap-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL output borrows typed results and admits bounded JSON lines; not remote SQL or a budget for legacy analytical commands |
-| `dap-core`, `dap-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
-| `dap-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
-| `dap-runtime`, `dap-planner`, `dap-views` | Analytical operators, planning and incremental data products | Full CBO/spill/permission/coherent HTAP requirements remain incomplete |
-| `dap-serving` | Axum analytical/DHIS2 routes with loopback bootstrap token restriction | Not a native relational wire service or complete identity/session boundary |
-| `dap-security` | Policy helpers, token, audit and standard-library-backed crypto primitives | Primitive tests do not demonstrate complete end-to-end enforcement or key custody |
-| `dap-distributed`, `dap-sources` | Inherited distribution/source integration components | Not proven consensus, shard ownership, distributed ACID or secure membership |
-| `dap-dhis2`, optional integration apps | Domain-specific adapters and analytical contracts | Must remain optional to the generic database kernel |
-| `apps/dap-ui` | Bradian Studio analytical/pre-release interface | No claim of authenticated general relational database administration |
-| `tests/dap-e2e`, crate test directories | Executed regression, recovery and analytical result fixtures | Linux synthetic evidence is not physical power-loss/platform certification |
+| `bradian-admin` | Operator executable, canonical bradian-db wrapper, native local SQL scripts and existing analytical administration | Local SQL output borrows typed results and admits bounded JSON lines; not remote SQL or a budget for legacy analytical commands |
+| `bradian-core`, `bradian-catalog` | Inherited analytical schemas, batches, predicates and metadata adapters | Distinct from the authoritative relational catalog |
+| `bradian-storage` | Inherited .derc segments, partition WAL, snapshots, compression and compaction | Not automatically a projection of relational commits |
+| `bradian-runtime`, `bradian-planner`, `bradian-views` | Analytical operators, planning and incremental data products | Full CBO/spill/permission/coherent HTAP requirements remain incomplete |
+| `bradian-serving` | Axum analytical/DHIS2 routes with loopback bootstrap token restriction | Not a native relational wire service or complete identity/session boundary |
+| `bradian-security` | Policy helpers, token, audit and standard-library-backed crypto primitives | Primitive tests do not demonstrate complete end-to-end enforcement or key custody |
+| `bradian-distributed`, `bradian-sources` | Inherited distribution/source integration components | Not proven consensus, shard ownership, distributed ACID or secure membership |
+| `bradian-dhis2`, optional integration apps | Domain-specific adapters and analytical contracts | Must remain optional to the generic database kernel |
+| `apps/bradian-ui` | Bradian Studio analytical/pre-release interface | No claim of authenticated general relational database administration |
+| `tests/bradian-e2e`, crate test directories | Executed regression, recovery and analytical result fixtures | Linux synthetic evidence is not physical power-loss/platform certification |
 
 ## Compatibility commitments
 
@@ -33,7 +33,7 @@ The fixed roadmap and master traceability matrix govern subsequent work.
 | Schema pin/catalog JSON | persistent catalog and history adapters | Empty default metadata preserves legacy bytes; unknown semantic commands/versions fail closed |
 | BRBKv001 and BRADIAN-HISTORY-BACKUP-V1 | native backup implementations | Receipt/manifest verification and staged new-root restore; CRC is not authentication |
 | .derc, dap-* crate names, analytical paths | inherited analytical subsystem | Preserve identifiers and wire compatibility until a separately tested migration exists |
-| dap-admin / bradian-db | operator command library | Legacy executable retained; canonical executable added; SQL output is a documented local JSON profile |
+| bradian-admin / bradian-db | operator command library | Legacy executable retained; canonical executable added; SQL output is a documented local JSON profile |
 
 HistoryLimits and HistoryUsage in runtime_limits expose process-local retained-history policy/counters; durable MVCC, typed/SQL adapters, migration and restore propagate explicit limits. Policy is not persisted and no format or dependency changed. See [ADR 0043](../adr/0043-retained-history-admission.md).
 

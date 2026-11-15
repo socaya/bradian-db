@@ -52,5 +52,5 @@ its own review.
   `Unsupported` there.
 - Enterprise identity (SSO/mTLS session binding).
 
-No persistent format, wire protocol or SQL grammar change. `dap-admin`
+No persistent format, wire protocol or SQL grammar change. `bradian-admin`
 maps the new variant to its existing anyhow message pattern.

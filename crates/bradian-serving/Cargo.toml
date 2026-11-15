@@ -1,0 +1,36 @@
+[package]
+name = "bradian-serving"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "HTTP/JSON analytical API (axum)"
+
+[dependencies]
+bradian-core     = { workspace = true }
+bradian-catalog  = { workspace = true }
+bradian-storage  = { workspace = true }
+bradian-runtime  = { workspace = true }
+bradian-planner  = { workspace = true }
+bradian-ingest   = { workspace = true }
+bradian-views    = { workspace = true }
+bradian-dhis2    = { workspace = true }
+bradian-security = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+tokio        = { workspace = true }
+axum         = { workspace = true }
+tower        = { workspace = true }
+tower-http   = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot  = { workspace = true }
+blake3       = { workspace = true }
+
+[dev-dependencies]
+tempfile     = { workspace = true }
+tokio        = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

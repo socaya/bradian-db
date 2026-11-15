@@ -34,7 +34,7 @@ mvn test
 1. Start DAP in a shell:
    ```bash
    cd ~/projects/msdcse-project/dap
-   cargo run -p dap-admin --release -- serve --root /tmp/dap-data --bind 127.0.0.1:8080
+   cargo run -p bradian-admin --release -- serve --root /tmp/dap-data --bind 127.0.0.1:8080
    ```
 2. Put DHIS2 on the DAP backend. In `dhis.conf`:
    ```properties

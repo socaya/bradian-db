@@ -1,0 +1,27 @@
+[package]
+name = "bradian-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Column batches, vectorized operators, scheduler, spill"
+
+[dependencies]
+bradian-core    = { workspace = true }
+bradian-storage = { workspace = true }
+serde       = { workspace = true, features = ["derive"] }
+thiserror   = { workspace = true }
+ahash       = { workspace = true }
+rayon       = { workspace = true }
+smallvec    = { workspace = true }
+tracing     = { workspace = true }
+parking_lot = { workspace = true }
+bincode     = { workspace = true }
+tempfile    = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+rand        = { workspace = true }
+rand_chacha = { workspace = true }

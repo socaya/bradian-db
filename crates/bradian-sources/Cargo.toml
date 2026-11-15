@@ -1,0 +1,21 @@
+[package]
+name = "bradian-sources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Generic data-source adapters (CSV, JSON Lines, Arrow IPC, SQL CDC) for DAP"
+
+[dependencies]
+bradian-core    = { workspace = true }
+bradian-ingest  = { workspace = true }
+bradian-storage = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }

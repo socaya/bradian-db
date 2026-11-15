@@ -15,8 +15,8 @@ page or WAL envelope formats changed. Automatic CI remains manual-only.
 | `cargo check --workspace --all-features --locked` | Passed |
 | `cargo test --workspace --all-features --locked --no-fail-fast` | 600 passed; no failed/ignored tests |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `npm run typecheck` in `apps/dap-ui` | Passed |
-| `npm run build` in `apps/dap-ui` | Passed |
+| `npm run typecheck` in `apps/bradian-ui` | Passed |
+| `npm run build` in `apps/bradian-ui` | Passed |
 | `git diff --cached --check` | Passed before publication |
 
 Cargo continues to emit the existing unused manifest dependency/field advisories.

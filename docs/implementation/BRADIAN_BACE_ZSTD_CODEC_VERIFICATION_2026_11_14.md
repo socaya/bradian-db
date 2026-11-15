@@ -23,7 +23,7 @@ Clippy clean on `bradian-relational --all-targets`.
 
 Added `zstd = { workspace = true }` as a direct dep. Workspace pin
 is unchanged (`zstd = "0.13"`, `default-features = false`); already
-on the Cargo.lock graph via `dap-storage`.
+on the Cargo.lock graph via `bradian-storage`.
 
 ### `crates/bradian-relational/src/bace/codec.rs`
 

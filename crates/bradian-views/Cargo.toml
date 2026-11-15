@@ -1,0 +1,24 @@
+[package]
+name = "bradian-views"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Incremental materialized views + retractions"
+
+[dependencies]
+bradian-core    = { workspace = true }
+bradian-catalog = { workspace = true }
+bradian-storage = { workspace = true }
+bradian-runtime = { workspace = true }
+bradian-dhis2   = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+ahash       = { workspace = true }
+parking_lot = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }

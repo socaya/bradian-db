@@ -61,7 +61,7 @@ Implementation summary:
 - Non-goals (explicit, library-wide): this ADR does NOT
   implement any cryptographic algorithm. It uses BLAKE3's
   audited keyed-hash mode via the existing `blake3`
-  workspace dependency (already used by `dap-security`).
+  workspace dependency (already used by `bradian-security`).
 
 ## 2. Scope of this ADR
 
@@ -269,7 +269,7 @@ key mismatch.
 is a separate threat model that drags in nonce management,
 header-vs-body AAD plumbing, and backup/export semantics.
 ChaCha20-Poly1305 is already in the workspace via
-`dap-security`; a future ADR can add an encrypted variant
+`bradian-security`; a future ADR can add an encrypted variant
 under a third envelope family (e.g., `BACZ` or `BACE+E`).
 
 **B. HMAC-SHA256 instead of keyed BLAKE3.** Rejected: BLAKE3
@@ -368,7 +368,7 @@ keys. No new CLI flags.
   (`RowStore`, `MvccStore`, `DurableMvccStore`,
   `TypedMvccStore`, `DurableTypedStore`, the SQL engines,
   the backup carriers, the lifecycle coordinator, the
-  analytical `dap-storage` crate).
+  analytical `bradian-storage` crate).
 - Extend `BaceWiring`.
 - Add CLI exposure.
 - Make a production security claim.
@@ -392,7 +392,7 @@ keys. No new CLI flags.
    - `BaceAuthentication::Debug` does not print key bytes
      (manual tests of the format string are included).
 5. No regressions in any existing `bradian-relational` or
-   `dap-admin` test.
+   `bradian-admin` test.
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.
 This ADR landing does NOT constitute shipping a security

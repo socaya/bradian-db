@@ -190,8 +190,8 @@ I highlight the **structural** gaps.
 ### 4.4 OLAP and HTAP (§16: BRD-OLAP-*, BRD-HTAP-*)
 
 - **BRD-OLAP-001/002/003** — INHERITED from DER. Vectorized
-  operators, CBO, incremental views exist in `dap-runtime` /
-  `dap-views` but are not fed by committed transactional state.
+  operators, CBO, incremental views exist in `bradian-runtime` /
+  `bradian-views` but are not fed by committed transactional state.
 - **BRD-HTAP-001/002/003** — OPEN. Requires commit-consistent
   column projection + watermark + staleness contract. Blocked on
   mutable storage (plan §5.1).
@@ -210,7 +210,7 @@ gate and cannot be declared complete because local ACID passes."
 - **BRD-SEC-001 authentication, MFA, secure sessions** — Bootstrap
   token + private-root UID/mode. Not enterprise identity.
 - **BRD-SEC-002 RBAC/ABAC, row/column/tenant policies end-to-end**
-  — Policy helpers in `dap-security`, no authoritative enforcement.
+  — Policy helpers in `bradian-security`, no authoritative enforcement.
 - **BRD-SEC-003 TLS/mTLS and managed at-rest encryption** —
   Primitives exist; no native transport.
 - **BRD-SEC-004–012** — All PARTIAL or OPEN. Secrets rotation,

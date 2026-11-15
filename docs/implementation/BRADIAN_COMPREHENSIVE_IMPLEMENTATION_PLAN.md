@@ -28,7 +28,7 @@ Copied here so every reader sees them before picking up a task:
    runs.
 5. **No compatibility shims for unused code.** Deletion is preferred over
    `#[cfg(todo)]`. New flags only when behavior would otherwise regress.
-6. **Legacy DAP identifiers (`dap-*`, `.derc`, `apps/dap-ui/`) stay.**
+6. **Legacy DAP identifiers (`dap-*`, `.derc`, `apps/bradian-ui/`) stay.**
    Bulk rename is not in scope until a migration + compatibility suite
    exists. Visible branding is Bradian Database Systems / Bradian Studio.
 
@@ -213,7 +213,7 @@ feature-flagged co-existence until mature.
 
 ### 5.3 Analytical planner integration
 
-The existing planner in `dap-planner` is scoped to the analytical engine.
+The existing planner in `bradian-planner` is scoped to the analytical engine.
 Integration tasks:
 
 - Unified binder that recognises both transactional and columnar tables.
@@ -263,7 +263,7 @@ Not accepted.
 
 ### 8.1 Bradian Studio (web UI)
 
-The existing `apps/dap-ui/` is a React scaffold with a shell, not a
+The existing `apps/bradian-ui/` is a React scaffold with a shell, not a
 production UI. The SRS §11 enumerates: Server Overview, Database Explorer,
 Table Designer, SQL Workbench, Cluster, Security, Audit, Monitoring, Jobs.
 
@@ -326,7 +326,7 @@ Not accepted.
 
 | Task |
 |---|
-| Reproducible benchmark harness (`dap-benchmark` + published results) |
+| Reproducible benchmark harness (`bradian-benchmark` + published results) |
 | Workload corpora with documented hardware baselines |
 | Public reproduction kit |
 | Cross-platform release pipeline |
@@ -356,7 +356,7 @@ depends on:
 
 Retained as an inherited adapter. Not part of the Bradian normative scope.
 Tasks: keep DHIS2 wire endpoints compatible until a versioned replacement
-is published; migrate dap-ui identifiers once Studio ships.
+is published; migrate bradian-ui identifiers once Studio ships.
 
 ### 12.4 CI and release
 

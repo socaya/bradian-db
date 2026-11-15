@@ -6,17 +6,17 @@ Stable task G1-LOCAL-ACCESS in fixed Gates 0–9. Gate 1 remains active.
 ## Executed result
 
 **840 Rust tests passed, 0 failed, 0 ignored**. Clippy clean on
-`bradian-relational --all-targets` and `dap-admin --all-targets`. CI
+`bradian-relational --all-targets` and `bradian-admin --all-targets`. CI
 remains manual-only. No persistent format, wire protocol or SQL grammar
 change. The crate-level unsafe policy was relaxed from `forbid` to
 `deny` to allow the single documented `libc::geteuid()` call site.
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p bradian-relational -p dap-admin` | Passed |
+| `cargo check -p bradian-relational -p bradian-admin` | Passed |
 | `cargo test --workspace` | 840 passed, 0 failed |
 | `cargo test -p bradian-relational --lib local_access` | 10 passed (+3 new) |
-| `cargo clippy -p bradian-relational -p dap-admin --all-targets -- -D warnings` | Passed |
+| `cargo clippy -p bradian-relational -p bradian-admin --all-targets -- -D warnings` | Passed |
 
 ## Implemented and exercised
 
@@ -35,7 +35,7 @@ new `mode_refusal_takes_precedence_over_uid_mismatch` test proves mode
 refusal is reported first, so operators fix permissions before
 ownership.
 
-The `dap-admin` CLI's `private_root()` handler maps `WrongOwner` to an
+The `bradian-admin` CLI's `private_root()` handler maps `WrongOwner` to an
 anyhow message naming the actual and expected UIDs; existing CLI tests
 still pass under the amended helper.
 

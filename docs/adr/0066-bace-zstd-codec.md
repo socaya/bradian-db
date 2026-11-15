@@ -8,7 +8,7 @@ drafted defaults; implementation landed in the same commit:
 - `crates/bradian-relational/src/bace/registry.rs` —
   `BuiltInRegistry::new()` now registers RAW + ZSTD.
 - `crates/bradian-relational/Cargo.toml` — direct `zstd = { workspace = true }`
-  dep added (was already a transitive dep via `dap-storage`).
+  dep added (was already a transitive dep via `bradian-storage`).
 - `crates/bradian-relational/tests/row_store_bace.rs` — 4 new
   integration tests; `src/bace/codec.rs` carries 6 new unit tests
   covering the §3.6 golden corpus and §3.4 bounded-decode paths.
@@ -50,7 +50,7 @@ coalescing; that work is a separate future ADR.
   in place per ADR 0060 §5 item 4; the BACE ZSTD codec is a
   separate, policy-governed integration (not a reuse of the
   `.derc` layer).
-- Workspace already pins `zstd = "0.13"` for `dap-storage`; this
+- Workspace already pins `zstd = "0.13"` for `bradian-storage`; this
   ADR adds it as a direct dep on `bradian-relational`.
 
 ## 2. Scope of this ADR
@@ -313,7 +313,7 @@ does not expose a `parameters` schema yet. Adding a per-codec
 parameter needs an ADR 0061 amendment first; the current ADR
 hardcodes level 3 (matches `.derc`).
 
-**E. Reuse `dap-storage`'s existing `.derc` ZSTD wrap via a
+**E. Reuse `bradian-storage`'s existing `.derc` ZSTD wrap via a
 shared helper crate.** Code reuse. Rejected: `.derc` uses ZSTD
 without the BACE envelope. Collapsing the two would couple the
 BACE lifecycle to `.derc`'s v1 format and vice versa. Each
@@ -368,7 +368,7 @@ subsystem maintains its own compression wrapper.
 ## 7. Dependencies this ADR would add
 
 `zstd = "0.13"` as a **direct** dep on `bradian-relational`
-(currently only in `dap-storage` as a direct dep; already in the
+(currently only in `bradian-storage` as a direct dep; already in the
 workspace pin and Cargo.lock graph). The crate is in the CLAUDE.md
 §5 allowlist under "Compression" (`zstd`, `lz4_flex`). No new
 transitive dep.

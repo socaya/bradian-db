@@ -95,7 +95,7 @@ Nightly at `analytics.rebuild.cron` →
 `AnalyticsTableManagerFactory.get("dap").prepareRebuild()` → DHIS2 streams rows out of
 the operational PostgreSQL in batches of `analytics.database.ingest.batch_rows` →
 `ingestBatch(...)` POSTs each batch to `/api/analytics/v1/ingest` → DAP applies via the
-same canonical-change path as any other source (`dap-ingest`), with version fences +
+same canonical-change path as any other source (`bradian-ingest`), with version fences +
 quarantine → `finaliseRebuild()` → the engine flushes + compacts on its own schedule.
 
 ## Guarantees DAP keeps for DHIS2

@@ -15,8 +15,8 @@ Existing lockfiles and dependencies were preserved. Automatic CI remains manual-
 | `cargo check --workspace --all-features --locked` | Passed |
 | `cargo test --workspace --all-features --locked --no-fail-fast` | 611 passed; no failures or ignored tests |
 | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
-| `npm run typecheck` in `apps/dap-ui` | Passed |
-| `npm run build` in `apps/dap-ui` | Passed |
+| `npm run typecheck` in `apps/bradian-ui` | Passed |
+| `npm run build` in `apps/bradian-ui` | Passed |
 
 Existing unused manifest dependency/field advisories remain. No failing compiler or
 Clippy diagnostics remain in these runs.

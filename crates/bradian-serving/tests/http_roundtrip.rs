@@ -1,0 +1,542 @@
+//! HTTP-level integration test using tower's `oneshot`.
+
+use std::sync::Arc;
+
+use axum::body::to_bytes;
+use axum::http::{Request, StatusCode};
+use bradian_catalog::metadata::Dataset;
+use bradian_catalog::{Catalog, MetadataObject};
+use bradian_core::{Column, LogicalType, PeriodType, Schema, Uid, Value};
+use bradian_serving::{router, AnalyticsEngine, ServerState};
+use bradian_storage::PartitionOptions;
+use serde_json::{json, Value as JsonValue};
+use tempfile::tempdir;
+use tower::ServiceExt;
+
+const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+fn uid(s: &str) -> Uid {
+    Uid::new(s).unwrap()
+}
+
+fn seed(root: &std::path::Path) -> Arc<bradian_serving::AnalyticsEngine> {
+    let cat = Catalog::new();
+    cat.apply(vec![MetadataObject::Dataset(Dataset {
+        uid: uid("dsAAAAAAAAA"),
+        name: "Agg Dataset".into(),
+        period_type: PeriodType::Monthly,
+        data_elements: vec![uid("deAAAAAAAAA")],
+    })])
+    .unwrap();
+
+    let engine = Arc::new(AnalyticsEngine::new(root.to_path_buf(), Arc::new(cat)));
+
+    let schema = Schema::new(vec![
+        Column::new("ou", LogicalType::Uid).required(),
+        Column::new("period", LogicalType::Period).required(),
+        Column::new("de", LogicalType::Uid).required(),
+        Column::new("value", LogicalType::F64),
+    ])
+    .unwrap();
+    let p = engine
+        .open_partition(PartitionOptions {
+            dataset_id: "dsAAAAAAAAA".into(),
+            partition_id: "p1".into(),
+            schema,
+            primary_key_columns: vec!["ou".into(), "period".into(), "de".into()],
+            flush_rows: 1024,
+            flush_bytes: 1 << 24,
+        })
+        .unwrap();
+
+    for (ou, per, v) in &[
+        ("ouAAAAAAAAA", "202601", 10.0),
+        ("ouBBBBBBBBB", "202601", 20.0),
+        ("ouAAAAAAAAA", "202602", 12.0),
+    ] {
+        p.upsert_row(
+            vec![
+                Value::Str((*ou).into()),
+                Value::Str((*per).into()),
+                Value::Str("deAAAAAAAAA".into()),
+                Value::F64(*v),
+            ],
+            1,
+        )
+        .unwrap();
+    }
+    p.flush().unwrap();
+
+    engine
+}
+
+#[tokio::test]
+async fn healthz_returns_ok() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let resp = app
+        .oneshot(Request::get("/healthz").header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn query_endpoint_returns_rows_with_provenance() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou"],
+            "period": {"range": {"period_type": "MONTHLY", "start": "202601", "end": "202602"}},
+            "filters": [],
+            "order_by": [],
+        }
+    });
+
+    let resp = app
+        .oneshot(
+            Request::post("/api/analytics/v1/query")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "body: {:?}", resp);
+
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let payload: JsonValue = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["columns"][0], "ou");
+    assert_eq!(payload["columns"][1], "sum_value");
+    let rows = payload["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // Provenance stamp.
+    assert!(payload["provenance"]["metadata_revision"].is_string());
+    assert!(payload["provenance"]["is_exact"].as_bool().unwrap_or(false));
+    assert!(payload["metrics"]["scanned_rows"].as_u64().unwrap() >= 3);
+}
+
+#[tokio::test]
+async fn drilldown_applies_extra_filters_and_caps_limit() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou", "period"],
+            "filters": [],
+            "order_by": [],
+        },
+        "drill_filters": [
+            {"op": "eq", "column": "ou", "value": {"Str": "ouAAAAAAAAA"}}
+        ],
+        "limit": 50
+    });
+    let resp = app
+        .oneshot(
+            Request::post("/api/analytics/v1/drilldown")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let rows = payload["rows"].as_array().unwrap();
+    // seed rows have 3 OUs; the drill filter keeps only ouAAAAAAAAA which appears in two
+    // periods -> 2 rows after group_by ou+period.
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r[0]["Str"] == "ouAAAAAAAAA"));
+}
+
+#[tokio::test]
+async fn data_products_register_and_list() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    // Empty catalogue.
+    let empty = app
+        .clone()
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::OK);
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(empty.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 0);
+
+    // Register one product.
+    let product = json!({
+        "id": "dp_anc_monthly",
+        "owner": "ncd-team",
+        "grain": ["ou", "period"],
+        "measures": ["sum_value"],
+        "description": "ANC monthly aggregate",
+        "consumers": [],
+        "freshness_contract": {
+            "max_staleness_seconds": 3600,
+            "consistency": "EDGE_STABLE"
+        }
+    });
+    let register = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/data-products")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(product.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(register.status(), StatusCode::OK);
+
+    // List now returns one product.
+    let list = app
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(list.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 1);
+    assert_eq!(payload[0]["id"], "dp_anc_monthly");
+}
+
+#[tokio::test]
+async fn data_product_get_by_id_and_delete() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    // Register.
+    let product = json!({
+        "id": "dp_malaria_weekly",
+        "owner": "malaria-team",
+        "grain": ["ou", "period"],
+        "measures": ["sum_cases"],
+        "description": "Malaria weekly aggregate",
+        "consumers": [],
+        "freshness_contract": {
+            "max_staleness_seconds": 600,
+            "consistency": "CENTRAL_ACKNOWLEDGED"
+        }
+    });
+    let register = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/data-products")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(product.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(register.status(), StatusCode::OK);
+
+    // GET by id returns the product.
+    let fetch = app
+        .clone()
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fetch.status(), StatusCode::OK);
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(fetch.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload["id"], "dp_malaria_weekly");
+    assert_eq!(payload["owner"], "malaria-team");
+
+    // GET for an unknown id returns 404.
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products/does_not_exist")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    // DELETE removes it.
+    let remove = app
+        .clone()
+        .oneshot(
+            Request::delete("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remove.status(), StatusCode::NO_CONTENT);
+
+    // Follow-up DELETE for the same id yields 404.
+    let remove_again = app
+        .clone()
+        .oneshot(
+            Request::delete("/api/analytics/v1/data-products/dp_malaria_weekly")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(remove_again.status(), StatusCode::NOT_FOUND);
+
+    // And the list is empty again.
+    let list = app
+        .oneshot(
+            Request::get("/api/analytics/v1/data-products")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let payload: JsonValue =
+        serde_json::from_slice(&to_bytes(list.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn explain_endpoint_returns_operator_tree() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "count_star"}],
+            "group_by": ["period"],
+            "filters": [],
+            "order_by": [],
+        }
+    });
+
+    let resp = app
+        .oneshot(
+            Request::post("/api/analytics/v1/query/explain")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let payload: JsonValue = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["root"]["name"], "HashAggregate");
+    assert_eq!(
+        payload["root"]["children"][0]["name"], "Filter",
+        "expected Filter under HashAggregate"
+    );
+}
+
+async fn poll_until_terminal(
+    app: &axum::Router,
+    job_id: &str,
+) -> JsonValue {
+    for _ in 0..200 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/analytics/v1/jobs/{job_id}"))
+                    .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let payload: JsonValue = serde_json::from_slice(
+                &to_bytes(resp.into_body(), 1 << 20).await.unwrap(),
+            )
+            .unwrap();
+            let status = payload["status"].as_str().unwrap_or("");
+            if matches!(status, "SUCCEEDED" | "FAILED" | "CANCELLED") {
+                return payload;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("job {job_id} never reached a terminal state");
+}
+
+#[tokio::test]
+async fn async_query_within_max_output_rows_succeeds() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou"],
+            "filters": [],
+            "order_by": [],
+        },
+        "max_output_rows": 100
+    });
+    let submit = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/jobs")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit.status(), StatusCode::ACCEPTED);
+    let record: JsonValue =
+        serde_json::from_slice(&to_bytes(submit.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let job_id = record["id"].as_str().unwrap().to_owned();
+
+    let terminal = poll_until_terminal(&app, &job_id).await;
+    assert_eq!(terminal["status"], "SUCCEEDED");
+    let rows = terminal["result"]["rows"].as_array().unwrap();
+    assert!(!rows.is_empty(), "query produced some rows");
+    assert!(rows.len() <= 100);
+}
+
+#[tokio::test]
+async fn async_query_exceeding_max_output_rows_fails_with_diagnostic() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    // Seed produces rows grouped by ou (2 groups). Cap at 1 so the result exceeds it.
+    let body = json!({
+        "request": {
+            "kind": "aggregate",
+            "dataset": "dsAAAAAAAAA",
+            "partition": "p1",
+            "measures": [{"op": "sum", "column": "value"}],
+            "group_by": ["ou"],
+            "filters": [],
+            "order_by": [],
+        },
+        "max_output_rows": 1
+    });
+    let submit = app
+        .clone()
+        .oneshot(
+            Request::post("/api/analytics/v1/jobs")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_TOKEN}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit.status(), StatusCode::ACCEPTED);
+    let record: JsonValue =
+        serde_json::from_slice(&to_bytes(submit.into_body(), 1 << 20).await.unwrap()).unwrap();
+    let job_id = record["id"].as_str().unwrap().to_owned();
+
+    let terminal = poll_until_terminal(&app, &job_id).await;
+    assert_eq!(terminal["status"], "FAILED");
+    let err = terminal["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("max_output_rows"),
+        "diagnostic names the enforced cap: '{err}'"
+    );
+    // The oversized result payload must not have landed in the registry.
+    assert!(terminal["result"].is_null() || terminal["result"] == JsonValue::Null);
+}
+
+#[tokio::test]
+async fn protected_api_denies_anonymous_and_invalid_token() {
+    let dir = tempdir().unwrap();
+    let engine = seed(dir.path());
+    let state = ServerState::new(engine);
+    state.register_bootstrap_admin(TEST_TOKEN).unwrap();
+    let app = router(state);
+
+    let anon = app.clone().oneshot(
+        Request::get("/api/analytics/v1/catalog")
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let invalid = app.clone().oneshot(
+        Request::get("/api/analytics/v1/catalog")
+            .header("authorization", "Bearer invalid")
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app.clone().oneshot(
+        Request::get("/api/analytics/v1/catalog")
+            .header("authorization", format!("Bearer {TEST_TOKEN}"))
+            .body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+
+    let health = app.oneshot(
+        Request::get("/healthz").body(axum::body::Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+}

@@ -7,7 +7,7 @@ Generate a cryptographically strong token with at least 32 non-whitespace charac
 Usage during local development:
 
 ```sh
-BRADIAN_API_TOKEN="<secure-value-injected-by-secret-manager>" cargo run -p dap-admin -- serve --root ./data --bind 127.0.0.1:8080
+BRADIAN_API_TOKEN="<secure-value-injected-by-secret-manager>" cargo run -p bradian-admin -- serve --root ./data --bind 127.0.0.1:8080
 ```
 
 Call the API with `Authorization: Bearer <token>`. No token or unknown token produces 401; a recognized non-administrator produces 403. Keep legacy HTTP API paths for compatibility.

@@ -19,7 +19,7 @@ embedded in frontend files. No current local helper establishes remote node trus
 
 | Threat | Current control/evidence | Remaining work |
 |---|---|---|
-| Unauthenticated analytical request | `dap-serving/tests/http_roundtrip.rs` exercises bootstrap route protection; health is intentionally public | Real sessions, expiry/revocation, scoped principals and transport qualification |
+| Unauthenticated analytical request | `bradian-serving/tests/http_roundtrip.rs` exercises bootstrap route protection; health is intentionally public | Real sessions, expiry/revocation, scoped principals and transport qualification |
 | Local cross-user row access | SQL CLI creates mode-0700 roots and rejects public mode bits/final symlinks; subprocess tests verify refusal | Owner/ACL/ancestor-race analysis and equivalent enforcement in every library/service path |
 | Library caller bypasses CLI checks | Explicitly trusted local embedding; no claim that the CLI secures all calls | Authoritative access context and negative path-equivalence tests |
 | Stolen plaintext WAL/backup | CRC/checkpoint verification detects accidental corruption | Integrated encryption, protected keys, archive authentication and key-recovery drills |

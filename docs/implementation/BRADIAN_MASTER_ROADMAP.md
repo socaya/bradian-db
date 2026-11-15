@@ -53,7 +53,7 @@ this does not sign off unresolved architecture decisions or production security.
 | G1-CATALOG | Implemented subset | Persistent catalog and schema/row validation tests; unsupported secondary/FK constraints remain explicit |
 | G1-STORAGE | Implemented subset | BRPG/BRWL codecs, immutable B+tree checkpoints, CRCs and exclusive store locks |
 | G1-TRANSACTION | Implemented subset | WAL atomicity, rollback, snapshots, conflict tests, savepoints and read validation; not full isolation-level conformance |
-| G1-CLI | Implemented | Canonical bradian-db and legacy dap-admin executables, local SQL scripts, explicit transaction/history modes and process tests |
+| G1-CLI | Implemented | Canonical bradian-db and legacy bradian-admin executables, local SQL scripts, explicit transaction/history modes and process tests |
 | G1-LOCAL-ACCESS | Partial | Shared `bradian_relational::local_access` enforces POSIX private-root invariants (symlink refusal, mode 0o700, non-directory refusal, effective-UID ownership, bounded create-if-missing) and the native SQL CLI delegates to it; POSIX ACLs, parent-path trust, Windows ACL and enterprise identity remain unqualified |
 | G1-INSTALL | Partial | Linux development install is exercised; portable release installers/signing/upgrades remain open |
 | G1-MEMORY | Partial | Query/history/staging, backing/recovery maps, build/metadata buffers, CLI lines, per-domain SQL/fallible-native active transactions, row-store + legacy-migration directory listings, decoded persistent-catalog state, decoded multi-table-domain state and in-memory MvccStore versions are controlled; I/O/cache, cross-engine totals and global budgets remain open |

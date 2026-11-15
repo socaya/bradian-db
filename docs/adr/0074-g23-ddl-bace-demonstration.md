@@ -91,7 +91,7 @@ scope.
   the sub-archive `.brp` files, and
   `restore_history_database_with_bace` round-trips through
   them.
-- No code changes in `bradian-relational` or `dap-admin`.
+- No code changes in `bradian-relational` or `bradian-admin`.
   The ADR explicitly adds only tests.
 
 **Explicitly out of scope** (each a separate future ADR):

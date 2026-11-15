@@ -6,14 +6,14 @@ passes on multi-page input, closing out the ADR 0079 §10
 
 Implementation summary:
 
-- `crates/dap-storage/src/zonemap.rs` — `ZoneMap::merge` and
+- `crates/bradian-storage/src/zonemap.rs` — `ZoneMap::merge` and
   `::empty` helpers.
-- `crates/dap-storage/src/bitmap.rs` — `Bitmap::slice` and
+- `crates/bradian-storage/src/bitmap.rs` — `Bitmap::slice` and
   `::extend_from` helpers.
-- `crates/dap-storage/src/column.rs` — `ColumnBuffer::slice`
+- `crates/bradian-storage/src/column.rs` — `ColumnBuffer::slice`
   for every variant except `DictIndex32` (§2 non-goal panics
   with a clear message; callers must guard).
-- `crates/dap-storage/src/segment/writer.rs` —
+- `crates/bradian-storage/src/segment/writer.rs` —
   `SegmentWriterOptions.max_rows_per_page: Option<usize>`
   (defaults to `None` for byte-identical pre-ADR-0081 output);
   `write_column` splits non-dict columns into N pages;
@@ -21,11 +21,11 @@ Implementation summary:
   `materialize_dict_to_utf8` helper for the writer's inner
   codec = PlainUtf8 case where the builder produced a
   DictIndex32 buffer.
-- `crates/dap-storage/src/segment/reader.rs` —
+- `crates/bradian-storage/src/segment/reader.rs` —
   `concat_buffers` implemented for Bool, I32, I64, F64,
   Decimal128, Utf8, Timestamp. `DictIndex32` still returns
   `Unsupported` with an ADR 0081 §2 reference.
-- `crates/dap-storage/tests/multi_page.rs` — 10 §3.5
+- `crates/bradian-storage/tests/multi_page.rs` — 10 §3.5
   integration tests.
 
 1056 workspace tests pass (1046 → 1056); clippy clean on
@@ -74,7 +74,7 @@ accepted.
   emits one page per column.
 - `SegmentReader::read_column` handles `pages.len() == 1`
   directly and routes `> 1` through `concat_buffers`, which
-  returns `DapError::unsupported("multi-page column
+  returns `BradianError::unsupported("multi-page column
   concatenation not implemented in v1")`.
 - Every ADR in the BACE workstream that touches `.derc`
   (0076, 0079, 0080) has been constrained by "single page
@@ -213,12 +213,12 @@ zone-map encoding used by the single-page path today.
 ### 3.4 Reader `concat_buffers`
 
 ```rust
-fn concat_buffers(col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> DapResult<ColumnBuffer> {
+fn concat_buffers(col: &ColumnMeta, pages: Vec<ColumnBuffer>) -> BradianResult<ColumnBuffer> {
     match col.physical_type {
         PhysicalType::I32 => concat_primitive_i32(pages),
         PhysicalType::I64 => concat_primitive_i64(pages),
         // ... one helper per variant ...
-        PhysicalType::DictIndex32 => Err(DapError::unsupported(
+        PhysicalType::DictIndex32 => Err(BradianError::unsupported(
             "multi-page dictionary columns not supported in ADR 0081; dict columns stay single-page",
         )),
         _ => ...
@@ -347,7 +347,7 @@ None.
 4. **§3.5 item 10 PASSES** (`v1.2 < v1.1` strict on
    multi-page redundant payload). If it fails, this ADR
    should be reconsidered.
-5. No regressions in any existing `dap-storage`,
+5. No regressions in any existing `bradian-storage`,
    `bradian-relational`, or workspace test.
 
 Only then can this ADR move from **PROPOSED** to **ACCEPTED**.

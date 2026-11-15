@@ -88,7 +88,7 @@ Owner review required before any code lands per CLAUDE.md §4.9.
 ### 3.1 Format version and feature flag
 
 ```rust
-// crates/dap-storage/src/segment/format.rs
+// crates/bradian-storage/src/segment/format.rs
 pub const SEGMENT_VERSION_MINOR_V1_4: u16 = 4;
 
 pub const COLUMN_DICT: u64 = 1 << 8;
@@ -302,7 +302,7 @@ None.
 3. Implementation satisfying every item in §3.5.
 4. §3.5 item 10 PASSED — v1.4 strictly smaller than v1.3 on
    the specified workload.
-5. No regressions in any dap-storage, bradian-relational, or
+5. No regressions in any bradian-storage, bradian-relational, or
    workspace test.
 6. The v1.3 → v1.4 feature-flag superset check preserved
    (`ALL_SUPPORTED_V1_3` subset of `ALL_SUPPORTED_V1_4`).

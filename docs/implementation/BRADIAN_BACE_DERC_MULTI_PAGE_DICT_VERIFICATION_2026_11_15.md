@@ -16,8 +16,8 @@ Clippy clean on `cargo clippy --workspace --all-targets
 
 | Executed check | Result |
 |---|---|
-| `cargo check -p dap-storage --locked` | Passed |
-| `cargo test -p dap-storage --test multi_page_dict --locked` | 10 passed |
+| `cargo check -p bradian-storage --locked` | Passed |
+| `cargo test -p bradian-storage --test multi_page_dict --locked` | 10 passed |
 | `cargo test --workspace --locked` | 1066 passed, 0 failed |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 
@@ -122,7 +122,7 @@ baseline that does not exist yet.
 4. §3.5 item 8 recorded honestly — no strict-smaller
    assertion against a hypothetical column-level-shared-dict
    baseline.
-5. No regressions in any dap-storage, bradian-relational, or
+5. No regressions in any bradian-storage, bradian-relational, or
    workspace test; 1056 → 1066 tests (10 new, 0 modified
    asserts broken, 1 asserted value flipped as required by
    the ADR).

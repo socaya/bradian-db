@@ -11,7 +11,7 @@ slice). Clippy clean. No code change.
 | Executed check | Result |
 |---|---|
 | `cargo test --workspace` | 848 passed |
-| `cargo clippy -p bradian-relational -p dap-admin --all-targets -- -D warnings` | Passed |
+| `cargo clippy -p bradian-relational -p bradian-admin --all-targets -- -D warnings` | Passed |
 | Link validation on `docs/operations/README.md` | All 11 guide links, 11 ADR links, 2 security links, 1 plan link resolve |
 
 ## Finding and action

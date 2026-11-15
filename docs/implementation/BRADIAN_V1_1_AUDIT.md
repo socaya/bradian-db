@@ -113,7 +113,7 @@ The original analytics-only API and file formats are not to be bulk-renamed. Exi
 cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cd apps/dap-ui
+cd apps/bradian-ui
 npm ci || npm install
 npm run typecheck
 npm run build

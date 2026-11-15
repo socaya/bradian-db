@@ -283,6 +283,161 @@ dependencies = [
 ]
 
 [[package]]
+name = "bradian-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-relational",
+ "bradian-serving",
+ "bradian-storage",
+ "clap",
+ "humantime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bradian-benchmark"
+version = "0.1.0"
+dependencies = [
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-runtime",
+ "bradian-storage",
+ "criterion",
+ "rand 0.8.8",
+ "rand_chacha",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "bradian-catalog"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "blake3",
+ "bradian-core",
+ "parking_lot",
+ "proptest",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "bradian-core"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "blake3",
+ "once_cell",
+ "proptest",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "bradian-dhis2"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bradian-catalog",
+ "bradian-core",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "bradian-distributed"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "blake3",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-planner",
+ "bradian-runtime",
+ "bradian-security",
+ "bradian-storage",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "bradian-e2e"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-ingest",
+ "bradian-planner",
+ "bradian-runtime",
+ "bradian-security",
+ "bradian-serving",
+ "bradian-storage",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "bradian-ingest"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-storage",
+ "parking_lot",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "bradian-planner"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-dhis2",
+ "bradian-runtime",
+ "bradian-storage",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "bradian-relational"
 version = "0.1.0"
 dependencies = [
@@ -296,6 +451,129 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "zstd",
+]
+
+[[package]]
+name = "bradian-runtime"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bincode",
+ "bradian-core",
+ "bradian-storage",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.8",
+ "rand_chacha",
+ "rayon",
+ "serde",
+ "smallvec",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "bradian-security"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "blake3",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-runtime",
+ "chacha20poly1305",
+ "parking_lot",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "bradian-serving"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-dhis2",
+ "bradian-ingest",
+ "bradian-planner",
+ "bradian-runtime",
+ "bradian-security",
+ "bradian-storage",
+ "bradian-views",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bradian-sources"
+version = "0.1.0"
+dependencies = [
+ "bradian-core",
+ "bradian-ingest",
+ "bradian-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "bradian-storage"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bincode",
+ "blake3",
+ "bradian-core",
+ "bradian-relational",
+ "byteorder",
+ "crc32fast",
+ "lz4_flex",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.8",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
+name = "bradian-views"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bradian-catalog",
+ "bradian-core",
+ "bradian-dhis2",
+ "bradian-runtime",
+ "bradian-storage",
+ "parking_lot",
+ "proptest",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -597,284 +875,6 @@ dependencies = [
  "generic-array",
  "rand_core 0.6.4",
  "typenum",
-]
-
-[[package]]
-name = "dap-admin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bradian-relational",
- "clap",
- "dap-catalog",
- "dap-core",
- "dap-serving",
- "dap-storage",
- "humantime",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dap-benchmark"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "dap-catalog",
- "dap-core",
- "dap-runtime",
- "dap-storage",
- "rand 0.8.8",
- "rand_chacha",
- "serde",
- "tempfile",
-]
-
-[[package]]
-name = "dap-catalog"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "blake3",
- "dap-core",
- "parking_lot",
- "proptest",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "dap-core"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "blake3",
- "once_cell",
- "proptest",
- "serde",
- "serde_json",
- "smallvec",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dap-dhis2"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "dap-catalog",
- "dap-core",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dap-distributed"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "blake3",
- "dap-catalog",
- "dap-core",
- "dap-planner",
- "dap-runtime",
- "dap-security",
- "dap-storage",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dap-e2e"
-version = "0.1.0"
-dependencies = [
- "axum",
- "dap-catalog",
- "dap-core",
- "dap-ingest",
- "dap-planner",
- "dap-runtime",
- "dap-security",
- "dap-serving",
- "dap-storage",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "dap-ingest"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "dap-catalog",
- "dap-core",
- "dap-storage",
- "parking_lot",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dap-planner"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "dap-catalog",
- "dap-core",
- "dap-dhis2",
- "dap-runtime",
- "dap-storage",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dap-runtime"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bincode",
- "dap-core",
- "dap-storage",
- "parking_lot",
- "proptest",
- "rand 0.8.8",
- "rand_chacha",
- "rayon",
- "serde",
- "smallvec",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dap-security"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "blake3",
- "chacha20poly1305",
- "dap-catalog",
- "dap-core",
- "dap-runtime",
- "parking_lot",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dap-serving"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "blake3",
- "dap-catalog",
- "dap-core",
- "dap-dhis2",
- "dap-ingest",
- "dap-planner",
- "dap-runtime",
- "dap-security",
- "dap-storage",
- "dap-views",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dap-sources"
-version = "0.1.0"
-dependencies = [
- "dap-core",
- "dap-ingest",
- "dap-storage",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dap-storage"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bincode",
- "blake3",
- "bradian-relational",
- "byteorder",
- "crc32fast",
- "dap-core",
- "lz4_flex",
- "parking_lot",
- "proptest",
- "rand 0.8.8",
- "rand_chacha",
- "serde",
- "serde_json",
- "smallvec",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
- "zstd",
-]
-
-[[package]]
-name = "dap-views"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "dap-catalog",
- "dap-core",
- "dap-dhis2",
- "dap-runtime",
- "dap-storage",
- "parking_lot",
- "proptest",
- "serde",
- "thiserror 1.0.69",
- "tracing",
 ]
 
 [[package]]

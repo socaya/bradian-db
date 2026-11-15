@@ -81,15 +81,15 @@ The primary specification is **[Bradian Master Architecture and SRS v1.1](docs/B
 bradian-db/
 ├── crates/
 │   ├── bradian-relational/       # Persistent catalog, native SQL, WAL rows, typed tables, disk B+tree
-│   ├── dap-core/                 # Legacy core primitives
-│   ├── dap-storage/              # Existing .derc analytical segments, WAL and snapshots
-│   ├── dap-runtime/              # Analytical execution operators
-│   ├── dap-planner/              # Existing analytics query planning
-│   ├── dap-security/             # Security primitives
-│   ├── dap-serving/              # Existing analytical HTTP API
+│   ├── bradian-core/                 # Legacy core primitives
+│   ├── bradian-storage/              # Existing .derc analytical segments, WAL and snapshots
+│   ├── bradian-runtime/              # Analytical execution operators
+│   ├── bradian-planner/              # Existing analytics query planning
+│   ├── bradian-security/             # Security primitives
+│   ├── bradian-serving/              # Existing analytical HTTP API
 │   └── ...                      # Other analytical and DHIS2 integration crates
 ├── apps/
-│   ├── dap-ui/                   # Bradian Studio React application (legacy directory)
+│   ├── bradian-ui/                   # Bradian Studio React application (legacy directory)
 │   └── dhis2-integration/        # Optional DHIS2 analytics integration
 ├── docs/                        # Master SRS, ADRs, gates and security documentation
 └── tests/                       # End-to-end integration tests
@@ -121,7 +121,7 @@ cargo test -p bradian-relational --locked
 ### Bradian Studio
 
 ```sh
-cd apps/dap-ui
+cd apps/bradian-ui
 npm install
 npm run dev
 ```
@@ -133,7 +133,7 @@ The browser interface is at the Vite development-server address, normally `http:
 For development, inject a cryptographically strong administrator token through your secret-management mechanism as `BRADIAN_API_TOKEN` (at least 32 non-whitespace characters), then launch the CLI:
 
 ```sh
-cargo run -p dap-admin -- serve --root ./data --bind 127.0.0.1:8080
+cargo run -p bradian-admin -- serve --root ./data --bind 127.0.0.1:8080
 ```
 
 Requests to protected endpoints must include `Authorization: Bearer <token>`. The bootstrap API refuses non-loopback binds; it does not provide production TLS, individual login sessions, RBAC, token expiry or data-level authorization. Refer to the [security limitations](docs/security/BOOTSTRAP_API_AUTH.md).
@@ -147,7 +147,7 @@ The approved Bradian horizontal logo is available in [navy blue](docs/media/Brad
 The [master Gate 0–9 roadmap](docs/implementation/BRADIAN_MASTER_ROADMAP.md) governs
 implementation order. BRD-G1–BRD-G44 are historical implementation records, not full
 master gate completions. Gate 1 remains active. The [native local SQL command](docs/operations/LOCAL_SQL_CLI.md)
-provides the canonical bradian-db executable while retaining dap-admin compatibility.
+provides the canonical bradian-db executable while retaining bradian-admin compatibility.
 [Historical query controls](docs/operations/HISTORY_QUERY_LIMITS.md) and
 [single-table controls](docs/operations/SINGLE_TABLE_QUERY_LIMITS.md) now bound
 scan/snapshot/result buffers, projection work and cancellation. [Retained-history admission](docs/operations/RETAINED_HISTORY_LIMITS.md) caps per-domain keys, versions and accounted bytes. [Historical transaction staging](docs/operations/HISTORY_STAGING_LIMITS.md) bounds current writes and savepoint copies. [Backing RowStore limits](docs/operations/ROW_STORE_LIMITS.md) admit checkpoint/replay maps and committed growth. [Index recovery controls](docs/operations/INDEX_RECOVERY_LIMITS.md) bound retained key/pointer entries and compare leaves incrementally. [Checkpoint/build admission](docs/operations/CHECKPOINT_BUILD_LIMITS.md) checks conservative pointer/descriptor reservations before file changes. [Metadata I/O limits](docs/operations/METADATA_LIMITS.md) bound checkpoint/backup records and JSON manifests. [CLI output controls](docs/operations/SQL_OUTPUT_LIMITS.md) encode borrowed results into bounded complete JSON lines. [Historical transaction admission](docs/operations/HISTORY_TRANSACTION_ADMISSION.md) limits shared SQL/fallible-native BEGIN handles per domain. Global resident-memory budgets, local identity and
