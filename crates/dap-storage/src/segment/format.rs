@@ -12,6 +12,10 @@ pub const SEGMENT_VERSION_MAJOR: u16 = 1;
 /// v1.0 output.
 pub const SEGMENT_VERSION_MINOR: u16 = 0;
 pub const SEGMENT_VERSION_MINOR_V1_1: u16 = 1;
+/// ADR 0079 — writer emits minor=2 when any column carries an
+/// embedded dictionary pool entry. v1.0 and v1.1 readers reject
+/// v1.2 segments via the feature-flag superset check.
+pub const SEGMENT_VERSION_MINOR_V1_2: u16 = 2;
 
 /// Required feature flags (bit positions).
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +32,12 @@ impl FeatureFlags {
     /// the body is BACE-wrapped. Legacy v1.0 readers reject
     /// segments with this bit set via `is_subset_supported`.
     pub const BACE_PAGE_ENVELOPE: u64 = 1 << 5;
+    /// ADR 0079 — v1.2. Segment carries a per-column dictionary
+    /// pool between the last page and the footer. Pages compressed
+    /// against a column dict use trailer byte `3`. v1.0 and v1.1
+    /// readers reject segments with this bit set via their
+    /// respective `is_subset_supported*` checks.
+    pub const BACE_PAGE_DICTIONARY: u64 = 1 << 6;
 
     pub const ALL_SUPPORTED_V1: u64 =
         Self::COMPRESSED_PAGES | Self::DICT_ENCODING | Self::PAGE_CRC32;
@@ -35,6 +45,10 @@ impl FeatureFlags {
     /// ADR 0076 — the superset a v1.1 reader can parse.
     pub const ALL_SUPPORTED_V1_1: u64 =
         Self::ALL_SUPPORTED_V1 | Self::BACE_PAGE_ENVELOPE;
+
+    /// ADR 0079 — the superset a v1.2 reader can parse.
+    pub const ALL_SUPPORTED_V1_2: u64 =
+        Self::ALL_SUPPORTED_V1_1 | Self::BACE_PAGE_DICTIONARY;
 
     pub fn is_subset_supported(required: u64) -> bool {
         required & !Self::ALL_SUPPORTED_V1 == 0
@@ -45,6 +59,12 @@ impl FeatureFlags {
     /// outside this set.
     pub fn is_subset_supported_v1_1(required: u64) -> bool {
         required & !Self::ALL_SUPPORTED_V1_1 == 0
+    }
+
+    /// ADR 0079 — v1.2 reader's superset check. Accepts v1.1 bits
+    /// plus the new `BACE_PAGE_DICTIONARY` bit.
+    pub fn is_subset_supported_v1_2(required: u64) -> bool {
+        required & !Self::ALL_SUPPORTED_V1_2 == 0
     }
 }
 
@@ -68,6 +88,11 @@ pub enum BaceEnvelopeTag {
     BaceV1 = 1,
     /// Reserved for BACA (ADR 0075). Not produced by ADR 0076.
     BacaV1Reserved = 2,
+    /// ADR 0079 — BACE v1 envelope whose payload was compressed
+    /// against this column's embedded dictionary. The reader
+    /// resolves the dictionary from the segment's dictionary
+    /// pool by column name.
+    BaceV1WithDict = 3,
 }
 
 /// Codec IDs as persisted in page meta. Must match `codec::PageCodec`.

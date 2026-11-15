@@ -62,11 +62,18 @@ pub struct SegmentWriter {
     /// a BACE envelope and whether the segment header sets the
     /// `BACE_PAGE_ENVELOPE` feature flag.
     bace_wiring: Option<bradian_relational::row_store::BaceWiring>,
+    /// ADR 0079 — per-column BACE dictionaries. Columns in this
+    /// map use dict-aware encode (trailer byte `3`); columns
+    /// absent fall back to ADR 0076 v1.1 behavior (trailer `1`).
+    /// Empty when the writer was constructed without
+    /// `new_with_bace_and_dictionaries`.
+    bace_dictionaries:
+        std::collections::HashMap<String, bradian_relational::bace::BaceDictionary>,
 }
 
 impl SegmentWriter {
     pub fn new(schema: Schema, options: SegmentWriterOptions) -> Self {
-        Self::new_inner(schema, options, None)
+        Self::new_inner(schema, options, None, std::collections::HashMap::new())
     }
 
     /// ADR 0076 — construct a writer that emits `.derc` v1.1
@@ -80,13 +87,37 @@ impl SegmentWriter {
         options: SegmentWriterOptions,
         wiring: bradian_relational::row_store::BaceWiring,
     ) -> Self {
-        Self::new_inner(schema, options, Some(wiring))
+        Self::new_inner(schema, options, Some(wiring), std::collections::HashMap::new())
+    }
+
+    /// ADR 0079 — construct a writer that emits `.derc` v1.2
+    /// segments with per-column embedded dictionaries. Columns
+    /// present in `dictionaries` encode via
+    /// `encode_zstd_with_dictionary`; columns absent fall back to
+    /// the v1.1 non-dict BACE path (ADR 0076). An empty map
+    /// produces a v1.1-shape file (no `BACE_PAGE_DICTIONARY`
+    /// feature flag, no dictionary pool, byte-identical to
+    /// `new_with_bace`).
+    pub fn new_with_bace_and_dictionaries(
+        schema: Schema,
+        options: SegmentWriterOptions,
+        wiring: bradian_relational::row_store::BaceWiring,
+        dictionaries: std::collections::HashMap<
+            String,
+            bradian_relational::bace::BaceDictionary,
+        >,
+    ) -> Self {
+        Self::new_inner(schema, options, Some(wiring), dictionaries)
     }
 
     fn new_inner(
         schema: Schema,
         options: SegmentWriterOptions,
         bace_wiring: Option<bradian_relational::row_store::BaceWiring>,
+        bace_dictionaries: std::collections::HashMap<
+            String,
+            bradian_relational::bace::BaceDictionary,
+        >,
     ) -> Self {
         let mut builders = Vec::with_capacity(schema.len());
         let mut use_dict = Vec::with_capacity(schema.len());
@@ -113,6 +144,7 @@ impl SegmentWriter {
             options,
             rows: 0,
             bace_wiring,
+            bace_dictionaries,
         }
     }
 
@@ -176,6 +208,7 @@ impl SegmentWriter {
         let mut w = match &self.bace_wiring {
             Some(wiring) => SegmentFileWriter::new_with_bace(
                 file, self.options.clone(), wiring.clone(),
+                self.bace_dictionaries.clone(),
             ),
             None => SegmentFileWriter::new(file, self.options.clone()),
         };
@@ -208,6 +241,13 @@ impl SegmentWriter {
             watermark_ms: self.options.watermark_ms,
             data_revision: self.options.data_revision,
         };
+        // ADR 0079 §3.1 — v1.2 segments embed per-column
+        // dictionaries in a pool between the last page and the
+        // footer. When no dicts are attached, this is a no-op and
+        // the file layout is byte-identical to v1.0/v1.1.
+        if w.bace_active && !w.bace_dictionaries.is_empty() {
+            w.write_dictionary_pool()?;
+        }
         w.write_footer(&footer)?;
         let bytes_written = w.flush_and_sync()?;
 
@@ -305,6 +345,45 @@ fn wrap_page_in_bace_envelope(
     Ok(buf)
 }
 
+/// ADR 0079 §3.3 — encode `inner_payload` with the supplied BACE
+/// dictionary (via ADR 0078's `encode_zstd_with_dictionary`) and
+/// wrap the result in a BACE v1 envelope with `codec_id = ZSTD_ID`.
+/// The envelope flags are identical to the non-dict path; the
+/// dict association is signalled via the per-page trailer byte
+/// `BaceV1WithDict = 3`, not an envelope flag.
+fn wrap_page_in_bace_envelope_with_dict(
+    inner_payload: &[u8],
+    _wiring: &bradian_relational::row_store::BaceWiring,
+    dict: &bradian_relational::bace::BaceDictionary,
+) -> DapResult<Vec<u8>> {
+    use bradian_relational::bace::codec::zstd::{ZSTD_FORMAT_VERSION, ZSTD_ID};
+    use bradian_relational::bace::dictionary::encode_zstd_with_dictionary;
+    use bradian_relational::bace::envelope::{
+        write_envelope, EnvelopeFlags, EnvelopeHeader,
+    };
+
+    let mut encoded = Vec::with_capacity(inner_payload.len());
+    encode_zstd_with_dictionary(inner_payload, dict, &mut encoded).map_err(|e|
+        DapError::corruption(format!("BACE dict encode failed: {e}")),
+    )?;
+    let header = EnvelopeHeader {
+        codec_id: ZSTD_ID,
+        codec_format_version: ZSTD_FORMAT_VERSION,
+        flags: EnvelopeFlags {
+            payload_is_raw: false,
+            critical: false,
+            ..EnvelopeFlags::default()
+        },
+        encoded_length: encoded.len() as u32,
+        decoded_length: inner_payload.len() as u32,
+    };
+    let mut buf = Vec::with_capacity(encoded.len() + 36);
+    write_envelope(&mut buf, &header, &encoded).map_err(|e|
+        DapError::corruption(format!("BACE envelope write failed: {e}")),
+    )?;
+    Ok(buf)
+}
+
 /// ADR 0076 §3.2 — decide whether the writer will wrap pages in a
 /// BACE envelope. Returns `true` iff the wiring's resolved codec is
 /// non-RAW. RAW opts out so the writer doesn't pay 36 bytes of
@@ -335,6 +414,13 @@ struct SegmentFileWriter {
     /// emitted. Resolved once at writer construction from
     /// `bace_wiring` + the resolved codec. See `resolve_bace_active`.
     bace_active: bool,
+    /// ADR 0079 — per-column dictionaries. Only consulted when
+    /// `bace_active` is true. Columns not in the map fall back to
+    /// the non-dict path (trailer `1`). Columns in the map emit
+    /// trailer `3` and have an entry written into the dictionary
+    /// pool before the footer.
+    bace_dictionaries:
+        std::collections::HashMap<String, bradian_relational::bace::BaceDictionary>,
 }
 
 impl SegmentFileWriter {
@@ -342,22 +428,31 @@ impl SegmentFileWriter {
         Self {
             file, pos: 0, options,
             bace_wiring: None, bace_active: false,
+            bace_dictionaries: std::collections::HashMap::new(),
         }
     }
 
     /// ADR 0076 — constructor used by `SegmentWriter::new_with_bace`.
     /// `bace_active` is true iff the wiring resolves to a non-RAW
     /// codec; RAW opts out of envelope overhead per §3.2.
+    /// ADR 0079 — also accepts an optional per-column
+    /// `BaceDictionary` map; empty map preserves ADR 0076 v1.1
+    /// behavior.
     fn new_with_bace(
         file: File,
         options: SegmentWriterOptions,
         wiring: bradian_relational::row_store::BaceWiring,
+        bace_dictionaries: std::collections::HashMap<
+            String,
+            bradian_relational::bace::BaceDictionary,
+        >,
     ) -> Self {
         let bace_active = resolve_bace_active(&wiring);
         Self {
             file, pos: 0, options,
             bace_wiring: Some(wiring),
             bace_active,
+            bace_dictionaries,
         }
     }
 
@@ -371,10 +466,16 @@ impl SegmentFileWriter {
         self.write_all(&SEGMENT_MAGIC)?;
         self.file.write_u16::<LittleEndian>(SEGMENT_VERSION_MAJOR)?;
         self.pos += 2;
-        // ADR 0076 — emit v1.1 when the writer is going to emit at
-        // least one BACE-wrapped page; v1.0 otherwise for byte-
-        // identical legacy output.
-        let minor = if self.bace_active {
+        // ADR 0076 + ADR 0079 — minor version & feature flag set
+        // based on what the writer will actually emit:
+        //   v1.0 (no BACE) → minor 0, no feature bits
+        //   v1.1 (BACE no-dict) → minor 1, BACE_PAGE_ENVELOPE
+        //   v1.2 (BACE + at least one dict-equipped column) →
+        //     minor 2, BACE_PAGE_ENVELOPE + BACE_PAGE_DICTIONARY
+        let v1_2 = self.bace_active && !self.bace_dictionaries.is_empty();
+        let minor = if v1_2 {
+            crate::segment::format::SEGMENT_VERSION_MINOR_V1_2
+        } else if self.bace_active {
             crate::segment::format::SEGMENT_VERSION_MINOR_V1_1
         } else {
             SEGMENT_VERSION_MINOR
@@ -386,6 +487,9 @@ impl SegmentFileWriter {
             | FeatureFlags::PAGE_CRC32;
         if self.bace_active {
             required |= FeatureFlags::BACE_PAGE_ENVELOPE;
+        }
+        if v1_2 {
+            required |= FeatureFlags::BACE_PAGE_DICTIONARY;
         }
         self.file.write_u64::<LittleEndian>(required)?;
         self.pos += 8;
@@ -409,7 +513,7 @@ impl SegmentFileWriter {
 
     fn write_column(
         &mut self,
-        _name: String,
+        name: String,
         col: &dap_core::Column,
         buf: ColumnBuffer,
         use_dict: bool,
@@ -441,23 +545,41 @@ impl SegmentFileWriter {
             Vec::new()
         };
 
-        // ADR 0076 §3.2 — when BACE wiring is active, wrap the
-        // compressed inner codec output in a BACE envelope using
-        // the resolved outer codec (ZSTD today; RAW opted out
-        // via resolve_bace_active). The envelope layer encodes
-        // the payload itself, so we hand it the raw inner bytes;
-        // the legacy `compress::compress` path is used only when
-        // BACE is not active.
-        let (payload_bytes, compressed) = if self.bace_active {
+        // ADR 0076 + ADR 0079 — three BACE write paths:
+        //   dict-equipped column → ADR 0079 trailer=3 path
+        //   plain BACE column    → ADR 0076 trailer=1 path
+        //   no BACE              → legacy v1.0 path, no trailer
+        let dict_for_column = if self.bace_active {
+            self.bace_dictionaries.get(&name).cloned()
+        } else {
+            None
+        };
+        let (payload_bytes, compressed, trailer_tag) = if let Some(dict) = &dict_for_column {
+            // ADR 0079 — dict-aware encode via ADR 0078 helper;
+            // then wrap in a BACE envelope so the carrier format
+            // is uniform with the non-dict path.
+            let wrapped = wrap_page_in_bace_envelope_with_dict(
+                &inner_payload,
+                self.bace_wiring.as_ref().expect("bace_active set without wiring"),
+                dict,
+            )?;
+            (
+                wrapped, true,
+                Some(crate::segment::format::BaceEnvelopeTag::BaceV1WithDict as u8),
+            )
+        } else if self.bace_active {
             let wrapped = wrap_page_in_bace_envelope(
                 &inner_payload,
                 self.bace_wiring.as_ref().expect("bace_active set without wiring"),
             )?;
-            (wrapped, true)
+            (
+                wrapped, true,
+                Some(crate::segment::format::BaceEnvelopeTag::BaceV1 as u8),
+            )
         } else if self.options.compress {
-            (compress::compress(&inner_payload)?, true)
+            (compress::compress(&inner_payload)?, true, None)
         } else {
-            (inner_payload.clone(), false)
+            (inner_payload.clone(), false, None)
         };
         let uncompressed_len = inner_payload.len() as u32;
 
@@ -469,12 +591,11 @@ impl SegmentFileWriter {
         if !validity_bytes.is_empty() {
             self.write_all(&validity_bytes)?;
         }
-        // ADR 0076 §3.2 — per-page trailer byte for v1.1 segments
-        // (gated by `bace_active`). Not covered by the page CRC32
-        // (that would break v1.0 byte compatibility); its single-
-        // byte domain restricts tampering to visible values.
-        if self.bace_active {
-            self.write_all(&[crate::segment::format::BaceEnvelopeTag::BaceV1 as u8])?;
+        // Trailer byte per ADR 0076/0079 — present only on
+        // v1.1+ segments. Not covered by page CRC32 (preserves
+        // v1.0 byte compat).
+        if let Some(tag) = trailer_tag {
+            self.write_all(&[tag])?;
         }
 
         let zone = compute_zone_map(&buf);
@@ -491,6 +612,50 @@ impl SegmentFileWriter {
             crc32: crc,
         };
         Ok((vec![page], zone))
+    }
+
+    /// ADR 0079 §3.1 — write the dictionary pool between the last
+    /// page and the footer, followed by a trailing u32 pool length
+    /// so the reader can find it deterministically by seeking
+    /// 4 bytes before FOOTER_MAGIC.
+    ///
+    /// Pool layout:
+    ///   u32 entry_count
+    ///   N × (u32 name_len + name_bytes
+    ///       + u32 dict_len + dict_bytes + 32-byte fingerprint)
+    ///
+    /// After the pool, a u32 holds the pool length in bytes
+    /// (NOT including the u32 itself). Reader finds the pool by
+    /// seeking `footer_start - 4` for the length and
+    /// `footer_start - 4 - pool_len` for the pool start.
+    fn write_dictionary_pool(&mut self) -> DapResult<()> {
+        let pool_start = self.pos;
+        let count = self.bace_dictionaries.len() as u32;
+        self.file.write_u32::<LittleEndian>(count)?;
+        self.pos += 4;
+        // Deterministic ordering by column name — makes golden-
+        // byte tests reproducible across HashMap iteration orders.
+        // Clone the entries up front so we're not holding a borrow
+        // of `self.bace_dictionaries` while mutating `self`.
+        let mut entries: Vec<(String, Vec<u8>, [u8; 32])> = self.bace_dictionaries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.raw_bytes_for_carrier().to_vec(), *v.fingerprint()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, dict_bytes, fingerprint) in &entries {
+            let name_bytes = name.as_bytes();
+            self.file.write_u32::<LittleEndian>(name_bytes.len() as u32)?;
+            self.pos += 4;
+            self.write_all(name_bytes)?;
+            self.file.write_u32::<LittleEndian>(dict_bytes.len() as u32)?;
+            self.pos += 4;
+            self.write_all(dict_bytes)?;
+            self.write_all(fingerprint)?;
+        }
+        let pool_len = (self.pos - pool_start) as u32;
+        self.file.write_u32::<LittleEndian>(pool_len)?;
+        self.pos += 4;
+        Ok(())
     }
 
     fn write_footer(&mut self, footer: &SegmentFooter) -> DapResult<()> {

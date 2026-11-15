@@ -59,6 +59,16 @@ impl BaceDictionary {
     /// to its raw bytes.
     pub(crate) fn bytes_for_dict(&self) -> &[u8] { &self.bytes }
 
+    /// ADR 0079 §3.3 — carrier-integration accessor. A carrier
+    /// (e.g. `.derc` segment writer) that stores the dictionary
+    /// in its on-disk pool needs the raw bytes. The ADR 0078
+    /// "no casual raw-bytes access" culture is relaxed for this
+    /// explicit serialization purpose; the method name signals
+    /// the limited intent. Readers reconstruct the dictionary
+    /// with `BaceDictionary::new(bytes, label)` which recomputes
+    /// the fingerprint.
+    pub fn raw_bytes_for_carrier(&self) -> &[u8] { &self.bytes }
+
     /// Test-only accessor used for round-trip fingerprint tests.
     /// Not exposed outside the crate.
     #[cfg(test)]

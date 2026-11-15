@@ -31,29 +31,48 @@ pub struct SegmentReader {
     /// so per-page reads can decide whether to look for a
     /// trailer byte without re-parsing the header.
     _bace_feature_active: bool,
+    /// ADR 0079 — per-column dictionaries parsed from the v1.2
+    /// dictionary pool. Empty when the segment is v1.0 or v1.1.
+    bace_dictionaries: std::collections::HashMap<
+        String, bradian_relational::bace::BaceDictionary,
+    >,
 }
 
 impl SegmentReader {
     pub fn open(path: &Path) -> DapResult<Self> {
         let mut file = File::open(path)?;
-        let (footer, bace_feature) = read_footer_with_features(&mut file, /*allow_bace=*/false)?;
-        Ok(Self { file, footer, bace_wiring: None, _bace_feature_active: bace_feature })
+        let (footer, bace_feature, _dict_feature) =
+            read_footer_with_features(&mut file, /*allow_bace=*/false)?;
+        Ok(Self {
+            file, footer,
+            bace_wiring: None,
+            _bace_feature_active: bace_feature,
+            bace_dictionaries: std::collections::HashMap::new(),
+        })
     }
 
-    /// ADR 0076 — open a `.derc` segment that may carry BACE-
-    /// wrapped page bodies (v1.1). The wiring is consulted per
-    /// page if the segment's `BACE_PAGE_ENVELOPE` feature flag
-    /// was set at write time. On a v1.0 segment the wiring is
-    /// stored but never consulted (legacy decode path).
+    /// ADR 0076 + ADR 0079 — open a `.derc` segment that may
+    /// carry BACE-wrapped page bodies (v1.1) and/or per-column
+    /// embedded dictionaries (v1.2). The wiring is consulted
+    /// per page if the segment's `BACE_PAGE_ENVELOPE` feature
+    /// flag was set; the dictionary pool is parsed when the
+    /// v1.2 `BACE_PAGE_DICTIONARY` feature flag was set.
     pub fn open_with_bace(
         path: &Path,
         wiring: bradian_relational::row_store::BaceWiring,
     ) -> DapResult<Self> {
         let mut file = File::open(path)?;
-        let (footer, bace_feature) = read_footer_with_features(&mut file, /*allow_bace=*/true)?;
+        let (footer, bace_feature, dict_feature) =
+            read_footer_with_features(&mut file, /*allow_bace=*/true)?;
+        let bace_dictionaries = if dict_feature {
+            read_dictionary_pool(&mut file)?
+        } else {
+            std::collections::HashMap::new()
+        };
         Ok(Self {
             file, footer, bace_wiring: Some(wiring),
             _bace_feature_active: bace_feature,
+            bace_dictionaries,
         })
     }
 
@@ -182,6 +201,26 @@ impl SegmentReader {
                     "page in column {} is BACA-wrapped (reserved for ADR 0075 carrier integration); not supported by ADR 0076 reader",
                     col.name,
                 )));
+            }
+            3 => {
+                // ADR 0079 §3.3 — BACE envelope whose payload was
+                // compressed against this column's embedded dict.
+                let _wiring = self.bace_wiring.as_ref().ok_or_else(|| {
+                    DapError::unsupported(format!(
+                        "page in column {} is BACE-dict-wrapped but SegmentReader has no wiring; use SegmentReader::open_with_bace",
+                        col.name,
+                    ))
+                })?;
+                let dict = self.bace_dictionaries.get(&col.name).ok_or_else(|| {
+                    DapError::corruption(format!(
+                        "dictionary pool has no entry for column {} but page trailer is BaceV1WithDict",
+                        col.name,
+                    ))
+                })?;
+                decode_bace_v1_page_with_dict(&payload, page.uncompressed_len, dict)
+                    .map_err(|e| DapError::corruption(format!(
+                        "BACE dict-envelope decode failed on column {}: {e}", col.name,
+                    )))?
             }
             other => {
                 return Err(DapError::corruption(format!(
@@ -320,15 +359,16 @@ fn concat_buffers(_col: &ColumnMeta, _pages: Vec<ColumnBuffer>) -> DapResult<Col
     ))
 }
 
-/// ADR 0076 — returns `(footer, bace_feature_active)`. When
-/// `allow_bace` is false (legacy `SegmentReader::open`), a segment
-/// that sets the `BACE_PAGE_ENVELOPE` feature flag is rejected with
-/// the existing unsupported-feature error. When `allow_bace` is true
-/// (`SegmentReader::open_with_bace`), the flag is accepted and
-/// surfaced for per-page decode routing.
+/// ADR 0076 + ADR 0079 — returns
+/// `(footer, bace_feature_active, bace_dictionary_feature_active)`.
+/// When `allow_bace` is false (legacy `SegmentReader::open`), a
+/// segment that sets any BACE feature flag is rejected with the
+/// existing unsupported-feature error. When `allow_bace` is true,
+/// the flags are accepted and surfaced for per-page decode
+/// routing + optional dictionary-pool parsing.
 fn read_footer_with_features(
     file: &mut File, allow_bace: bool,
-) -> DapResult<(SegmentFooter, bool)> {
+) -> DapResult<(SegmentFooter, bool, bool)> {
     let file_len = file.metadata()?.len();
     if file_len < 64 + 8 {
         return Err(DapError::corruption("file too short to be a valid .derc"));
@@ -350,7 +390,7 @@ fn read_footer_with_features(
     let required = file.read_u64::<LittleEndian>()?;
     let _optional = file.read_u64::<LittleEndian>()?;
     let subset_ok = if allow_bace {
-        FeatureFlags::is_subset_supported_v1_1(required)
+        FeatureFlags::is_subset_supported_v1_2(required)
     } else {
         FeatureFlags::is_subset_supported(required)
     };
@@ -360,6 +400,7 @@ fn read_footer_with_features(
         )));
     }
     let bace_feature = (required & FeatureFlags::BACE_PAGE_ENVELOPE) != 0;
+    let bace_dict_feature = (required & FeatureFlags::BACE_PAGE_DICTIONARY) != 0;
 
     // Read footer start offset (last 8 bytes).
     file.seek(SeekFrom::End(-8))?;
@@ -383,5 +424,115 @@ fn read_footer_with_features(
     }
     let footer: SegmentFooter = bincode::deserialize(&payload)
         .map_err(|e| DapError::corruption(format!("footer decode: {e}")))?;
-    Ok((footer, bace_feature))
+    Ok((footer, bace_feature, bace_dict_feature))
+}
+
+/// ADR 0079 §3.3 — decode a BACE envelope whose payload was
+/// compressed against the supplied column dictionary. Reads the
+/// envelope header, verifies `decoded_length == uncompressed_len`
+/// (anti-swap check), then decodes via ADR 0078's
+/// `decode_zstd_with_dictionary`.
+fn decode_bace_v1_page_with_dict(
+    payload: &[u8],
+    uncompressed_len: u32,
+    dict: &bradian_relational::bace::BaceDictionary,
+) -> Result<Vec<u8>, String> {
+    use bradian_relational::bace::dictionary::decode_zstd_with_dictionary;
+    use bradian_relational::bace::envelope::{read_envelope, EnvelopeCaps};
+
+    let caps = EnvelopeCaps {
+        max_decoded_length: uncompressed_len,
+        max_encoded_length: payload.len() as u32,
+    };
+    let env = read_envelope(payload, caps).map_err(|e| e.to_string())?;
+    if env.header.decoded_length != uncompressed_len {
+        return Err(format!(
+            "BACE envelope decoded_length {} disagrees with page uncompressed_len {}",
+            env.header.decoded_length, uncompressed_len,
+        ));
+    }
+    let mut out = Vec::with_capacity(uncompressed_len as usize);
+    decode_zstd_with_dictionary(env.payload, dict, uncompressed_len, &mut out)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// ADR 0079 §3.1 — parse the dictionary pool. Called only when
+/// the segment header's `BACE_PAGE_DICTIONARY` feature flag was
+/// set. The pool sits between the last page and FOOTER_MAGIC;
+/// its length is stored in the 4 bytes immediately before
+/// FOOTER_MAGIC.
+fn read_dictionary_pool(
+    file: &mut File,
+) -> DapResult<std::collections::HashMap<
+    String, bradian_relational::bace::BaceDictionary,
+>> {
+    // Re-read the footer start tail. (Reader has already done
+    // this once, but doing it again keeps the helper
+    // self-contained without threading parameters.)
+    file.seek(SeekFrom::End(-8))?;
+    let footer_start = file.read_u64::<LittleEndian>()?;
+    // Read the u32 pool length stored immediately before
+    // FOOTER_MAGIC.
+    if footer_start < 4 {
+        return Err(DapError::corruption("dictionary pool tail out of range"));
+    }
+    file.seek(SeekFrom::Start(footer_start - 4))?;
+    let pool_len = file.read_u32::<LittleEndian>()? as u64;
+    if pool_len > footer_start - 4 {
+        return Err(DapError::corruption("dictionary pool length exceeds file"));
+    }
+    let pool_start = footer_start - 4 - pool_len;
+    file.seek(SeekFrom::Start(pool_start))?;
+    let mut buf = vec![0u8; pool_len as usize];
+    file.read_exact(&mut buf)?;
+
+    // Parse: u32 count + N × (u32 name_len + name + u32 dict_len + dict + 32-byte fingerprint)
+    let mut cursor = 0usize;
+    if buf.len() < 4 {
+        return Err(DapError::corruption("dictionary pool truncated (no count)"));
+    }
+    let count = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+    cursor += 4;
+    let mut pool = std::collections::HashMap::with_capacity(count);
+    for _ in 0..count {
+        if buf.len().saturating_sub(cursor) < 4 {
+            return Err(DapError::corruption("dict pool truncated at name_len"));
+        }
+        let name_len = u32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if buf.len().saturating_sub(cursor) < name_len {
+            return Err(DapError::corruption("dict pool truncated at name"));
+        }
+        let name = std::str::from_utf8(&buf[cursor..cursor + name_len])
+            .map_err(|_| DapError::corruption("dict pool name not utf-8"))?
+            .to_string();
+        cursor += name_len;
+        if buf.len().saturating_sub(cursor) < 4 {
+            return Err(DapError::corruption("dict pool truncated at dict_len"));
+        }
+        let dict_len = u32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if buf.len().saturating_sub(cursor) < dict_len + 32 {
+            return Err(DapError::corruption("dict pool truncated at dict+fingerprint"));
+        }
+        let dict_bytes = buf[cursor..cursor + dict_len].to_vec();
+        cursor += dict_len;
+        let declared_fp: [u8; 32] = buf[cursor..cursor + 32].try_into().unwrap();
+        cursor += 32;
+        // Fingerprint integrity: recompute from bytes and compare.
+        let dict = bradian_relational::bace::BaceDictionary::new(
+            dict_bytes, name.clone(),
+        );
+        if *dict.fingerprint() != declared_fp {
+            return Err(DapError::corruption(format!(
+                "dict pool entry for column {name}: fingerprint mismatch",
+            )));
+        }
+        pool.insert(name, dict);
+    }
+    if cursor != buf.len() {
+        return Err(DapError::corruption("dict pool trailing bytes"));
+    }
+    Ok(pool)
 }
