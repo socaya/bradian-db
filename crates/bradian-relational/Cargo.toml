@@ -14,7 +14,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 crc32fast = { workspace = true }
 parking_lot = { workspace = true }
-zstd = { workspace = true }
+zstd = { workspace = true, features = ["zdict_builder"] }
 blake3 = { workspace = true }
 subtle = { workspace = true }
 

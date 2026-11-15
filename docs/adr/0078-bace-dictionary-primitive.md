@@ -1,16 +1,27 @@
-# ADR 0078 — BACE dictionary primitive (implementation; **PROPOSED**)
+# ADR 0078 — BACE dictionary primitive (implementation; **ACCEPTED**)
 
-**Status: PROPOSED — not accepted for implementation.**
+**Status: ACCEPTED, 15 November 2026.** Owner accepted with the
+drafted defaults; implementation landed in the same commit.
 
-Blocked on the accepted BACE workstream through ADR 0077. This
-ADR adds the **dictionary primitive** for BACE §4.2 — a library-
-level `BaceDictionary` type and ZSTD-dictionary-aware encode/
-decode helpers. Carrier integration (RowStore checkpoint pages,
-`.derc` columns, BRWL batches, backup archives) is **explicitly
-deferred to future ADRs**, matching the ADR 0075 (authenticated
-envelope) scope-management pattern.
+Library-level primitive ONLY, mirroring ADR 0075 (authenticated
+envelope) scope. Carrier integration (RowStore, `.derc`, BRWL,
+backup) is explicitly deferred to future ADRs that come with
+workload benchmarks.
 
-Owner review required before any code lands per CLAUDE.md §4.9.
+Implementation summary:
+
+- Workspace pin unchanged; `crates/bradian-relational/Cargo.toml`
+  enables the `zdict_builder` feature on the existing `zstd`
+  dep (needed for `zstd::dict::from_samples`).
+- `crates/bradian-relational/src/bace/dictionary.rs` — new file
+  containing `BaceDictionary`, `DictionaryError`,
+  `train_zstd_dictionary`, `encode_zstd_with_dictionary`,
+  `decode_zstd_with_dictionary`, and 11 unit tests.
+- `crates/bradian-relational/src/bace/mod.rs` — module
+  declaration + public re-exports.
+
+1026 workspace tests pass (1015 → 1026); clippy clean on
+`cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 ## 1. Context
 

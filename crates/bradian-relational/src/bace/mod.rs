@@ -19,6 +19,7 @@
 
 pub mod authenticated;
 pub mod codec;
+pub mod dictionary;
 pub mod envelope;
 pub mod policy;
 pub mod registry;
@@ -36,6 +37,10 @@ pub use policy::{
     PolicyService, PolicyValue, Resolved, ScopeChain, ScopeLevel, ScopeOverrides, VetoReason,
 };
 pub use registry::{BuiltInRegistry, CodecRegistry, Negotiation};
+pub use dictionary::{
+    decode_zstd_with_dictionary, encode_zstd_with_dictionary,
+    train_zstd_dictionary, BaceDictionary, DictionaryError,
+};
 pub use authenticated::{
     read_authenticated_envelope, write_authenticated_envelope,
     AuthenticatedEnvelope, AuthenticatedEnvelopeCaps, AuthenticatedEnvelopeError,
