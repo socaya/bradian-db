@@ -90,6 +90,8 @@ pub mod prepared;
 pub mod chunk_stream;
 /// ADR 0141 — query budget primitive.
 pub mod query_budget;
+/// ADR 0142 — token-bucket rate limiter primitive.
+pub mod rate_limiter;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
