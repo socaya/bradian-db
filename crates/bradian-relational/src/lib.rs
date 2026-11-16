@@ -74,6 +74,8 @@ pub mod reader_fuzz;
 pub mod pitr_planner;
 /// ADR 0133 — row ↔ column batch converter.
 pub mod column_batch;
+/// ADR 0134 — committed columnar projection primitive.
+pub mod committed_projection;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
