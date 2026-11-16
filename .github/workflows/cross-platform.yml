@@ -1,0 +1,41 @@
+name: Bradian cross-platform matrix
+
+# ADR 0105 — cross-platform install qualification harness.
+# Manual-only (workflow_dispatch) per CLAUDE.md "Automatic CI
+# triggers remain disabled". Runs the same workspace-level
+# cargo checks on macOS and Windows that bradian-foundation.yml
+# already runs on Linux.
+#
+# Honest scope: this exercises source-level portability only —
+# compile, test, clippy. Lock-lifecycle, filesystem semantics
+# (Windows file sharing, macOS case-insensitive HFS), portable
+# installers, signing and upgrade paths are OPEN per G1-INSTALL
+# / G1-PORTABILITY and require §13 owner decisions on
+# distribution strategy.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cross-platform:
+    name: Workspace checks on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Check workspace
+        run: cargo check --workspace --locked
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "dhis2_like"
 harness = false
+
+[[bench]]
+name = "bace_sweep"
+harness = false
