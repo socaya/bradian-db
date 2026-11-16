@@ -86,6 +86,8 @@ pub mod wire_frame;
 pub mod backup_retention;
 /// ADR 0139 — prepared-statement envelope.
 pub mod prepared;
+/// ADR 0140 — chunked response stream primitive.
+pub mod chunk_stream;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
