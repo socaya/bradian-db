@@ -140,6 +140,57 @@ impl MetricsRegistry {
         self.inner.read().histograms.iter()
             .map(|(k, v)| (k.clone(), v.snapshot())).collect()
     }
+
+    /// ADR 0125 — render counters + histograms as the
+    /// Prometheus text exposition format (v0.0.4).
+    ///
+    /// Counters emit a single `<name> <value>` line with a
+    /// `# TYPE counter` header. Histograms emit one line per
+    /// cumulative bucket (`<name>_bucket{le="..."}`) plus
+    /// `_bucket{le="+Inf"}`, `_sum` and `_count` with a
+    /// `# TYPE histogram` header.
+    ///
+    /// Metric names are sanitized to `[a-zA-Z0-9_]`; dots
+    /// in the Bradian naming convention map to `_` so
+    /// `ops.total` becomes `ops_total`.
+    pub fn render_prometheus(&self) -> String {
+        let mut out = String::new();
+        let inner = self.inner.read();
+        for (name, counter) in &inner.counters {
+            let n = sanitize_metric_name(name);
+            out.push_str(&format!("# TYPE {n} counter\n{n} {}\n", counter.get()));
+        }
+        for (name, hist) in &inner.histograms {
+            let n = sanitize_metric_name(name);
+            let s = hist.snapshot();
+            out.push_str(&format!("# TYPE {n} histogram\n"));
+            let mut cumulative: u64 = 0;
+            for (i, bound) in s.buckets.iter().enumerate() {
+                cumulative = cumulative.saturating_add(s.counts[i]);
+                out.push_str(&format!("{n}_bucket{{le=\"{bound}\"}} {cumulative}\n"));
+            }
+            let total = cumulative.saturating_add(s.overflow);
+            out.push_str(&format!("{n}_bucket{{le=\"+Inf\"}} {total}\n"));
+            out.push_str(&format!("{n}_sum {}\n", s.sum));
+            out.push_str(&format!("{n}_count {}\n", s.count));
+        }
+        out
+    }
+}
+
+/// Prometheus text format restricts metric names to
+/// `[a-zA-Z_:][a-zA-Z0-9_:]*`. Map any other byte to `_`.
+fn sanitize_metric_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for (i, ch) in raw.chars().enumerate() {
+        let ok = if i == 0 {
+            ch.is_ascii_alphabetic() || ch == '_' || ch == ':'
+        } else {
+            ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'
+        };
+        out.push(if ok { ch } else { '_' });
+    }
+    if out.is_empty() { "_unnamed".into() } else { out }
 }
 
 #[cfg(test)]
@@ -197,5 +248,58 @@ mod tests {
         let r = MetricsRegistry::new();
         let h = r.histogram("empty", vec![10]);
         assert!(h.snapshot().mean().is_none());
+    }
+
+    #[test]
+    fn render_prometheus_emits_counter_lines() {
+        let r = MetricsRegistry::new();
+        r.counter("ops.total").add(7);
+        let out = r.render_prometheus();
+        assert!(out.contains("# TYPE ops_total counter\n"));
+        assert!(out.contains("\nops_total 7\n"));
+    }
+
+    #[test]
+    fn render_prometheus_emits_cumulative_histogram_buckets() {
+        let r = MetricsRegistry::new();
+        let h = r.histogram("latency.ms", vec![10, 100, 1000]);
+        h.observe(5);   // bucket 0
+        h.observe(50);  // bucket 1
+        h.observe(500); // bucket 2
+        h.observe(5000); // overflow
+        let out = r.render_prometheus();
+        assert!(out.contains("# TYPE latency_ms histogram\n"));
+        assert!(out.contains("latency_ms_bucket{le=\"10\"} 1\n"));
+        assert!(out.contains("latency_ms_bucket{le=\"100\"} 2\n"));
+        assert!(out.contains("latency_ms_bucket{le=\"1000\"} 3\n"));
+        assert!(out.contains("latency_ms_bucket{le=\"+Inf\"} 4\n"));
+        assert!(out.contains("latency_ms_sum 5555\n"));
+        assert!(out.contains("latency_ms_count 4\n"));
+    }
+
+    #[test]
+    fn render_prometheus_sanitizes_metric_names() {
+        let r = MetricsRegistry::new();
+        r.counter("foo-bar/baz").increment();
+        let out = r.render_prometheus();
+        assert!(out.contains("foo_bar_baz 1"), "got {out}");
+    }
+
+    #[test]
+    fn render_prometheus_empty_registry_returns_empty_string() {
+        let r = MetricsRegistry::new();
+        assert!(r.render_prometheus().is_empty());
+    }
+
+    #[test]
+    fn render_prometheus_is_deterministic_in_sort_order() {
+        let r = MetricsRegistry::new();
+        r.counter("zeta").increment();
+        r.counter("alpha").increment();
+        let out = r.render_prometheus();
+        // alpha appears before zeta (BTreeMap iteration)
+        let a = out.find("alpha").unwrap();
+        let z = out.find("zeta").unwrap();
+        assert!(a < z);
     }
 }
