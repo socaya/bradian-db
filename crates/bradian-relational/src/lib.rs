@@ -68,6 +68,8 @@ pub mod secondary_index;
 pub mod htap_watermark;
 /// ADR 0129 — local driver facade trait.
 pub mod driver;
+/// ADR 0131 — bounded reader fuzzing harness.
+pub mod reader_fuzz;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
