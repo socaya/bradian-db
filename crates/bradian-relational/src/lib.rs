@@ -72,6 +72,8 @@ pub mod driver;
 pub mod reader_fuzz;
 /// ADR 0132 — PITR restore-plan selector.
 pub mod pitr_planner;
+/// ADR 0133 — row ↔ column batch converter.
+pub mod column_batch;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
