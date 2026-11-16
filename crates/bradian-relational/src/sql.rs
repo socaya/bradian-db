@@ -50,6 +50,12 @@ pub enum SqlError {
 
 pub type SqlResult<T> = Result<T, SqlError>;
 
+/// ADR 0113 — stable identifier for the SQL subset profile
+/// this engine implements. Bumped on every corpus extension
+/// so clients can detect compat. Each bump has a matching
+/// ADR + corpus doc update.
+pub const SQL_PROFILE_VERSION: &str = "bradian-sql-g1-2026-11-16";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlResultSet {
     Command { affected: u64 },
@@ -298,6 +304,13 @@ impl Parser {
                     .map_err(|_| SqlError::Type("decimal scale out of range".into()))?;
                 Ok(DataType::Decimal { precision, scale })
             }
+            // ADR 0113 — JSON / TimestampTz / Uuid are now
+            // reachable from SQL DDL. Values flow through the
+            // typed-table engine unchanged; no extra parser
+            // work at INSERT time (literal_to_value handles).
+            "json" => Ok(DataType::Json),
+            "timestamptz" | "timestamp" => Ok(DataType::TimestampTz),
+            "uuid" => Ok(DataType::Uuid),
             _ => Err(SqlError::Unsupported(format!("type {name} is not in the G12 SQL profile"))),
         }
     }
@@ -352,6 +365,32 @@ pub(crate) fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
         (DataType::Text, Literal::Text(s)) => Ok(Value::String(s.clone())),
         (DataType::Varchar { max_length }, Literal::Text(s))
             if s.len() <= *max_length as usize => Ok(Value::String(s.clone())),
+        // ADR 0113 — JSON column accepts a TEXT literal that
+        // must parse as valid JSON. Invalid JSON is rejected
+        // with Type error; no application-level JSON path
+        // operators yet.
+        (DataType::Json, Literal::Text(s)) => {
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|e| SqlError::Type(format!("invalid JSON literal: {e}")))?;
+            Ok(Value::String(s.clone()))
+        }
+        // ADR 0113 — TimestampTz accepts an integer literal
+        // (micros since epoch). ISO-string parsing reserved
+        // for a future ADR when a documented format is
+        // chosen.
+        (DataType::TimestampTz, Literal::Number(s)) if !s.contains('.') =>
+            Ok(Value::TimestampTz(s.parse().map_err(|_| invalid())?)),
+        // ADR 0113 — Uuid accepts a 32-hex-char TEXT literal.
+        (DataType::Uuid, Literal::Text(s)) => {
+            let hex = s.replace('-', "");
+            if hex.len() != 32 { return Err(invalid()); }
+            let mut bytes = [0u8; 16];
+            for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+                let byte_str = std::str::from_utf8(chunk).map_err(|_| invalid())?;
+                bytes[i] = u8::from_str_radix(byte_str, 16).map_err(|_| invalid())?;
+            }
+            Ok(Value::Uuid(bytes))
+        }
         (DataType::Decimal { precision, scale }, Literal::Number(s)) => {
             let negative = s.starts_with('-');
             let unsigned = s.trim_start_matches('-');
@@ -716,6 +755,29 @@ impl SqlEngine {
                     store.delete(&pk)?;
                     1
                 } else { 0 };
+                Ok(SqlResultSet::Command { affected })
+            }
+            // ADR 0113 — TRUNCATE TABLE removes every row from
+            // ONE table without touching catalog schema.
+            // Scans PK list, deletes each. No cascading.
+            "truncate" => {
+                p.expect("table")?;
+                let name = p.name()?;
+                let table = self.resolve(&name)?;
+                p.end()?;
+                let store = self.table_store(&table)?;
+                let rows = store.scan()?;
+                let mut affected = 0u64;
+                for row in rows {
+                    let pk_values: Vec<Value> = table.primary_key.columns.iter()
+                        .map(|c| {
+                            let idx = table.columns.iter()
+                                .position(|col| col.name == *c).unwrap();
+                            row[idx].clone()
+                        }).collect();
+                    store.delete(&pk_values)?;
+                    affected += 1;
+                }
                 Ok(SqlResultSet::Command { affected })
             }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),

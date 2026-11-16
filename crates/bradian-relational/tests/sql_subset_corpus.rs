@@ -788,8 +788,10 @@ fn update_expression_at_129_nodes_is_refused() {
 
 #[test]
 fn unsupported_data_types_in_create_table_are_rejected() {
-    // TimestampTz and Uuid exist in the typed-table engine but are not in
-    // the shipped SQL profile (sql.rs::data_type). CREATE TABLE must refuse.
+    // ADR 0113 reversed the TimestampTz / Uuid / JSON boundary:
+    // all three are now reachable from CREATE TABLE. The
+    // remaining honest-boundary types are any OTHER non-
+    // standard type names, which still fail.
     let dir = tempdir().unwrap();
     let db = sql_engine(dir.path());
     for sql in [
@@ -797,8 +799,8 @@ fn unsupported_data_types_in_create_table_are_rejected() {
         "CREATE SCHEMA test.public",
     ] { db.execute(sql).unwrap(); }
     for ddl in [
-        "CREATE TABLE test.public.events (id BIGINT NOT NULL, at TIMESTAMPTZ NOT NULL, PRIMARY KEY(id))",
-        "CREATE TABLE test.public.rows (id UUID NOT NULL, PRIMARY KEY(id))",
+        "CREATE TABLE test.public.e (id BIGINT NOT NULL, b BLOB NOT NULL, PRIMARY KEY(id))",
+        "CREATE TABLE test.public.f (id BIGINT NOT NULL, x FLOAT NOT NULL, PRIMARY KEY(id))",
     ] {
         let err = db.execute(ddl).unwrap_err();
         assert!(
@@ -895,27 +897,25 @@ fn update_from_syntax_is_rejected() {
     );
 }
 
-// ---------- ADR 0112 additions: §1 unreachable JSON type ----------
+// ---------- ADR 0113: JSON is now reachable from DDL ----------
 
 #[test]
-fn json_data_type_in_create_table_is_rejected_by_parser() {
-    // ADR 0099 added LogicalType::Json + Value::Json at the
-    // core layer, but DataType (bradian-relational model) has
-    // no Json variant. CREATE TABLE that mentions JSON must
-    // refuse — matching the TimestampTz / Uuid honest boundary.
+fn json_data_type_in_create_table_is_accepted_after_adr_0113() {
+    // ADR 0113 reverses the ADR 0099/0112 honest boundary: JSON
+    // is now a reachable DDL type. Invalid JSON literals still
+    // rejected at INSERT time.
     let dir = tempdir().unwrap();
     let db = sql_engine(dir.path());
     for sql in [
         "CREATE DATABASE test",
         "CREATE SCHEMA test.public",
+        "CREATE TABLE test.public.docs (id BIGINT NOT NULL, body JSON NOT NULL, PRIMARY KEY(id))",
     ] { db.execute(sql).unwrap(); }
-    let err = db.execute(
-        "CREATE TABLE test.public.docs (id BIGINT NOT NULL, body JSON NOT NULL, PRIMARY KEY(id))"
-    ).unwrap_err();
-    assert!(
-        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
-        "JSON must be rejected from SQL DDL per ADR 0099 honest boundary; got {err:?}",
-    );
+    // Valid JSON insert succeeds.
+    db.execute("INSERT INTO test.public.docs(id, body) VALUES(1, '{\"k\":1}')").unwrap();
+    // Invalid JSON rejected.
+    assert!(db.execute("INSERT INTO test.public.docs(id, body) VALUES(2, 'not-json{')")
+        .is_err());
 }
 
 // ---------- ADR 0112 additions: §2 literal boundary ----------

@@ -323,6 +323,12 @@ fn validate_value(column: &Column, value: &Value) -> TableResult<()> {
         (DataType::Text, Value::String(_)) |
         (DataType::TimestampTz, Value::TimestampTz(_)) |
         (DataType::Uuid, Value::Uuid(_)) => true,
+        // ADR 0113 — JSON stored as canonical UTF-8 in the
+        // typed-table engine. Content validated at the SQL
+        // coerce layer; storage accepts the resulting String.
+        (DataType::Json, Value::String(s)) => {
+            serde_json::from_str::<serde_json::Value>(s).is_ok()
+        }
         (DataType::Varchar { max_length }, Value::String(s)) =>
             s.len() <= *max_length as usize,
         (DataType::Decimal { precision, scale }, Value::Decimal(v)) => {

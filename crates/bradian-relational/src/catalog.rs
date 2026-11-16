@@ -168,7 +168,9 @@ impl Catalog {
         self.tables.insert(id, Table {
             id, schema, name: table_name, columns,
             primary_key: PrimaryKey { columns: pk },
-            unique_keys, foreign_keys: Vec::new(), column_defaults: BTreeMap::new(),
+            unique_keys, foreign_keys: Vec::new(),
+            column_defaults: BTreeMap::new(),
+            column_collations: BTreeMap::new(),
         });
         Ok(id)
     }

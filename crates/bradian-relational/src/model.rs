@@ -20,6 +20,9 @@ pub enum DataType {
     Text,
     TimestampTz,
     Uuid,
+    /// ADR 0113 — JSON document stored as canonical UTF-8;
+    /// validated by serde_json at the application layer.
+    Json,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +93,11 @@ pub struct Table {
     /// Epoch-bound constants. Omitting empty maps preserves legacy schema bytes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub column_defaults: std::collections::BTreeMap<String, crate::typed_table::Value>,
+    /// ADR 0113 — per-column collation choice. Empty map
+    /// preserves pre-ADR-0113 natural type ordering. Keyed by
+    /// column name so adding/removing columns is tolerant.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub column_collations: std::collections::BTreeMap<String, crate::collation::Collation>,
 }
 
 #[cfg(test)]
