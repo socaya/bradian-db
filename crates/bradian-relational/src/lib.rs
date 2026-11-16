@@ -52,6 +52,11 @@ pub mod unique_check;
 pub mod pitr;
 pub mod collation;
 pub mod audit_log;
+pub mod audit_chain;
+pub mod lock_policy;
+pub mod format_manifest;
+pub mod metrics;
+pub mod slow_query_log;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError};
