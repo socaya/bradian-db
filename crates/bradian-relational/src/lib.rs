@@ -88,6 +88,8 @@ pub mod backup_retention;
 pub mod prepared;
 /// ADR 0140 — chunked response stream primitive.
 pub mod chunk_stream;
+/// ADR 0141 — query budget primitive.
+pub mod query_budget;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
