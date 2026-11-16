@@ -82,6 +82,8 @@ pub mod backfill_validator;
 pub mod default_expr;
 /// ADR 0137 — wire-frame envelope primitive.
 pub mod wire_frame;
+/// ADR 0138 — backup retention policy planner.
+pub mod backup_retention;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
