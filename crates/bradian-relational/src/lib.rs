@@ -70,6 +70,8 @@ pub mod htap_watermark;
 pub mod driver;
 /// ADR 0131 — bounded reader fuzzing harness.
 pub mod reader_fuzz;
+/// ADR 0132 — PITR restore-plan selector.
+pub mod pitr_planner;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
