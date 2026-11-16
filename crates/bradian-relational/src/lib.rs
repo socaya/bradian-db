@@ -57,6 +57,9 @@ pub mod lock_policy;
 pub mod format_manifest;
 pub mod metrics;
 pub mod slow_query_log;
+pub mod catalog_compactor;
+pub mod cdc;
+pub mod incremental_backup;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError};
