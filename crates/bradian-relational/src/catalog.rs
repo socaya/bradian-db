@@ -60,6 +60,34 @@ fn names(columns: &[String], existing: &BTreeSet<String>) -> Result<Vec<String>,
     Ok(canonical)
 }
 
+/// ADR 0124 — permissive type-matching for column DEFAULTs.
+/// Must stay a *subset* of `typed_table::validate_value`;
+/// NULLs are rejected (SET DEFAULT NULL = DROP DEFAULT).
+fn default_matches_type(ty: &DataType, v: &crate::typed_table::Value) -> bool {
+    use crate::typed_table::Value;
+    match (ty, v) {
+        (_, Value::Null) => false,
+        (DataType::Boolean, Value::Boolean(_)) => true,
+        (DataType::Int32, Value::Int32(_)) => true,
+        (DataType::Int64, Value::Int64(_)) => true,
+        (DataType::Text, Value::String(_)) => true,
+        (DataType::TimestampTz, Value::TimestampTz(_)) => true,
+        (DataType::Uuid, Value::Uuid(_)) => true,
+        (DataType::Varchar { max_length }, Value::String(s)) =>
+            s.len() <= *max_length as usize,
+        (DataType::Decimal { precision, scale }, Value::Decimal(d)) => {
+            if *precision == 0 || *precision > 38 || *scale > *precision { false }
+            else {
+                let mag = d.unsigned_abs();
+                mag < 10_u128.pow(*precision as u32)
+            }
+        }
+        (DataType::Json, Value::String(s)) =>
+            serde_json::from_str::<serde_json::Value>(s).is_ok(),
+        _ => false,
+    }
+}
+
 pub(crate) fn validate_type(data_type: &DataType) -> Result<(), CatalogError> {
     match data_type {
         DataType::Decimal { precision, scale } if *precision == 0 || *precision > 38 || scale > precision =>
@@ -254,6 +282,132 @@ impl Catalog {
             return Err(CatalogError::DependentObjects(format!("schema {}", id.0)));
         }
         self.schemas.remove(&id);
+        Ok(())
+    }
+
+    /// ADR 0124 — in-memory rename of a table. Preserves id;
+    /// enforces identifier shape + per-schema uniqueness.
+    /// PersistentCatalog journaling and HistorySqlEngine
+    /// wiring remain OPEN.
+    pub fn rename_table(&mut self, id: TableId, new_name: &str) -> Result<(), CatalogError> {
+        let new_name = identifier(new_name)?;
+        let schema = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?
+            .schema;
+        if self.tables.values().any(|t| t.id != id && t.schema == schema && t.name == new_name) {
+            return Err(CatalogError::Duplicate(format!("table {new_name}")));
+        }
+        self.tables.get_mut(&id).expect("validated table").name = new_name;
+        Ok(())
+    }
+
+    /// ADR 0124 — in-memory rename of a column. Updates all
+    /// references (PK, UKs, FKs, defaults, collations) +
+    /// *incoming* FK referenced_columns in dependent tables.
+    pub fn rename_column(&mut self, id: TableId, old: &str, new: &str) -> Result<(), CatalogError> {
+        let old = identifier(old)?;
+        let new = identifier(new)?;
+        if old == new { return Ok(()); }
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.columns.iter().any(|c| c.name == old) {
+            return Err(CatalogError::NotFound(format!("column {old}")));
+        }
+        if table.columns.iter().any(|c| c.name == new) {
+            return Err(CatalogError::Duplicate(format!("column {new}")));
+        }
+        // Mutate the target table.
+        let t = self.tables.get_mut(&id).expect("validated table");
+        for c in &mut t.columns { if c.name == old { c.name.clone_from(&new); } }
+        for col in &mut t.primary_key.columns { if *col == old { col.clone_from(&new); } }
+        for uk in &mut t.unique_keys {
+            for col in &mut uk.columns { if *col == old { col.clone_from(&new); } }
+        }
+        for fk in &mut t.foreign_keys {
+            for col in &mut fk.columns { if *col == old { col.clone_from(&new); } }
+        }
+        if let Some(v) = t.column_defaults.remove(&old) { t.column_defaults.insert(new.clone(), v); }
+        if let Some(v) = t.column_collations.remove(&old) { t.column_collations.insert(new.clone(), v); }
+        // Fix incoming FKs that reference this table's renamed column.
+        for other in self.tables.values_mut() {
+            if other.id == id { continue; }
+            for fk in &mut other.foreign_keys {
+                if fk.referenced_table == id {
+                    for c in &mut fk.referenced_columns { if *c == old { c.clone_from(&new); } }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// ADR 0124 — in-memory DROP COLUMN. Rejects PK columns,
+    /// columns referenced by any UK/FK (local or incoming),
+    /// and columns that would leave the table empty.
+    pub fn drop_column(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.columns.iter().any(|c| c.name == name) {
+            return Err(CatalogError::NotFound(format!("column {name}")));
+        }
+        if table.columns.len() == 1 {
+            return Err(CatalogError::InvalidDefinition("cannot drop last column".into()));
+        }
+        if table.primary_key.columns.iter().any(|c| c == &name) {
+            return Err(CatalogError::DependentObjects(format!("column {name} is in primary key")));
+        }
+        if table.unique_keys.iter().any(|uk| uk.columns.iter().any(|c| c == &name)) {
+            return Err(CatalogError::DependentObjects(format!("column {name} is in a unique key")));
+        }
+        if table.foreign_keys.iter().any(|fk| fk.columns.iter().any(|c| c == &name)) {
+            return Err(CatalogError::DependentObjects(format!("column {name} is in a foreign key")));
+        }
+        for other in self.tables.values() {
+            if other.id == id { continue; }
+            if other.foreign_keys.iter().any(|fk| fk.referenced_table == id
+                && fk.referenced_columns.iter().any(|c| c == &name))
+            {
+                return Err(CatalogError::DependentObjects(
+                    format!("column {name} is referenced by an incoming foreign key")));
+            }
+        }
+        let t = self.tables.get_mut(&id).expect("validated table");
+        t.columns.retain(|c| c.name != name);
+        t.column_defaults.remove(&name);
+        t.column_collations.remove(&name);
+        Ok(())
+    }
+
+    /// ADR 0124 — SET DEFAULT on a column. Rejects unknown
+    /// columns. Validates the default against the column's
+    /// declared type via typed_table::validate_value.
+    pub fn set_column_default(&mut self, id: TableId, name: &str, value: crate::typed_table::Value)
+        -> Result<(), CatalogError>
+    {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        let col = table.columns.iter().find(|c| c.name == name)
+            .ok_or_else(|| CatalogError::NotFound(format!("column {name}")))?;
+        if !default_matches_type(&col.data_type, &value) {
+            return Err(CatalogError::InvalidDefinition(
+                format!("default for {name} does not match declared type")));
+        }
+        self.tables.get_mut(&id).expect("validated table")
+            .column_defaults.insert(name, value);
+        Ok(())
+    }
+
+    /// ADR 0124 — DROP DEFAULT. No-op if none set.
+    pub fn drop_column_default(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.columns.iter().any(|c| c.name == name) {
+            return Err(CatalogError::NotFound(format!("column {name}")));
+        }
+        self.tables.get_mut(&id).expect("validated table")
+            .column_defaults.remove(&name);
         Ok(())
     }
 
