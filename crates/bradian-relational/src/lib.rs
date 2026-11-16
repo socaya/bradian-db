@@ -64,7 +64,7 @@ pub mod windows_lock;
 pub mod access_policy;
 pub mod bace;
 
-pub use catalog::{Catalog, CatalogError};
+pub use catalog::{Catalog, CatalogError, Dependency};
 pub use model::{
     Column, DataType, Database, DatabaseId, ForeignKey, ForeignKeySpec, PrimaryKey,
     Schema, SchemaId, Table, TableId, TableSpec, UniqueKey,

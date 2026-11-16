@@ -60,6 +60,34 @@ fn names(columns: &[String], existing: &BTreeSet<String>) -> Result<Vec<String>,
     Ok(canonical)
 }
 
+/// ADR 0126 — one entry per dependency edge that blocks a
+/// DDL mutation. Returned by `table_dependents` /
+/// `column_dependents` so callers can report every reason
+/// at once, not just the first refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dependency {
+    /// Dropping the only column would leave the table empty.
+    LastColumn,
+    /// Column is part of the table's primary key.
+    PrimaryKey { columns: Vec<String> },
+    /// Column is part of a declared unique constraint.
+    UniqueKey { constraint: String, columns: Vec<String> },
+    /// Column is part of a local foreign key.
+    ForeignKey {
+        constraint: String,
+        columns: Vec<String>,
+        referenced_table: TableId,
+    },
+    /// Table or column is referenced by a foreign key in
+    /// another table (incoming reference).
+    IncomingForeignKey {
+        from_table: TableId,
+        constraint: String,
+        columns: Vec<String>,
+        referenced_columns: Vec<String>,
+    },
+}
+
 /// ADR 0124 — permissive type-matching for column DEFAULTs.
 /// Must stay a *subset* of `typed_table::validate_value`;
 /// NULLs are rejected (SET DEFAULT NULL = DROP DEFAULT).
@@ -396,6 +424,81 @@ impl Catalog {
         self.tables.get_mut(&id).expect("validated table")
             .column_defaults.insert(name, value);
         Ok(())
+    }
+
+    /// ADR 0126 — Dependency planner: list every catalog
+    /// dependency edge that would block DROP TABLE on `id`.
+    /// Returns an empty vec iff `drop_table(id)` would
+    /// succeed. The planner is pure — no mutation.
+    pub fn table_dependents(&self, id: TableId) -> Vec<Dependency> {
+        let mut out = Vec::new();
+        if !self.tables.contains_key(&id) { return out; }
+        for other in self.tables.values() {
+            if other.id == id { continue; }
+            for fk in &other.foreign_keys {
+                if fk.referenced_table == id {
+                    out.push(Dependency::IncomingForeignKey {
+                        from_table: other.id,
+                        constraint: fk.name.clone(),
+                        columns: fk.columns.clone(),
+                        referenced_columns: fk.referenced_columns.clone(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// ADR 0126 — Dependency planner for DROP COLUMN. Lists
+    /// every reason `drop_column(id, name)` would refuse.
+    /// Returns empty iff the drop would succeed. The
+    /// planner is pure.
+    pub fn column_dependents(&self, id: TableId, name: &str) -> Vec<Dependency> {
+        let mut out = Vec::new();
+        let name = match identifier(name) { Ok(n) => n, Err(_) => return out };
+        let Some(table) = self.tables.get(&id) else { return out; };
+        if !table.columns.iter().any(|c| c.name == name) { return out; }
+        if table.columns.len() == 1 {
+            out.push(Dependency::LastColumn);
+        }
+        if table.primary_key.columns.iter().any(|c| c == &name) {
+            out.push(Dependency::PrimaryKey {
+                columns: table.primary_key.columns.clone(),
+            });
+        }
+        for uk in &table.unique_keys {
+            if uk.columns.iter().any(|c| c == &name) {
+                out.push(Dependency::UniqueKey {
+                    constraint: uk.name.clone(),
+                    columns: uk.columns.clone(),
+                });
+            }
+        }
+        for fk in &table.foreign_keys {
+            if fk.columns.iter().any(|c| c == &name) {
+                out.push(Dependency::ForeignKey {
+                    constraint: fk.name.clone(),
+                    columns: fk.columns.clone(),
+                    referenced_table: fk.referenced_table,
+                });
+            }
+        }
+        for other in self.tables.values() {
+            if other.id == id { continue; }
+            for fk in &other.foreign_keys {
+                if fk.referenced_table == id
+                    && fk.referenced_columns.iter().any(|c| c == &name)
+                {
+                    out.push(Dependency::IncomingForeignKey {
+                        from_table: other.id,
+                        constraint: fk.name.clone(),
+                        columns: fk.columns.clone(),
+                        referenced_columns: fk.referenced_columns.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// ADR 0124 — DROP DEFAULT. No-op if none set.
