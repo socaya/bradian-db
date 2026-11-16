@@ -78,6 +78,8 @@ pub mod column_batch;
 pub mod committed_projection;
 /// ADR 0135 — SET NOT NULL backfill validator.
 pub mod backfill_validator;
+/// ADR 0136 — DEFAULT expression primitive.
+pub mod default_expr;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
