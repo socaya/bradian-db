@@ -528,6 +528,19 @@ impl SqlEngine {
         self.execute_with_control(sql, &ScanControl::default())
     }
 
+    /// ADR 0100 — prepare a parameterised SQL template.
+    /// `?` placeholders are counted and the template is cached
+    /// verbatim. Execution substitutes properly-escaped
+    /// Value literals into `?` positions, then runs through
+    /// `execute`. This is a text-template facility; it is NOT
+    /// a parsed-AST plan cache and does NOT change the parser.
+    /// Future work can upgrade to prepared plans without a
+    /// public API break.
+    pub fn prepare(&self, template: &str) -> SqlResult<PreparedStatement> {
+        let param_count = count_placeholders(template)?;
+        Ok(PreparedStatement { template: template.to_string(), param_count })
+    }
+
     /// ADR 0098 — authz-aware execute. Fast-fails with
     /// `SqlError::Authz` when the context lacks the capability
     /// required by the statement's first keyword. On success,
@@ -865,6 +878,110 @@ impl<'a> SqlSession<'a> {
             _ => Err(SqlError::Unsupported(format!(
                 "transaction sessions do not support {command}"
             ))),
+        }
+    }
+}
+
+/// ADR 0100 — prepared statement handle produced by
+/// `SqlEngine::prepare`. Holds a SQL template with `?`
+/// placeholders and the count of placeholders. Execute by
+/// binding a slice of `Value`s and running against a
+/// `SqlEngine`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedStatement {
+    template: String,
+    param_count: usize,
+}
+
+impl PreparedStatement {
+    pub fn template(&self) -> &str { &self.template }
+    pub fn param_count(&self) -> usize { self.param_count }
+
+    /// Substitute placeholders with escaped literals and
+    /// execute against the given engine. Returns
+    /// `SqlError::Unsupported` on parameter-count mismatch.
+    pub fn execute(&self, engine: &SqlEngine, params: &[Value]) -> SqlResult<SqlResultSet> {
+        let sql = self.bind(params)?;
+        engine.execute(&sql)
+    }
+
+    /// Substitute placeholders and execute under an authz
+    /// context (ADR 0098).
+    pub fn execute_as(
+        &self,
+        engine: &SqlEngine,
+        authz: &bradian_core::AuthorizationContext,
+        params: &[Value],
+    ) -> SqlResult<SqlResultSet> {
+        let sql = self.bind(params)?;
+        engine.execute_as(authz, &sql)
+    }
+
+    /// Substitute placeholders; expose the materialised SQL for
+    /// callers that want to inspect or log it.
+    pub fn bind(&self, params: &[Value]) -> SqlResult<String> {
+        if params.len() != self.param_count {
+            return Err(SqlError::Unsupported(format!(
+                "prepared statement needs {} parameter(s), got {}",
+                self.param_count, params.len(),
+            )));
+        }
+        let mut out = String::with_capacity(self.template.len());
+        let mut iter = params.iter();
+        let chars = self.template.chars();
+        let mut in_string = false;
+        for c in chars {
+            if c == '\'' {
+                in_string = !in_string;
+                out.push(c);
+            } else if c == '?' && !in_string {
+                let p = iter.next().ok_or_else(||
+                    SqlError::Unsupported("prepared statement param iterator exhausted".into())
+                )?;
+                out.push_str(&value_to_sql_literal(p));
+            } else {
+                out.push(c);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Count `?` placeholders outside of string literals. Returns
+/// `SqlError::Syntax` on unterminated string literals.
+fn count_placeholders(sql: &str) -> SqlResult<usize> {
+    let mut count = 0usize;
+    let mut in_string = false;
+    for c in sql.chars() {
+        if c == '\'' {
+            in_string = !in_string;
+        } else if c == '?' && !in_string {
+            count += 1;
+        }
+    }
+    if in_string {
+        return Err(SqlError::Syntax(
+            "unterminated string literal in prepared-statement template".into(),
+        ));
+    }
+    Ok(count)
+}
+
+/// Render a `Value` as a SQL literal for prepared-statement
+/// substitution. Strings are single-quoted with embedded `'`
+/// doubled per SQL's standard escape. NULL renders as `NULL`.
+fn value_to_sql_literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".into(),
+        Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.into(),
+        Value::Int32(n) => n.to_string(),
+        Value::Int64(n) => n.to_string(),
+        Value::Decimal(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::TimestampTz(micros) => micros.to_string(),
+        Value::Uuid(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            format!("'{hex}'")
         }
     }
 }

@@ -128,6 +128,7 @@ fn estimate_value_bytes(v: &Value) -> usize {
         Value::Uid(u) => u.as_str().len() + 4,
         Value::Timestamp(_) => 8,
         Value::Period(p) => p.len() + 4,
+        Value::Json(j) => j.len() + 4,
     }
 }
 

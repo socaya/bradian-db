@@ -48,6 +48,10 @@ pub mod schema_activation;
 pub mod local_access;
 pub mod workspace_usage;
 pub mod mutable_page;
+pub mod unique_check;
+pub mod pitr;
+pub mod collation;
+pub mod audit_log;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError};

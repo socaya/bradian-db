@@ -352,6 +352,7 @@ impl ColumnBuilder {
             LogicalType::Utf8 => ColumnBuilder::Utf8(Utf8Builder::default()),
             LogicalType::Uid => ColumnBuilder::Utf8(Utf8Builder::default()),
             LogicalType::Period => ColumnBuilder::Utf8(Utf8Builder::default()),
+            LogicalType::Json => ColumnBuilder::Utf8(Utf8Builder::default()),
             LogicalType::Timestamp => ColumnBuilder::Timestamp(PrimitiveBuilder::default()),
         }
     }

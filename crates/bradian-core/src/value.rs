@@ -31,6 +31,11 @@ pub enum LogicalType {
     Timestamp,
     /// DHIS2 reporting period, stored as its canonical ISO code (e.g. "202601", "2026W03").
     Period,
+    /// ADR 0099 — JSON document stored as its canonical UTF-8
+    /// serialization. Validated by `serde_json`; preserves the
+    /// JSON structure for round-trip but does NOT guarantee
+    /// byte-identical preservation of whitespace or key order.
+    Json,
 }
 
 /// Physical encoding selected by the storage writer per page.
@@ -61,6 +66,7 @@ impl LogicalType {
             LogicalType::Uid => PhysicalType::Utf8,
             LogicalType::Timestamp => PhysicalType::Timestamp,
             LogicalType::Period => PhysicalType::Utf8,
+            LogicalType::Json => PhysicalType::Utf8,
         }
     }
 
@@ -87,6 +93,9 @@ pub enum Value {
     Uid(Uid),
     Timestamp(i64), // unix millis
     Period(String),
+    /// ADR 0099 — JSON document. Stored as the canonical
+    /// serialization of a `serde_json::Value`.
+    Json(String),
 }
 
 impl PartialEq for Value {
@@ -117,6 +126,7 @@ impl Ord for Value {
                 Value::Uid(_) => 6,
                 Value::Timestamp(_) => 7,
                 Value::Period(_) => 8,
+                Value::Json(_) => 9,
             }
         }
         let (ta, tb) = (tag(self), tag(other));
@@ -142,6 +152,7 @@ impl Ord for Value {
             (Value::Uid(a), Value::Uid(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
             (Value::Period(a), Value::Period(b)) => a.cmp(b),
+            (Value::Json(a), Value::Json(b)) => a.cmp(b),
             _ => Ordering::Equal, // unreachable: tag equality covers this
         }
     }
@@ -163,6 +174,7 @@ impl std::hash::Hash for Value {
             Value::Uid(v) => v.hash(state),
             Value::Timestamp(v) => v.hash(state),
             Value::Period(v) => v.hash(state),
+            Value::Json(v) => v.hash(state),
         }
     }
 }
@@ -186,6 +198,7 @@ impl Value {
             Value::Uid(_) => LogicalType::Uid,
             Value::Timestamp(_) => LogicalType::Timestamp,
             Value::Period(_) => LogicalType::Period,
+            Value::Json(_) => LogicalType::Json,
         })
     }
 

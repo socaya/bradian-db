@@ -335,6 +335,7 @@ fn response_from_batch(
                 bradian_core::LogicalType::Utf8 => "TEXT",
                 bradian_core::LogicalType::Timestamp => "DATETIME",
                 bradian_core::LogicalType::Decimal { .. } => "NUMBER",
+                bradian_core::LogicalType::Json => "TEXT",
             },
             kind: "java.lang.String",
             hidden: false,
@@ -382,6 +383,7 @@ fn value_to_dhis2_json(v: Value) -> JsonValue {
         Value::Str(s) | Value::Period(s) => JsonValue::String(s),
         Value::Uid(u) => JsonValue::String(u.as_str().to_string()),
         Value::Timestamp(ms) => JsonValue::from(ms),
+        Value::Json(s) => serde_json::from_str(&s).unwrap_or(JsonValue::String(s)),
     }
 }
 
