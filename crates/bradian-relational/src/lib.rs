@@ -66,6 +66,8 @@ pub mod access_policy;
 pub mod secondary_index;
 /// ADR 0128 — HTAP freshness watermark primitive.
 pub mod htap_watermark;
+/// ADR 0129 — local driver facade trait.
+pub mod driver;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
