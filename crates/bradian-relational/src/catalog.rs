@@ -88,6 +88,18 @@ pub enum Dependency {
     },
 }
 
+/// ADR 0130 — strictly additive widenings only.
+fn is_widening(from: &DataType, to: &DataType) -> bool {
+    match (from, to) {
+        (DataType::Int32, DataType::Int64) => true,
+        (DataType::Varchar { max_length: a }, DataType::Varchar { max_length: b }) => b > a,
+        (DataType::Varchar { .. }, DataType::Text) => true,
+        (DataType::Decimal { precision: p1, scale: s1 },
+         DataType::Decimal { precision: p2, scale: s2 }) => p2 > p1 && s1 == s2,
+        _ => false,
+    }
+}
+
 /// ADR 0124 — permissive type-matching for column DEFAULTs.
 /// Must stay a *subset* of `typed_table::validate_value`;
 /// NULLs are rejected (SET DEFAULT NULL = DROP DEFAULT).
@@ -499,6 +511,56 @@ impl Catalog {
             }
         }
         out
+    }
+
+    /// ADR 0130 — widen a column's declared type. Allowed
+    /// widenings:
+    /// - `Int32 -> Int64`
+    /// - `Varchar(N) -> Varchar(M)` where `M > N`
+    /// - `Varchar(N) -> Text`
+    /// - `Decimal(p, s) -> Decimal(p', s)` where `p' > p` and
+    ///   the scale is *unchanged* (reinterpreting scale
+    ///   would move the stored decimal point).
+    ///
+    /// Narrowing (`Int64 -> Int32`, shorter Varchar, lower
+    /// Decimal precision, scale change) is REJECTED.
+    /// Same-type is a no-op (`Ok(())`).
+    ///
+    /// Rejects widening on PK, UK, FK, incoming-FK columns
+    /// (those affect comparison semantics and need the
+    /// dependency planner first — ADR 0126).
+    pub fn widen_column_type(
+        &mut self,
+        id: TableId,
+        column: &str,
+        new_type: DataType,
+    ) -> Result<(), CatalogError> {
+        let column = identifier(column)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        let col = table.columns.iter().find(|c| c.name == column)
+            .ok_or_else(|| CatalogError::NotFound(format!("column {column}")))?;
+        if col.data_type == new_type { return Ok(()); }
+        if !is_widening(&col.data_type, &new_type) {
+            return Err(CatalogError::InvalidDefinition(format!(
+                "widen_column_type: {:?} -> {:?} is not a permitted widening",
+                col.data_type, new_type)));
+        }
+        // Reject on any catalog dependency edge — widening
+        // under an active FK/UK could change comparison
+        // semantics in incompatible ways.
+        let deps = self.column_dependents(id, &column);
+        if !deps.is_empty() {
+            return Err(CatalogError::DependentObjects(format!(
+                "column {column} has {} dependency edge(s); widen requires removing them first",
+                deps.len())));
+        }
+        validate_type(&new_type)?;
+        let t = self.tables.get_mut(&id).expect("validated table");
+        for c in &mut t.columns {
+            if c.name == column { c.data_type = new_type.clone(); }
+        }
+        Ok(())
     }
 
     /// ADR 0124 — DROP DEFAULT. No-op if none set.
