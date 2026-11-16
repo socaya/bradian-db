@@ -76,6 +76,8 @@ pub mod pitr_planner;
 pub mod column_batch;
 /// ADR 0134 — committed columnar projection primitive.
 pub mod committed_projection;
+/// ADR 0135 — SET NOT NULL backfill validator.
+pub mod backfill_validator;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
