@@ -60,6 +60,8 @@ pub mod slow_query_log;
 pub mod catalog_compactor;
 pub mod cdc;
 pub mod incremental_backup;
+pub mod windows_lock;
+pub mod access_policy;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError};
