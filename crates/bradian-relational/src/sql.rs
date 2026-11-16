@@ -41,6 +41,11 @@ pub enum SqlError {
     Domain(#[from] crate::transaction_domain::DomainError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// ADR 0098 — authz denial. Returned by `execute_as` when
+    /// the AuthorizationContext lacks the capability required
+    /// for the statement.
+    #[error(transparent)]
+    Authz(#[from] bradian_core::AuthorizationDenied),
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -521,6 +526,21 @@ impl SqlEngine {
 
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
         self.execute_with_control(sql, &ScanControl::default())
+    }
+
+    /// ADR 0098 — authz-aware execute. Fast-fails with
+    /// `SqlError::Authz` when the context lacks the capability
+    /// required by the statement's first keyword. On success,
+    /// delegates to `execute`. Unknown keywords pass through
+    /// to the parser — authz is a fast-fail LAYER, not the
+    /// parser's substitute.
+    pub fn execute_as(
+        &self,
+        authz: &bradian_core::AuthorizationContext,
+        sql: &str,
+    ) -> SqlResult<SqlResultSet> {
+        authz.check_sql(sql)?;
+        self.execute(sql)
     }
 
     pub fn execute_with_control(&self, sql: &str, control: &ScanControl) -> SqlResult<SqlResultSet> {

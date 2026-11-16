@@ -171,6 +171,40 @@ fn usage_of(catalog: &Catalog, revisions: &BTreeMap<TableId, CatalogTableRevisio
 pub struct PersistentCatalog {
     inner: Mutex<Inner>,
     limits: CatalogLimits,
+    /// ADR 0097 — reader-session pin registry. Maps revision
+    /// (journal LSN at `reader_session()` time) to active pin
+    /// count. Operator-visible via `active_reader_revisions()`.
+    /// Non-blocking: DDL does not consult this map.
+    pins: std::sync::Arc<Mutex<BTreeMap<u64, usize>>>,
+}
+
+/// ADR 0097 — RAII handle holding a Catalog snapshot at a
+/// specific revision. The snapshot is immutable; DDL on the
+/// live catalog does not mutate it. `Drop` deregisters the
+/// pin so `PersistentCatalog::active_reader_revisions()`
+/// reflects session lifetimes.
+#[derive(Debug)]
+pub struct ReaderSession {
+    snapshot: Catalog,
+    revision: u64,
+    pins: std::sync::Arc<Mutex<BTreeMap<u64, usize>>>,
+}
+
+impl ReaderSession {
+    pub fn revision(&self) -> u64 { self.revision }
+    pub fn snapshot(&self) -> &Catalog { &self.snapshot }
+}
+
+impl Drop for ReaderSession {
+    fn drop(&mut self) {
+        let mut pins = self.pins.lock();
+        if let Some(count) = pins.get_mut(&self.revision) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                pins.remove(&self.revision);
+            }
+        }
+    }
 }
 
 impl PersistentCatalog {
@@ -263,7 +297,31 @@ impl PersistentCatalog {
                 ));
             }
         }
-        Ok(Self { inner: Mutex::new(Inner { catalog, revisions, journal }), limits })
+        Ok(Self {
+            inner: Mutex::new(Inner { catalog, revisions, journal }),
+            limits,
+            pins: std::sync::Arc::new(Mutex::new(BTreeMap::new())),
+        })
+    }
+
+    /// ADR 0097 — start a reader session at the current catalog
+    /// revision. Returns an RAII handle whose Drop deregisters
+    /// the pin. The snapshot is immutable; concurrent DDL
+    /// creates new revisions but does NOT invalidate this view.
+    pub fn reader_session(&self) -> ReaderSession {
+        let inner = self.inner.lock();
+        let revision = inner.journal.last_lsn();
+        let snapshot = inner.catalog.clone();
+        drop(inner);
+        *self.pins.lock().entry(revision).or_insert(0) += 1;
+        ReaderSession { snapshot, revision, pins: self.pins.clone() }
+    }
+
+    /// ADR 0097 — one-shot read of the pin registry. Operator
+    /// diagnostic only; does NOT affect DDL. Returns map from
+    /// revision → active pin count.
+    pub fn active_reader_revisions(&self) -> BTreeMap<u64, usize> {
+        self.pins.lock().clone()
     }
 
     pub fn resource_limits(&self) -> CatalogLimits { self.limits }

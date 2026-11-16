@@ -47,6 +47,7 @@ pub mod epoch_row;
 pub mod schema_activation;
 pub mod local_access;
 pub mod workspace_usage;
+pub mod mutable_page;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError};

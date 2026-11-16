@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Bradian persistent relational catalog, typed WAL-backed rows, disk B+tree and page cache"
 
 [dependencies]
+bradian-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -12,6 +12,7 @@ pub mod schema;
 pub mod period;
 pub mod provenance;
 pub mod fingerprint;
+pub mod authz;
 
 pub use error::{BradianError, BradianResult};
 pub use uid::Uid;
@@ -20,3 +21,4 @@ pub use schema::{Column, Schema};
 pub use period::{Period, PeriodType};
 pub use provenance::{ConsistencyMode, Provenance, SiteCoverage};
 pub use fingerprint::Fingerprint;
+pub use authz::{AuthorizationContext, AuthorizationDenied, Capability};

@@ -443,6 +443,7 @@ name = "bradian-relational"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bradian-core",
  "crc32fast",
  "libc",
  "parking_lot",
