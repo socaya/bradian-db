@@ -62,6 +62,8 @@ pub mod cdc;
 pub mod incremental_backup;
 pub mod windows_lock;
 pub mod access_policy;
+/// ADR 0127 — in-memory non-unique secondary index helper.
+pub mod secondary_index;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
