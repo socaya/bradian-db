@@ -80,6 +80,8 @@ pub mod committed_projection;
 pub mod backfill_validator;
 /// ADR 0136 — DEFAULT expression primitive.
 pub mod default_expr;
+/// ADR 0137 — wire-frame envelope primitive.
+pub mod wire_frame;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
