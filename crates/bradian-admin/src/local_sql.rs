@@ -214,6 +214,9 @@ fn private_root(root: &Path) -> Result<()> {
         Err(LocalAccessError::NotFound) => anyhow::bail!(
             "SQL root does not exist and CreateIfMissing was unexpectedly refused",
         ),
+        Err(LocalAccessError::UntrustedAncestor { path, mode }) => anyhow::bail!(
+            "SQL root ancestor {path:?} is untrusted (mode {mode:o}); a malicious user with write access to that directory can replace the private root (ADR 0109)",
+        ),
         Err(LocalAccessError::Io(err)) => Err(err.into()),
     }
 }
