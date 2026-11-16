@@ -84,6 +84,8 @@ pub mod default_expr;
 pub mod wire_frame;
 /// ADR 0138 — backup retention policy planner.
 pub mod backup_retention;
+/// ADR 0139 — prepared-statement envelope.
+pub mod prepared;
 pub mod bace;
 
 pub use catalog::{Catalog, CatalogError, Dependency};
