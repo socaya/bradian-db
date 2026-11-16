@@ -807,3 +807,199 @@ fn unsupported_data_types_in_create_table_are_rejected() {
         );
     }
 }
+
+// ---------- ADR 0112 additions: §5 rejected grammar ----------
+
+#[test]
+fn join_syntax_in_select_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    seed_single_table(&db);
+    for sql in [
+        "SELECT a.id FROM test.public.items a JOIN test.public.items b ON a.id = b.id",
+        "SELECT * FROM test.public.items INNER JOIN test.public.items ON 1=1",
+    ] {
+        let err = db.execute(sql).unwrap_err();
+        assert!(
+            matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+            "JOIN must be rejected: {sql}, got {err:?}",
+        );
+    }
+}
+
+#[test]
+fn subquery_in_where_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    seed_single_table(&db);
+    let err = db.execute(
+        "SELECT id FROM test.public.items WHERE id IN (SELECT id FROM test.public.items)"
+    ).unwrap_err();
+    assert!(
+        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+        "subquery must be rejected; got {err:?}",
+    );
+}
+
+#[test]
+fn select_without_from_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    let err = db.execute("SELECT 1").unwrap_err();
+    assert!(
+        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+        "SELECT without FROM qualified table must be rejected; got {err:?}",
+    );
+}
+
+#[test]
+fn insert_select_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    seed_single_table(&db);
+    let err = db.execute(
+        "INSERT INTO test.public.items SELECT * FROM test.public.items"
+    ).unwrap_err();
+    assert!(
+        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+        "INSERT SELECT must be rejected; got {err:?}",
+    );
+}
+
+#[test]
+fn insert_values_with_wrong_column_count_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    seed_single_table(&db);
+    // items has (id BIGINT, amount BIGINT). Supply one value too few.
+    let err = db.execute(
+        "INSERT INTO test.public.items(id, amount) VALUES(1)"
+    ).unwrap_err();
+    assert!(
+        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_) | SqlError::Type(_)),
+        "mismatched column count must be rejected; got {err:?}",
+    );
+}
+
+#[test]
+fn update_from_syntax_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    seed_single_table(&db);
+    let err = db.execute(
+        "UPDATE test.public.items SET amount = 2 FROM test.public.items WHERE id = 1"
+    ).unwrap_err();
+    assert!(
+        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+        "UPDATE ... FROM must be rejected; got {err:?}",
+    );
+}
+
+// ---------- ADR 0112 additions: §1 unreachable JSON type ----------
+
+#[test]
+fn json_data_type_in_create_table_is_rejected_by_parser() {
+    // ADR 0099 added LogicalType::Json + Value::Json at the
+    // core layer, but DataType (bradian-relational model) has
+    // no Json variant. CREATE TABLE that mentions JSON must
+    // refuse — matching the TimestampTz / Uuid honest boundary.
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    for sql in [
+        "CREATE DATABASE test",
+        "CREATE SCHEMA test.public",
+    ] { db.execute(sql).unwrap(); }
+    let err = db.execute(
+        "CREATE TABLE test.public.docs (id BIGINT NOT NULL, body JSON NOT NULL, PRIMARY KEY(id))"
+    ).unwrap_err();
+    assert!(
+        matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)),
+        "JSON must be rejected from SQL DDL per ADR 0099 honest boundary; got {err:?}",
+    );
+}
+
+// ---------- ADR 0112 additions: §2 literal boundary ----------
+
+#[test]
+fn integer_literal_overflow_i32_coerces_or_errors_but_never_panics() {
+    // Positive case: literal that fits i32 round-trips.
+    // Negative case: a literal that exceeds i32 range on an
+    // INT column is rejected, not silently truncated and not
+    // a panic.
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    for sql in [
+        "CREATE DATABASE test",
+        "CREATE SCHEMA test.public",
+        "CREATE TABLE test.public.small (id INT NOT NULL, PRIMARY KEY(id))",
+    ] { db.execute(sql).unwrap(); }
+    // Within i32 range.
+    db.execute("INSERT INTO test.public.small(id) VALUES(2147483647)").unwrap();
+    // Overflow: 2^31 = 2147483648 is i32::MAX + 1.
+    let err = db.execute(
+        "INSERT INTO test.public.small(id) VALUES(2147483648)"
+    ).unwrap_err();
+    assert!(
+        matches!(err, SqlError::Type(_) | SqlError::Syntax(_)),
+        "i32 overflow must be rejected cleanly, not silently truncated; got {err:?}",
+    );
+}
+
+// ---------- ADR 0112 additions: §4 duplicate primary key ----------
+
+#[test]
+fn duplicate_primary_key_on_insert_is_rejected() {
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    seed_single_table(&db);
+    db.execute("INSERT INTO test.public.items(id, amount) VALUES(1, 10)").unwrap();
+    // Second insert with same PK — must be rejected (not silently upserted).
+    let err = db.execute(
+        "INSERT INTO test.public.items(id, amount) VALUES(1, 20)"
+    ).unwrap_err();
+    // May surface as any of several error kinds depending on the engine;
+    // the invariant is that it's a documented error, not a silent accept.
+    assert!(
+        matches!(
+            err,
+            SqlError::Unsupported(_) | SqlError::Syntax(_)
+            | SqlError::Type(_) | SqlError::Table(_) | SqlError::Domain(_)
+        ),
+        "duplicate PK insert must error; got {err:?}",
+    );
+    // The original row is untouched.
+    let r = db.execute("SELECT amount FROM test.public.items WHERE id = 1").unwrap();
+    match r {
+        SqlResultSet::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Int64(10),
+                "original row must be preserved after duplicate-PK rejection");
+        }
+        other => panic!("expected rows; got {other:?}"),
+    }
+}
+
+// ---------- ADR 0112 additions: identifier case + whitespace ----------
+
+#[test]
+fn both_keywords_and_identifiers_are_case_insensitive() {
+    // Honest observation: the shipped SQL engine lower-cases
+    // identifiers at parse time. Both keywords and identifiers
+    // match case-insensitively. Operators who want case-
+    // sensitive quoted identifiers are explicitly out of scope
+    // for this subset (see §14).
+    let dir = tempdir().unwrap();
+    let db = sql_engine(dir.path());
+    db.execute("cReAtE dAtAbAsE test").unwrap();
+    db.execute("CREATE SCHEMA test.public").unwrap();
+    db.execute(
+        "create table test.public.Items (Id BIGINT NOT NULL, PRIMARY KEY(Id))"
+    ).unwrap();
+    db.execute("INSERT INTO test.public.Items(Id) VALUES(1)").unwrap();
+    // Wrong-case still resolves — identifiers are case-insensitive.
+    let r = db.execute("SELECT Id FROM test.public.items WHERE Id = 1").unwrap();
+    match r {
+        SqlResultSet::Rows { rows, .. } => assert_eq!(rows.len(), 1),
+        other => panic!("expected rows; got {other:?}"),
+    }
+}

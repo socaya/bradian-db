@@ -10,7 +10,7 @@ use crate::durable_mvcc::DurableMvccStore;
 use crate::mvcc::MvccStore;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::row_store::RowStore;
-use crate::runtime_limits::{CatalogUsage, HistoryUsage, RowStoreUsage};
+use crate::runtime_limits::{CatalogUsage, HistoryUsage, ResourceError, RowStoreUsage};
 use crate::transaction_domain::MultiTableStore;
 
 /// A one-shot combined view of decoded-state usage across the catalog
@@ -67,6 +67,84 @@ impl WorkspaceUsage {
     pub fn with_durable_mvcc(mut self, store: &DurableMvccStore) -> Self {
         self.durable_mvcc = Some(store.history_usage());
         self
+    }
+
+    /// ADR 0110 — sum bytes-in-use across every attached engine.
+    /// Catalog + domain are decoded-structure counts (not bytes)
+    /// and do not contribute here. Row-store contributes
+    /// `row_bytes + delta_bytes`; durable-MVCC contributes its
+    /// retained-history `bytes`. In-memory MVCC version counts
+    /// are not bytes and also do not contribute.
+    pub fn total_bytes(&self) -> u64 {
+        let rs = self.row_store.map(|u|
+            (u.row_bytes as u64).saturating_add(u.delta_bytes as u64)
+        ).unwrap_or(0);
+        let dm = self.durable_mvcc.map(|h| h.bytes as u64).unwrap_or(0);
+        rs.saturating_add(dm)
+    }
+
+    /// ADR 0110 — sum *row* counts across row-store + durable-
+    /// MVCC. Catalog table count is not included (different
+    /// semantic unit).
+    pub fn total_rows(&self) -> u64 {
+        let rs = self.row_store.map(|u| u.rows as u64).unwrap_or(0);
+        let dm = self.durable_mvcc.map(|h| h.keys as u64).unwrap_or(0);
+        rs.saturating_add(dm)
+    }
+}
+
+/// ADR 0110 — workspace-wide admission cap. **Opt-in**: a
+/// default `GlobalBudget` has `None` caps and never rejects.
+/// Callers who want to enforce a workspace ceiling construct
+/// one with explicit caps and invoke `check()` against a
+/// freshly-sampled `WorkspaceUsage`.
+///
+/// Honest scope: this is a POST-SAMPLING check — callers decide
+/// WHEN to sample and WHERE to reject. It does not replace
+/// per-engine admission; a per-engine limit may fire before
+/// the global one, which is the intended layering (per-engine
+/// is the coarse first gate; global is the workspace-wide
+/// backstop).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlobalBudget {
+    pub max_total_bytes: Option<u64>,
+    pub max_total_rows: Option<u64>,
+}
+
+impl GlobalBudget {
+    pub fn unlimited() -> Self { Self::default() }
+
+    pub fn with_max_total_bytes(mut self, cap: u64) -> Self {
+        self.max_total_bytes = Some(cap);
+        self
+    }
+
+    pub fn with_max_total_rows(mut self, cap: u64) -> Self {
+        self.max_total_rows = Some(cap);
+        self
+    }
+
+    /// Enforce the budget against a sampled `WorkspaceUsage`.
+    /// Returns `Err(ResourceError::GlobalBudget { … })` for the
+    /// first cap exceeded, or `Ok(())` if under every cap.
+    pub fn check(&self, usage: &WorkspaceUsage) -> Result<(), ResourceError> {
+        if let Some(cap) = self.max_total_bytes {
+            let actual = usage.total_bytes();
+            if actual > cap {
+                return Err(ResourceError::GlobalBudget {
+                    resource: "total_bytes", actual, limit: cap,
+                });
+            }
+        }
+        if let Some(cap) = self.max_total_rows {
+            let actual = usage.total_rows();
+            if actual > cap {
+                return Err(ResourceError::GlobalBudget {
+                    resource: "total_rows", actual, limit: cap,
+                });
+            }
+        }
+        Ok(())
     }
 }
 

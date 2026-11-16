@@ -40,6 +40,11 @@ pub enum ResourceError {
     Cancelled,
     #[error("query {resource} budget exceeded (limit {limit})")]
     Limit { resource: &'static str, limit: usize },
+    /// ADR 0110 — workspace-wide admission cap. Carries both
+    /// the observed total and the cap so operators can
+    /// diagnose which engines contributed.
+    #[error("workspace total {resource} ({actual}) exceeds global budget ({limit})")]
+    GlobalBudget { resource: &'static str, actual: u64, limit: u64 },
 }
 
 #[derive(Clone, Debug)]

@@ -27,12 +27,15 @@ Every object reference **must** be fully qualified: `database.schema.table`.
 | `VARCHAR(n)` | `Value::String(String)` (max length enforced at insert) | `type_int32_and_int64_and_varchar_and_decimal_round_trip` |
 | `DECIMAL(p,s)` / `NUMERIC(p,s)` | `Value::Decimal(i128)` scaled by column `scale` | `type_int32_and_int64_and_varchar_and_decimal_round_trip` |
 
-`TimestampTz` and `Uuid` are `Value` variants used internally by the
-typed-table engine but are **not accepted by the SQL parser** in
-`CREATE TABLE`, `INSERT` or any other statement on any of the three
-engines. See `unsupported_data_types_in_create_table_are_rejected`.
-The comparators for these types exist in `select_window.rs` for
-future use; today they are unreachable through SQL.
+`TimestampTz`, `Uuid` and `JSON` are `Value` / `LogicalType` variants
+used internally (typed-table engine; ADR 0099 `LogicalType::Json`)
+but are **not accepted by the SQL parser** in `CREATE TABLE`,
+`INSERT` or any other statement on any of the three engines. See
+`unsupported_data_types_in_create_table_are_rejected` and
+`json_data_type_in_create_table_is_rejected_by_parser` (ADR 0112).
+The `LogicalType::Json` variant and `Value::Json(String)` are
+reachable via the core-crate API for library callers, but today
+they are unreachable through SQL.
 
 ## 2. Literal syntax
 
@@ -73,6 +76,21 @@ future use; today they are unreachable through SQL.
 | Partial primary-key predicate | `rejects_partial_primary_key_predicate` |
 | `JOIN`, aggregates, `OR`, range `>`/`<`, column aliases, `DISTINCT`, `UNION` | `rejects_join_aggregate_and_or_and_range_and_alias` |
 | `TIMESTAMPTZ`, `UUID` in `CREATE TABLE` | `unsupported_data_types_in_create_table_are_rejected` |
+| `JSON` in `CREATE TABLE` (ADR 0099/0112 honest boundary) | `json_data_type_in_create_table_is_rejected_by_parser` |
+| Explicit `JOIN` / `INNER JOIN` syntax (ADR 0112) | `join_syntax_in_select_is_rejected` |
+| Subquery in `WHERE` (ADR 0112) | `subquery_in_where_is_rejected` |
+| `SELECT` without `FROM qualified_table` (ADR 0112) | `select_without_from_is_rejected` |
+| `INSERT ... SELECT` (ADR 0112) | `insert_select_is_rejected` |
+| `INSERT VALUES(...)` with wrong column count (ADR 0112) | `insert_values_with_wrong_column_count_is_rejected` |
+| `UPDATE ... FROM` syntax (ADR 0112) | `update_from_syntax_is_rejected` |
+| Integer literal overflow on `INT` (i32) column (ADR 0112) | `integer_literal_overflow_i32_coerces_or_errors_but_never_panics` |
+| Duplicate primary-key `INSERT` (ADR 0112) | `duplicate_primary_key_on_insert_is_rejected` |
+
+**Identifier case sensitivity** (ADR 0112 honest observation):
+both keywords AND identifiers are case-insensitive. The parser
+lower-cases identifiers at scan time. Operators who need case-
+sensitive identifiers must quote them, which is out of scope for
+this subset. See `both_keywords_and_identifiers_are_case_insensitive`.
 
 ## 6. Transactions — `SqlEngine`
 

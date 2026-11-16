@@ -214,3 +214,138 @@ fn full_five_engine_display_formats_every_field() {
     assert!(s.contains("row_store:"));
     assert!(s.contains("durable_mvcc:"));
 }
+
+// ---------- ADR 0110 global budget ----------
+
+#[test]
+fn total_bytes_sums_row_store_and_durable_mvcc() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::runtime_limits::HistoryLimits;
+    use bradian_relational::workspace_usage::WorkspaceUsage;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    rs.put(b"k1", b"value-one").unwrap();
+    rs.put(b"k2", b"value-two").unwrap();
+    let dmv = DurableMvccStore::open_with_limits(
+        dir.path().join("hist"), HistoryLimits::default(),
+    ).unwrap();
+    {
+        let mut tx = dmv.begin();
+        tx.insert(b"h1", b"v").unwrap();
+        tx.commit().unwrap();
+    }
+
+    let usage = WorkspaceUsage::for_catalog(&catalog)
+        .with_row_store(&rs).with_durable_mvcc(&dmv);
+    let rs_bytes = usage.row_store.unwrap().row_bytes as u64
+        + usage.row_store.unwrap().delta_bytes as u64;
+    let dmv_bytes = usage.durable_mvcc.unwrap().bytes as u64;
+    assert_eq!(usage.total_bytes(), rs_bytes + dmv_bytes);
+    assert!(usage.total_bytes() > 0);
+}
+
+#[test]
+fn global_budget_default_is_unlimited_and_never_rejects() {
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::workspace_usage::{GlobalBudget, WorkspaceUsage};
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..10 { rs.put(format!("k{i}").as_bytes(), b"value").unwrap(); }
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store(&rs);
+    assert!(GlobalBudget::unlimited().check(&usage).is_ok());
+}
+
+#[test]
+fn global_budget_rejects_when_total_bytes_exceeds_cap() {
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::runtime_limits::ResourceError;
+    use bradian_relational::workspace_usage::{GlobalBudget, WorkspaceUsage};
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..5 {
+        rs.put(format!("k{i}").as_bytes(), b"some-reasonable-value").unwrap();
+    }
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store(&rs);
+    let budget = GlobalBudget::unlimited().with_max_total_bytes(0);
+    match budget.check(&usage) {
+        Err(ResourceError::GlobalBudget { resource, actual, limit }) => {
+            assert_eq!(resource, "total_bytes");
+            assert_eq!(limit, 0);
+            assert!(actual > 0);
+        }
+        other => panic!("expected GlobalBudget error; got {other:?}"),
+    }
+}
+
+#[test]
+fn global_budget_rejects_total_rows_before_total_bytes() {
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::runtime_limits::ResourceError;
+    use bradian_relational::workspace_usage::{GlobalBudget, WorkspaceUsage};
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..3 { rs.put(format!("k{i}").as_bytes(), b"v").unwrap(); }
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store(&rs);
+
+    // Byte cap checked first; set it high enough to pass.
+    // Row cap of 2 < 3 rows → rejects on rows.
+    let budget = GlobalBudget::unlimited()
+        .with_max_total_bytes(u64::MAX)
+        .with_max_total_rows(2);
+    match budget.check(&usage) {
+        Err(ResourceError::GlobalBudget { resource, actual, limit }) => {
+            assert_eq!(resource, "total_rows");
+            assert_eq!(limit, 2);
+            assert_eq!(actual, 3);
+        }
+        other => panic!("expected GlobalBudget rows error; got {other:?}"),
+    }
+}
+
+#[test]
+fn global_budget_bytes_cap_fires_before_rows_cap_when_both_exceeded() {
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::runtime_limits::ResourceError;
+    use bradian_relational::workspace_usage::{GlobalBudget, WorkspaceUsage};
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..5 { rs.put(format!("k{i}").as_bytes(), b"vv").unwrap(); }
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store(&rs);
+
+    let budget = GlobalBudget::unlimited()
+        .with_max_total_bytes(0)
+        .with_max_total_rows(0);
+    match budget.check(&usage) {
+        Err(ResourceError::GlobalBudget { resource, .. }) => {
+            assert_eq!(resource, "total_bytes",
+                "byte check must fire first per implementation order");
+        }
+        other => panic!("expected GlobalBudget error; got {other:?}"),
+    }
+}
+
+#[test]
+fn global_budget_is_post_sampling_check_not_atomic_with_mutations() {
+    // Honest: GlobalBudget::check reads a frozen snapshot. A
+    // mutation between sample and check-use is not covered.
+    // Tests just verify the diagnostic surface.
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::workspace_usage::{GlobalBudget, WorkspaceUsage};
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let rs = RowStore::open(dir.path().join("rows")).unwrap();
+    rs.put(b"k", b"v").unwrap();
+    let frozen = WorkspaceUsage::for_catalog(&catalog).with_row_store(&rs);
+    // Mutate after snapshot.
+    for i in 0..100 { rs.put(format!("after{i}").as_bytes(), b"many bytes").unwrap(); }
+    // Frozen snapshot still sees the pre-mutation view.
+    let budget = GlobalBudget::unlimited().with_max_total_rows(50);
+    assert!(budget.check(&frozen).is_ok(),
+        "frozen snapshot does not track live mutations");
+}
