@@ -147,6 +147,26 @@ impl DomainSqlEngine {
             engine: self,
             active: None,
             last_commit_lsn: None,
+            budget: None,
+        };
+        callback(&mut session)
+    }
+
+    /// ADR 0145 — session with a caller-supplied per-query
+    /// budget (ADR 0141 `BudgetTracker`). The SELECT path
+    /// charges scanned rows + checks the wall-clock
+    /// deadline; breach returns `SqlError::Budget`. Other
+    /// paths are unchanged.
+    pub fn with_session_budget<R>(
+        &self, budget: crate::query_budget::QueryBudget,
+        callback: impl FnOnce(&mut DomainSqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        let _guard = self.operation.lock();
+        let mut session = DomainSqlSession {
+            engine: self,
+            active: None,
+            last_commit_lsn: None,
+            budget: Some(crate::query_budget::BudgetTracker::new(budget)),
         };
         callback(&mut session)
     }
@@ -157,6 +177,8 @@ pub struct DomainSqlSession<'a> {
     engine: &'a DomainSqlEngine,
     active: Option<MultiTableTransaction<'a>>,
     last_commit_lsn: Option<u64>,
+    /// ADR 0145 — optional per-query budget tracker.
+    budget: Option<crate::query_budget::BudgetTracker>,
 }
 
 impl<'a> DomainSqlSession<'a> {
@@ -232,6 +254,8 @@ impl<'a> DomainSqlSession<'a> {
                         Ok(SqlResultSet::Command { affected: 1 })
                     }
                     "select" => {
+                        // ADR 0145 — deadline check before scan.
+                        if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         let requested = if p.consume_symbol('*') { None } else {
                             let mut names = vec![p.word()?];
                             while p.consume_symbol(',') { names.push(p.word()?); }
@@ -244,13 +268,18 @@ impl<'a> DomainSqlSession<'a> {
                         let positions = columns.iter()
                             .map(|name| locate(&table, name))
                             .collect::<SqlResult<Vec<_>>>()?;
-                        let rows = if p.next_is_word("where") {
+                        let rows: Vec<Vec<_>> = if p.next_is_word("where") {
                             let key = key_predicate(&mut p, &table)?;
                             tx.get(table.id, &key)?.into_iter().collect()
                         } else {
                             tx.scan(table.id)?
                         };
                         p.end()?;
+                        // ADR 0145 — charge rows after scan.
+                        if let Some(b) = self.budget.as_mut() {
+                            b.charge_rows(rows.len() as u64)?;
+                            b.check_deadline()?;
+                        }
                         Ok(SqlResultSet::Rows {
                             columns,
                             rows: rows.into_iter().map(|row: Vec<_>|
