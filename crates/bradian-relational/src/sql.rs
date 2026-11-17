@@ -600,7 +600,26 @@ impl SqlEngine {
         self.execute(sql)
     }
 
+    /// ADR 0144 — `execute` with a caller-supplied
+    /// `BudgetTracker`. The SELECT path charges scanned
+    /// rows and checks the wall-clock deadline; breach
+    /// returns `SqlError::Budget`. Other paths run
+    /// identically to `execute_with_control`.
+    pub fn execute_with_budget(
+        &self, sql: &str,
+        budget: &mut crate::query_budget::BudgetTracker,
+    ) -> SqlResult<SqlResultSet> {
+        self.execute_impl(sql, &ScanControl::default(), Some(budget))
+    }
+
     pub fn execute_with_control(&self, sql: &str, control: &ScanControl) -> SqlResult<SqlResultSet> {
+        self.execute_impl(sql, control, None)
+    }
+
+    fn execute_impl(
+        &self, sql: &str, control: &ScanControl,
+        mut budget: Option<&mut crate::query_budget::BudgetTracker>,
+    ) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
         let mut p = Parser::new(sql)?;
         let action = p.word()?;
@@ -700,6 +719,8 @@ impl SqlEngine {
             }
             "select" => {
                 control.check()?;
+                // ADR 0144 — deadline check before scan.
+                if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 let selected = if p.consume_symbol('*') { Vec::new() } else {
                     let mut names = vec![p.word()?];
                     while p.consume_symbol(',') { names.push(p.word()?); }
@@ -721,6 +742,11 @@ impl SqlEngine {
                 let store = self.table_store(&table)?;
                 let all = if let Some(key) = key { store.get(&key)?.into_iter().collect::<Vec<_>>() }
                     else { store.scan_with_control(control)? };
+                // ADR 0144 — charge rows then re-check deadline.
+                if let Some(b) = budget.as_mut() {
+                    b.charge_rows(all.len() as u64)?;
+                    b.check_deadline()?;
+                }
                 let rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
                 Ok(SqlResultSet::Rows { columns: std::mem::take(&mut selected), rows })
             }
