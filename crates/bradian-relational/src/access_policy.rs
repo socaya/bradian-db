@@ -52,6 +52,10 @@ pub enum PolicyError {
     TenantColumnNull { column: String },
     #[error("tenant isolation column {column:?} must be a string")]
     TenantColumnNotString { column: String },
+    /// ADR 0155 — caller explicitly asked for a column the
+    /// policy's column-level allow-list does not permit.
+    #[error("column {column:?} denied by column-level policy")]
+    ColumnDenied { column: String },
 }
 
 pub type Result<T> = std::result::Result<T, PolicyError>;
@@ -107,6 +111,13 @@ impl ColumnLevelPolicy {
     pub fn allows_read(&self, column: &str) -> bool {
         self.readable.contains(column)
     }
+
+    /// ADR 0155 — a policy is "configured" for engine
+    /// integration iff it carries an explicit allow-list.
+    /// An empty `readable` set means the caller passed a
+    /// placeholder (CLS not opted in); the engine skips
+    /// CLS filtering in that case.
+    pub fn is_configured(&self) -> bool { !self.readable.is_empty() }
 
     /// Project a row to only the columns this policy allows.
     /// Returns the (allowed_column_names, filtered_values)

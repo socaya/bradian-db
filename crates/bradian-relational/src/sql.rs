@@ -637,6 +637,20 @@ impl SqlEngine {
         self.execute_impl(sql, &ScanControl::default(), None, Some(policy), Some(authz))
     }
 
+    /// ADR 0156 — `execute` with budget + policy. Both
+    /// run against the SELECT path; breach of either
+    /// returns the matching `SqlError` variant.
+    pub fn execute_with_budget_and_policy(
+        &self,
+        sql: &str,
+        budget: &mut crate::query_budget::BudgetTracker,
+        policy: &crate::access_policy::TableAccessPolicy,
+        authz: &bradian_core::AuthorizationContext,
+    ) -> SqlResult<SqlResultSet> {
+        self.execute_impl(sql, &ScanControl::default(),
+            Some(budget), Some(policy), Some(authz))
+    }
+
     fn execute_impl(
         &self, sql: &str, control: &ScanControl,
         mut budget: Option<&mut crate::query_budget::BudgetTracker>,
@@ -759,7 +773,8 @@ impl SqlEngine {
                 control.check()?;
                 // ADR 0144 — deadline check before scan.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
-                let selected = if p.consume_symbol('*') { Vec::new() } else {
+                let caller_wildcard = p.consume_symbol('*');
+                let selected = if caller_wildcard { Vec::new() } else {
                     let mut names = vec![p.word()?];
                     while p.consume_symbol(',') { names.push(p.word()?); }
                     names
@@ -772,6 +787,23 @@ impl SqlEngine {
                 } else { selected };
                 if selected.is_empty() {
                     return Err(SqlError::Syntax("SELECT requires columns".into()));
+                }
+                // ADR 0155 — column-level policy filtering.
+                if let Some(p_) = policy {
+                    if p_.column_level.is_configured() {
+                        if caller_wildcard {
+                            selected.retain(|c| p_.column_level.allows_read(c));
+                        } else {
+                            for c in &selected {
+                                if !p_.column_level.allows_read(c) {
+                                    return Err(SqlError::Policy(
+                                        crate::access_policy::PolicyError::ColumnDenied {
+                                            column: c.clone(),
+                                        }));
+                                }
+                            }
+                        }
+                    }
                 }
                 let mut indices = Vec::new();
                 for column in &selected { indices.push(locate(&table, column)?); }

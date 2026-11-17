@@ -125,6 +125,71 @@ fn row_level_unknown_column_errors_through_sqlerror() {
 }
 
 #[test]
+fn cls_allow_list_filters_select_star_output_columns() {
+    // ADR 0155 — SELECT * with a CLS allow-list keeps
+    // only the readable columns in the output.
+    let (_d, eng) = seed_engine();
+    let readable: std::collections::BTreeSet<String> =
+        ["id".into(), "name".into()].into_iter().collect();
+    let policy = TableAccessPolicy {
+        row_level: RowLevelPolicy::allow_all(),
+        column_level: ColumnLevelPolicy { readable },
+        tenant: None,
+    };
+    let authz = AuthorizationContext::administrator("root");
+    let rs = eng.execute_with_policy(
+        "SELECT * FROM app.public.items", &policy, &authz).unwrap();
+    let SqlResultSet::Rows { columns, .. } = rs else { panic!(); };
+    // tenant is omitted.
+    assert_eq!(columns, vec!["id".to_string(), "name".to_string()]);
+}
+
+#[test]
+fn cls_allow_list_rejects_explicit_denied_column() {
+    // ADR 0155 — SELECT tenant where "tenant" is not in
+    // the allow-list must error with ColumnDenied.
+    let (_d, eng) = seed_engine();
+    let readable: std::collections::BTreeSet<String> =
+        ["id".into(), "name".into()].into_iter().collect();
+    let policy = TableAccessPolicy {
+        row_level: RowLevelPolicy::allow_all(),
+        column_level: ColumnLevelPolicy { readable },
+        tenant: None,
+    };
+    let authz = AuthorizationContext::administrator("root");
+    let err = eng.execute_with_policy(
+        "SELECT tenant FROM app.public.items", &policy, &authz).unwrap_err();
+    match err {
+        bradian_relational::sql::SqlError::Policy(
+            bradian_relational::access_policy::PolicyError::ColumnDenied { column }
+        ) => assert_eq!(column, "tenant"),
+        other => panic!("expected ColumnDenied, got {other:?}"),
+    }
+}
+
+#[test]
+fn cls_empty_readable_set_is_treated_as_cls_disabled() {
+    // ADR 0155 — deny_all() = empty readable set =
+    // "CLS not configured", so no filtering happens.
+    // This preserves the ADR 0153/0154 placeholder pattern
+    // where deny_all() was used as a dimension-isolation
+    // stand-in.
+    let (_d, eng) = seed_engine();
+    let policy = TableAccessPolicy {
+        row_level: RowLevelPolicy::allow_all(),
+        column_level: ColumnLevelPolicy::deny_all(),  // empty
+        tenant: None,
+    };
+    let authz = AuthorizationContext::administrator("root");
+    let rs = eng.execute_with_policy(
+        "SELECT * FROM app.public.items", &policy, &authz).unwrap();
+    let SqlResultSet::Rows { columns, rows } = rs else { panic!(); };
+    // Full schema returned.
+    assert_eq!(columns, vec!["id".to_string(), "tenant".to_string(), "name".to_string()]);
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
 fn execute_without_policy_returns_every_row() {
     // Sanity: the additive integration must not break the
     // no-policy path.

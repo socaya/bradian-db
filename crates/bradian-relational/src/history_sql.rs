@@ -514,6 +514,33 @@ impl HistorySqlEngine {
         callback(&mut session)
     }
 
+    /// ADR 0156 — session with budget + policy together.
+    /// Callers who need both resource bounding and
+    /// row/column/tenant filtering can configure both in
+    /// one call; the SELECT path consults each
+    /// independently.
+    pub fn with_session_budget_and_policy<R>(
+        &self,
+        budget: crate::query_budget::QueryBudget,
+        policy: crate::access_policy::TableAccessPolicy,
+        authz: bradian_core::AuthorizationContext,
+        callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        self.require_ready()?;
+        let mut session = HistorySqlSession {
+            engine: self,
+            control: ScanControl::default(),
+            staging: StagingLimits::default(),
+            active: None,
+            failed_statement: false,
+            last_commit_lsn: None,
+            budget: Some(crate::query_budget::BudgetTracker::new(budget)),
+            policy: Some(policy),
+            authz: Some(authz),
+        };
+        callback(&mut session)
+    }
+
     /// ADR 0154 — session with an ADR 0123 row/column/
     /// tenant policy. The SELECT path filters output
     /// rows via `TableAccessPolicy::allows_row` using
@@ -745,8 +772,26 @@ impl<'a> HistorySqlSession<'a> {
                             Some(lsn) => self.engine.domain.schema_as_of(table.id, lsn)?.0,
                             None => table,
                         };
-                        let columns = requested.unwrap_or_else(||
+                        let caller_wildcard = requested.is_none();
+                        let mut columns = requested.unwrap_or_else(||
                             table.columns.iter().map(|c|c.name.clone()).collect());
+                        // ADR 0155 — column-level policy filtering.
+                        if let Some(p_) = self.policy.as_ref() {
+                            if p_.column_level.is_configured() {
+                                if caller_wildcard {
+                                    columns.retain(|c| p_.column_level.allows_read(c));
+                                } else {
+                                    for c in &columns {
+                                        if !p_.column_level.allows_read(c) {
+                                            return Err(SqlError::Policy(
+                                                crate::access_policy::PolicyError::ColumnDenied {
+                                                    column: c.clone(),
+                                                }));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let positions = columns.iter()
                             .map(|name| locate(&table, name))
                             .collect::<SqlResult<Vec<_>>>()?;
