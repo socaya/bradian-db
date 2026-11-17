@@ -168,6 +168,65 @@ fn select_charges_byte_size_of_materialized_rows() {
 }
 
 #[test]
+fn insert_charges_bytes_of_inserted_row() {
+    // ADR 0149 — DML byte charges. INSERT row has
+    // Int64(99) (8B) + String("y") (1B) = 9 bytes.
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget(
+        "INSERT INTO app.public.items (id, name) VALUES (99, 'y')",
+        &mut tracker).unwrap();
+    assert_eq!(tracker.bytes_materialized(), 9);
+    assert_eq!(tracker.rows_scanned(), 1);
+}
+
+#[test]
+fn insert_over_byte_budget_errors() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget {
+        max_bytes_materialized: Some(5),  // too tight for Int64+String
+        ..QueryBudget::unbounded()
+    });
+    let err = eng.execute_with_budget(
+        "INSERT INTO app.public.items (id, name) VALUES (99, 'hello')",
+        &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })));
+}
+
+#[test]
+fn update_charges_bytes_of_written_row() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    // UPDATE id=1 SET name='AB' → row = Int64 (8) + "AB" (2) = 10.
+    eng.execute_with_budget(
+        "UPDATE app.public.items SET name = 'AB' WHERE id = 1",
+        &mut tracker).unwrap();
+    assert_eq!(tracker.bytes_materialized(), 10);
+}
+
+#[test]
+fn delete_charges_bytes_of_removed_row() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    // seed inserts id=1 name='row1' → 8 + 4 = 12 bytes.
+    eng.execute_with_budget(
+        "DELETE FROM app.public.items WHERE id = 1",
+        &mut tracker).unwrap();
+    assert_eq!(tracker.bytes_materialized(), 12);
+}
+
+#[test]
+fn truncate_charges_sum_of_all_rows() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    // 5 rows × (8 + 4) = 60 bytes.
+    eng.execute_with_budget(
+        "TRUNCATE TABLE app.public.items", &mut tracker).unwrap();
+    assert_eq!(tracker.bytes_materialized(), 60);
+    assert_eq!(tracker.rows_scanned(), 5);
+}
+
+#[test]
 fn select_over_byte_budget_errors_with_sqlerror_budget() {
     let (_d, eng) = seed_engine();
     let mut tracker = BudgetTracker::new(QueryBudget {

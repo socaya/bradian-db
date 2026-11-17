@@ -718,7 +718,11 @@ impl SqlEngine {
                 }).collect::<SqlResult<Vec<_>>>()?;
                 self.table_store(&table)?.insert(&values)?;
                 // ADR 0147 — one row mutated.
-                if let Some(b) = budget.as_mut() { b.charge_rows(1)?; }
+                // ADR 0149 — charge the bytes of the inserted row.
+                if let Some(b) = budget.as_mut() {
+                    b.charge_rows(1)?;
+                    b.charge_bytes(crate::query_budget::row_bytes(&values))?;
+                }
                 Ok(SqlResultSet::Command { affected: 1 })
             }
             "select" => {
@@ -776,12 +780,18 @@ impl SqlEngine {
                 // ADR 0147 — deadline check before mutation.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 let store = self.table_store(&table)?;
+                let mut written_bytes = 0u64;
                 let affected = if let Some(mut row) = store.get(&pk)? {
                     for (pos, value) in assignments { row[pos] = value; }
+                    written_bytes = crate::query_budget::row_bytes(&row);
                     store.replace(&row)?;
                     1
                 } else { 0 };
-                if let Some(b) = budget.as_mut() { b.charge_rows(affected)?; }
+                // ADR 0147 rows + ADR 0149 bytes.
+                if let Some(b) = budget.as_mut() {
+                    b.charge_rows(affected)?;
+                    if affected > 0 { b.charge_bytes(written_bytes)?; }
+                }
                 Ok(SqlResultSet::Command { affected })
             }
             "delete" => {
@@ -793,11 +803,17 @@ impl SqlEngine {
                 let pk = key_predicate(&mut p, &table)?;
                 p.end()?;
                 let store = self.table_store(&table)?;
-                let affected = if store.get(&pk)?.is_some() {
+                let existing = store.get(&pk)?;
+                let deleted_bytes = existing.as_ref()
+                    .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
+                let affected = if existing.is_some() {
                     store.delete(&pk)?;
                     1
                 } else { 0 };
-                if let Some(b) = budget.as_mut() { b.charge_rows(affected)?; }
+                if let Some(b) = budget.as_mut() {
+                    b.charge_rows(affected)?;
+                    if affected > 0 { b.charge_bytes(deleted_bytes)?; }
+                }
                 Ok(SqlResultSet::Command { affected })
             }
             // ADR 0113 — TRUNCATE TABLE removes every row from
@@ -812,6 +828,8 @@ impl SqlEngine {
                 p.end()?;
                 let store = self.table_store(&table)?;
                 let rows = store.scan()?;
+                // ADR 0149 — charge bytes once for the whole truncated set.
+                let truncated_bytes = crate::query_budget::rows_bytes(&rows);
                 let mut affected = 0u64;
                 for row in rows {
                     let pk_values: Vec<Value> = table.primary_key.columns.iter()
@@ -823,7 +841,10 @@ impl SqlEngine {
                     store.delete(&pk_values)?;
                     affected += 1;
                 }
-                if let Some(b) = budget.as_mut() { b.charge_rows(affected)?; }
+                if let Some(b) = budget.as_mut() {
+                    b.charge_rows(affected)?;
+                    b.charge_bytes(truncated_bytes)?;
+                }
                 Ok(SqlResultSet::Command { affected })
             }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),

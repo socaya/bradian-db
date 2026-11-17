@@ -137,6 +137,22 @@ fn existing_with_session_path_unchanged() {
 }
 
 #[test]
+fn insert_over_byte_budget_errors() {
+    // ADR 0149 — DML byte charges. Row payload > 5 bytes.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let db = open_registered(dir.path());
+    let err = db.with_session_budget(QueryBudget {
+        max_bytes_materialized: Some(5),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("INSERT INTO app.public.items (id, name) VALUES (1, 'hello')")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })));
+}
+
+#[test]
 fn select_over_byte_budget_errors() {
     // ADR 0148 — byte budget breach on the SELECT path.
     let dir = tempdir().unwrap();

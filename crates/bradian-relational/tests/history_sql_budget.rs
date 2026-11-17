@@ -127,6 +127,23 @@ fn update_charges_affected_count() {
 }
 
 #[test]
+fn update_over_byte_budget_errors() {
+    // ADR 0149 — DML byte charges on UPDATE. The row
+    // after rewrite is wider than 1 byte, so a cap of 1
+    // breaches.
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open(&root).unwrap();
+    let err = db.with_session_budget(QueryBudget {
+        max_bytes_materialized: Some(1),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE bank.public.audit SET balance = 1 WHERE id = 9")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })));
+}
+
+#[test]
 fn select_over_byte_budget_errors() {
     // ADR 0148 — the SELECT path charges bytes alongside rows.
     let (_dir, root) = migrated();

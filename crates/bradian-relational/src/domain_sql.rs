@@ -253,7 +253,11 @@ impl<'a> DomainSqlSession<'a> {
                             coerce(&lit, column)
                         }).collect::<SqlResult<Vec<_>>>()?;
                         tx.insert(table.id, &row)?;
-                        if let Some(b) = self.budget.as_mut() { b.charge_rows(1)?; }
+                        // ADR 0147 rows + ADR 0149 bytes.
+                        if let Some(b) = self.budget.as_mut() {
+                            b.charge_rows(1)?;
+                            b.charge_bytes(crate::query_budget::row_bytes(&row))?;
+                        }
                         Ok(SqlResultSet::Command { affected: 1 })
                     }
                     "select" => {
@@ -310,12 +314,17 @@ impl<'a> DomainSqlSession<'a> {
                                 return Err(SqlError::Syntax("duplicate SET column".into()));
                             }
                         }
+                        let mut written_bytes = 0u64;
                         let affected = if let Some(mut row) = tx.get(table.id, &key)? {
                             for (position, value) in replacements { row[position] = value; }
+                            written_bytes = crate::query_budget::row_bytes(&row);
                             tx.replace(table.id, &row)?;
                             1
                         } else { 0 };
-                        if let Some(b) = self.budget.as_mut() { b.charge_rows(affected)?; }
+                        if let Some(b) = self.budget.as_mut() {
+                            b.charge_rows(affected)?;
+                            if affected > 0 { b.charge_bytes(written_bytes)?; }
+                        }
                         Ok(SqlResultSet::Command { affected })
                     }
                     "delete" => {
@@ -325,11 +334,17 @@ impl<'a> DomainSqlSession<'a> {
                         let table = self.engine.resolve(&p.name()?)?;
                         let key = key_predicate(&mut p, &table)?;
                         p.end()?;
-                        let affected = if tx.get(table.id, &key)?.is_some() {
+                        let existing = tx.get(table.id, &key)?;
+                        let deleted_bytes = existing.as_ref()
+                            .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
+                        let affected = if existing.is_some() {
                             tx.delete(table.id, &key)?;
                             1
                         } else { 0 };
-                        if let Some(b) = self.budget.as_mut() { b.charge_rows(affected)?; }
+                        if let Some(b) = self.budget.as_mut() {
+                            b.charge_rows(affected)?;
+                            if affected > 0 { b.charge_bytes(deleted_bytes)?; }
+                        }
                         Ok(SqlResultSet::Command { affected })
                     }
                     _ => unreachable!(),
