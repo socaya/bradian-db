@@ -51,6 +51,12 @@ pub enum SqlError {
     /// reports wall-clock / row / byte / iteration overrun.
     #[error(transparent)]
     Budget(#[from] crate::query_budget::BudgetExceeded),
+    /// ADR 0153 — row/column/tenant policy error from
+    /// ADR 0123 primitives. The SELECT path translates
+    /// unknown-column / null-tenant / non-string-tenant
+    /// into this variant.
+    #[error(transparent)]
+    Policy(#[from] crate::access_policy::PolicyError),
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -609,16 +615,33 @@ impl SqlEngine {
         &self, sql: &str,
         budget: &mut crate::query_budget::BudgetTracker,
     ) -> SqlResult<SqlResultSet> {
-        self.execute_impl(sql, &ScanControl::default(), Some(budget))
+        self.execute_impl(sql, &ScanControl::default(), Some(budget), None, None)
     }
 
     pub fn execute_with_control(&self, sql: &str, control: &ScanControl) -> SqlResult<SqlResultSet> {
-        self.execute_impl(sql, control, None)
+        self.execute_impl(sql, control, None, None, None)
+    }
+
+    /// ADR 0153 — `execute` with an ADR 0123 row/column/
+    /// tenant policy. The SELECT path filters output
+    /// rows via `TableAccessPolicy::allows_row` and
+    /// projects via `project_row`. Other paths are
+    /// unchanged — write authz is left to the caller's
+    /// AuthorizationContext (ADR 0098).
+    pub fn execute_with_policy(
+        &self,
+        sql: &str,
+        policy: &crate::access_policy::TableAccessPolicy,
+        authz: &bradian_core::AuthorizationContext,
+    ) -> SqlResult<SqlResultSet> {
+        self.execute_impl(sql, &ScanControl::default(), None, Some(policy), Some(authz))
     }
 
     fn execute_impl(
         &self, sql: &str, control: &ScanControl,
         mut budget: Option<&mut crate::query_budget::BudgetTracker>,
+        policy: Option<&crate::access_policy::TableAccessPolicy>,
+        authz: Option<&bradian_core::AuthorizationContext>,
     ) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
         // ADR 0150 — one iteration = one executed statement.
@@ -764,6 +787,20 @@ impl SqlEngine {
                     b.charge_bytes(crate::query_budget::rows_bytes(&all))?;
                     b.check_deadline()?;
                 }
+                // ADR 0153 — row/column/tenant policy filter.
+                // Applied BEFORE projection so the policy's
+                // column names match the full-schema row.
+                let all = if let (Some(p), Some(a)) = (policy, authz) {
+                    let schema_cols: Vec<String> = table.columns.iter()
+                        .map(|c| c.name.clone()).collect();
+                    let mut kept = Vec::with_capacity(all.len());
+                    for row in all {
+                        if p.allows_row(&row, &schema_cols, a)? {
+                            kept.push(row);
+                        }
+                    }
+                    kept
+                } else { all };
                 let rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
                 Ok(SqlResultSet::Rows { columns: std::mem::take(&mut selected), rows })
             }
