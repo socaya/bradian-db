@@ -127,6 +127,23 @@ fn update_charges_affected_count() {
 }
 
 #[test]
+fn iteration_cap_breaches_after_limit() {
+    // ADR 0150 — one iteration = one executed statement.
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open(&root).unwrap();
+    let err = db.with_session_budget(QueryBudget {
+        max_iterations: Some(3),  // BEGIN + SELECT + SELECT + SELECT > 3
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM bank.public.audit")?;
+        s.execute("SELECT id FROM bank.public.audit")?;
+        s.execute("SELECT id FROM bank.public.audit")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Iterations { .. })));
+}
+
+#[test]
 fn update_over_byte_budget_errors() {
     // ADR 0149 — DML byte charges on UPDATE. The row
     // after rewrite is wider than 1 byte, so a cap of 1

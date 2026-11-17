@@ -227,6 +227,31 @@ fn truncate_charges_sum_of_all_rows() {
 }
 
 #[test]
+fn iteration_counter_increments_per_statement() {
+    // ADR 0150 — one iteration = one executed statement.
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget("SELECT id FROM app.public.items", &mut tracker).unwrap();
+    eng.execute_with_budget("SELECT id FROM app.public.items", &mut tracker).unwrap();
+    eng.execute_with_budget("SELECT id FROM app.public.items", &mut tracker).unwrap();
+    assert_eq!(tracker.iterations(), 3);
+}
+
+#[test]
+fn iteration_cap_breaches_after_limit() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget {
+        max_iterations: Some(2),
+        ..QueryBudget::unbounded()
+    });
+    eng.execute_with_budget("SELECT id FROM app.public.items", &mut tracker).unwrap();
+    eng.execute_with_budget("SELECT id FROM app.public.items", &mut tracker).unwrap();
+    let err = eng.execute_with_budget(
+        "SELECT id FROM app.public.items", &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Iterations { .. })));
+}
+
+#[test]
 fn select_over_byte_budget_errors_with_sqlerror_budget() {
     let (_d, eng) = seed_engine();
     let mut tracker = BudgetTracker::new(QueryBudget {

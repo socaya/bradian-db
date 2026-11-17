@@ -621,6 +621,8 @@ impl SqlEngine {
         mut budget: Option<&mut crate::query_budget::BudgetTracker>,
     ) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
+        // ADR 0150 — one iteration = one executed statement.
+        if let Some(b) = budget.as_mut() { b.charge_iteration()?; }
         let mut p = Parser::new(sql)?;
         let action = p.word()?;
         match action.as_str() {

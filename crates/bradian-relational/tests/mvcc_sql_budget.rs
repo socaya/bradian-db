@@ -136,6 +136,24 @@ fn existing_with_session_path_unchanged() {
 }
 
 #[test]
+fn iteration_cap_breaches_after_limit() {
+    // ADR 0150 — one iteration = one executed statement.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let eng = MvccSqlEngine::open(dir.path()).unwrap();
+    seed(&eng, 1);
+    let err = eng.with_session_budget(QueryBudget {
+        max_iterations: Some(2),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM app.public.items")?;
+        s.execute("SELECT id FROM app.public.items")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Iterations { .. })));
+}
+
+#[test]
 fn insert_over_byte_budget_errors() {
     // ADR 0149 — DML byte charges.
     let dir = tempdir().unwrap();

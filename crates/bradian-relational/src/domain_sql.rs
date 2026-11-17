@@ -196,6 +196,8 @@ impl<'a> DomainSqlSession<'a> {
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
         let mut p = Parser::new(sql)?;
         let command = p.word()?;
+        // ADR 0150 — one iteration = one executed statement.
+        if let Some(b) = self.budget.as_mut() { b.charge_iteration()?; }
         match command.as_str() {
             "begin" => {
                 p.consume_word("transaction");

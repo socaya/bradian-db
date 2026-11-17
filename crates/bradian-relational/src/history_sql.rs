@@ -528,6 +528,8 @@ impl<'a> HistorySqlSession<'a> {
         if self.failed_statement && command != "rollback" {
             return Err(SqlError::Unsupported("transaction requires ROLLBACK TO a savepoint or ROLLBACK after a statement error".into()));
         }
+        // ADR 0150 — one iteration = one executed statement.
+        if let Some(b) = self.budget.as_mut() { b.charge_iteration()?; }
         match command.as_str() {
             "begin" => {
                 p.consume_word("transaction");

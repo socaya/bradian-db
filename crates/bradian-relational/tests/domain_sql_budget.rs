@@ -137,6 +137,24 @@ fn existing_with_session_path_unchanged() {
 }
 
 #[test]
+fn iteration_cap_breaches_after_limit() {
+    // ADR 0150 — one iteration = one executed statement.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let db = open_registered(dir.path());
+    seed(&db, 1);
+    let err = db.with_session_budget(QueryBudget {
+        max_iterations: Some(2),  // BEGIN + SELECT then breach
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM app.public.items")?;
+        s.execute("SELECT id FROM app.public.items")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Iterations { .. })));
+}
+
+#[test]
 fn insert_over_byte_budget_errors() {
     // ADR 0149 — DML byte charges. Row payload > 5 bytes.
     let dir = tempdir().unwrap();
