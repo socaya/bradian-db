@@ -267,6 +267,8 @@ impl<'a> MvccSqlSession<'a> {
                     SqlError::Unsupported("BEGIN required before transactional DML".into()))?;
                 match command.as_str() {
                     "insert" => {
+                        // ADR 0147 — deadline check before mutation.
+                        if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         p.expect("into")?;
                         let table = self.engine.resolve(&p.name()?)?;
                         let names = p.list(|parser| parser.word())?;
@@ -289,6 +291,7 @@ impl<'a> MvccSqlSession<'a> {
                             coerce(&lit, column)
                         }).collect::<SqlResult<Vec<_>>>()?;
                         tx.insert(table.id, &row)?;
+                        if let Some(b) = self.budget.as_mut() { b.charge_rows(1)?; }
                         Ok(SqlResultSet::Command { affected: 1 })
                     }
                     "select" => {
@@ -326,6 +329,8 @@ impl<'a> MvccSqlSession<'a> {
                         })
                     }
                     "update" => {
+                        // ADR 0147 — deadline check before mutation.
+                        if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         let table = self.engine.resolve(&p.name()?)?;
                         p.expect("set")?;
                         let updates = p.assignments()?;
@@ -346,9 +351,12 @@ impl<'a> MvccSqlSession<'a> {
                             tx.replace(table.id, &row)?;
                             1
                         } else { 0 };
+                        if let Some(b) = self.budget.as_mut() { b.charge_rows(affected)?; }
                         Ok(SqlResultSet::Command { affected })
                     }
                     "delete" => {
+                        // ADR 0147 — deadline check before mutation.
+                        if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         p.expect("from")?;
                         let table = self.engine.resolve(&p.name()?)?;
                         let key = key_predicate(&mut p, &table)?;
@@ -357,6 +365,7 @@ impl<'a> MvccSqlSession<'a> {
                             tx.delete(table.id, &key)?;
                             1
                         } else { 0 };
+                        if let Some(b) = self.budget.as_mut() { b.charge_rows(affected)?; }
                         Ok(SqlResultSet::Command { affected })
                     }
                     _ => unreachable!(),

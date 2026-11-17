@@ -97,17 +97,59 @@ fn execute_without_budget_path_unchanged() {
 }
 
 #[test]
-fn budget_does_not_charge_non_select_statements() {
+fn insert_charges_one_row_and_breaches_over_budget() {
+    // ADR 0147 — INSERT now charges 1 row per statement.
     let (_d, eng) = seed_engine();
     let mut tracker = BudgetTracker::new(QueryBudget {
-        max_rows_scanned: Some(0),  // no rows allowed
+        max_rows_scanned: Some(1),
         ..QueryBudget::unbounded()
     });
-    // INSERT path doesn't consult the budget — this still
-    // succeeds despite the 0-row cap.
-    let rs = eng.execute_with_budget(
+    eng.execute_with_budget(
         "INSERT INTO app.public.items (id, name) VALUES (99, 'x')",
         &mut tracker).unwrap();
-    assert!(matches!(rs, SqlResultSet::Command { affected: 1 }));
+    assert_eq!(tracker.rows_scanned(), 1);
+    let err = eng.execute_with_budget(
+        "INSERT INTO app.public.items (id, name) VALUES (100, 'y')",
+        &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Rows { .. })));
+}
+
+#[test]
+fn update_charges_affected_count_on_hit() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget(
+        "UPDATE app.public.items SET name = 'new' WHERE id = 1",
+        &mut tracker).unwrap();
+    assert_eq!(tracker.rows_scanned(), 1);
+}
+
+#[test]
+fn update_charges_zero_on_miss() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget(
+        "UPDATE app.public.items SET name = 'new' WHERE id = 9999",
+        &mut tracker).unwrap();
     assert_eq!(tracker.rows_scanned(), 0);
+}
+
+#[test]
+fn delete_charges_affected_count_on_hit() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget(
+        "DELETE FROM app.public.items WHERE id = 1",
+        &mut tracker).unwrap();
+    assert_eq!(tracker.rows_scanned(), 1);
+}
+
+#[test]
+fn truncate_charges_every_row_removed() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget(
+        "TRUNCATE TABLE app.public.items", &mut tracker).unwrap();
+    // seed_engine created 5 rows.
+    assert_eq!(tracker.rows_scanned(), 5);
 }

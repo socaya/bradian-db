@@ -137,19 +137,38 @@ fn existing_with_session_path_unchanged() {
 }
 
 #[test]
-fn budget_does_not_charge_inserts() {
+fn insert_charges_one_row_and_second_breaches_cap_of_one() {
+    // ADR 0147 — INSERT now charges 1 row per statement.
     let dir = tempdir().unwrap();
     setup(dir.path());
     let db = open_registered(dir.path());
-    db.with_session_budget(QueryBudget {
-        max_rows_scanned: Some(0),  // no scan allowed
+    let err = db.with_session_budget(QueryBudget {
+        max_rows_scanned: Some(1),
         ..QueryBudget::unbounded()
     }, |s| {
         s.execute("BEGIN")?;
-        // INSERT path doesn't charge; still succeeds under
-        // 0-row budget.
-        let rs = s.execute("INSERT INTO app.public.items (id, name) VALUES (1, 'x')")?;
-        assert!(matches!(rs, SqlResultSet::Command { affected: 1 }));
+        s.execute("INSERT INTO app.public.items (id, name) VALUES (1, 'a')")?; // +1
+        s.execute("INSERT INTO app.public.items (id, name) VALUES (2, 'b')")  // +1 → breach
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Rows { .. })));
+}
+
+#[test]
+fn update_and_delete_charge_affected_rows() {
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let db = open_registered(dir.path());
+    seed(&db, 2);  // rows id=0, id=1
+    // Row budget = 2 (SELECT) + 1 (UPDATE hit) + 0 (UPDATE miss) + 1 (DELETE hit) = 4.
+    db.with_session_budget(QueryBudget {
+        max_rows_scanned: Some(4),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM app.public.items")?;                            // +2
+        s.execute("UPDATE app.public.items SET name = 'x' WHERE id = 0")?;        // +1
+        s.execute("UPDATE app.public.items SET name = 'x' WHERE id = 9999")?;     // +0
+        s.execute("DELETE FROM app.public.items WHERE id = 0")?;                  // +1 → 4 total
         s.execute("COMMIT")
     }).unwrap();
 }

@@ -692,6 +692,8 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "insert" => {
+                // ADR 0147 — deadline check before mutation.
+                if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 p.expect("into")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
@@ -715,6 +717,8 @@ impl SqlEngine {
                     coerce(&literal, column)
                 }).collect::<SqlResult<Vec<_>>>()?;
                 self.table_store(&table)?.insert(&values)?;
+                // ADR 0147 — one row mutated.
+                if let Some(b) = budget.as_mut() { b.charge_rows(1)?; }
                 Ok(SqlResultSet::Command { affected: 1 })
             }
             "select" => {
@@ -767,15 +771,20 @@ impl SqlEngine {
                         return Err(SqlError::Syntax("duplicate SET column".into()));
                     }
                 }
+                // ADR 0147 — deadline check before mutation.
+                if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 let store = self.table_store(&table)?;
                 let affected = if let Some(mut row) = store.get(&pk)? {
                     for (pos, value) in assignments { row[pos] = value; }
                     store.replace(&row)?;
                     1
                 } else { 0 };
+                if let Some(b) = budget.as_mut() { b.charge_rows(affected)?; }
                 Ok(SqlResultSet::Command { affected })
             }
             "delete" => {
+                // ADR 0147 — deadline check before mutation.
+                if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 p.expect("from")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
@@ -786,12 +795,15 @@ impl SqlEngine {
                     store.delete(&pk)?;
                     1
                 } else { 0 };
+                if let Some(b) = budget.as_mut() { b.charge_rows(affected)?; }
                 Ok(SqlResultSet::Command { affected })
             }
             // ADR 0113 — TRUNCATE TABLE removes every row from
             // ONE table without touching catalog schema.
             // Scans PK list, deletes each. No cascading.
             "truncate" => {
+                // ADR 0147 — deadline check before scan + bulk delete.
+                if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 p.expect("table")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
@@ -809,6 +821,7 @@ impl SqlEngine {
                     store.delete(&pk_values)?;
                     affected += 1;
                 }
+                if let Some(b) = budget.as_mut() { b.charge_rows(affected)?; }
                 Ok(SqlResultSet::Command { affected })
             }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),

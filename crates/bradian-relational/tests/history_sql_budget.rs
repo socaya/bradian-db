@@ -105,3 +105,38 @@ fn existing_sessions_without_budget_are_unchanged() {
         s.execute("COMMIT")
     }).unwrap();
 }
+
+#[test]
+fn update_charges_affected_count() {
+    // ADR 0147 — non-SELECT paths now charge the budget.
+    // audit has 1 row with id=9. UPDATE WHERE id=9 touches
+    // 1 row; UPDATE WHERE id=9999 touches 0.
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open(&root).unwrap();
+    let err = db.with_session_budget(QueryBudget {
+        max_rows_scanned: Some(1),  // 1 hit allowed
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE bank.public.audit SET balance = 1 WHERE id = 9999")?; // +0
+        s.execute("UPDATE bank.public.audit SET balance = 1 WHERE id = 9")?;    // +1
+        s.execute("UPDATE bank.public.audit SET balance = 2 WHERE id = 9")      // +1 → 2 > 1
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Rows { .. })),
+        "expected Budget::Rows, got {err:?}");
+}
+
+#[test]
+fn delete_charges_affected_count() {
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open(&root).unwrap();
+    db.with_session_budget(QueryBudget {
+        max_rows_scanned: Some(1),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("DELETE FROM bank.public.audit WHERE id = 9999")?;  // +0
+        s.execute("DELETE FROM bank.public.audit WHERE id = 9")?;     // +1
+        s.execute("ROLLBACK")
+    }).unwrap();
+}
