@@ -136,6 +136,24 @@ fn existing_with_session_path_unchanged() {
 }
 
 #[test]
+fn select_over_byte_budget_errors() {
+    // ADR 0148 — byte budget breach on the SELECT path.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let eng = MvccSqlEngine::open(dir.path()).unwrap();
+    seed(&eng, 3);
+    let err = eng.with_session_budget(QueryBudget {
+        max_bytes_materialized: Some(0),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM app.public.items")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })),
+        "expected Budget::Bytes, got {err:?}");
+}
+
+#[test]
 fn insert_charges_one_row_per_statement() {
     // ADR 0147 — INSERT now charges 1 row.
     let dir = tempdir().unwrap();

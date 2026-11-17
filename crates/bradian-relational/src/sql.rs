@@ -747,8 +747,10 @@ impl SqlEngine {
                 let all = if let Some(key) = key { store.get(&key)?.into_iter().collect::<Vec<_>>() }
                     else { store.scan_with_control(control)? };
                 // ADR 0144 — charge rows then re-check deadline.
+                // ADR 0148 — charge the materialized bytes.
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(all.len() as u64)?;
+                    b.charge_bytes(crate::query_budget::rows_bytes(&all))?;
                     b.check_deadline()?;
                 }
                 let rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;

@@ -127,6 +127,22 @@ fn update_charges_affected_count() {
 }
 
 #[test]
+fn select_over_byte_budget_errors() {
+    // ADR 0148 — the SELECT path charges bytes alongside rows.
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open(&root).unwrap();
+    let err = db.with_session_budget(QueryBudget {
+        max_bytes_materialized: Some(0),  // 0 bytes allowed → any row breaches
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM bank.public.audit")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })),
+        "expected Budget::Bytes, got {err:?}");
+}
+
+#[test]
 fn delete_charges_affected_count() {
     let (_dir, root) = migrated();
     let db = HistorySqlEngine::open(&root).unwrap();

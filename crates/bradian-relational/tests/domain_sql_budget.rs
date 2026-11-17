@@ -137,6 +137,24 @@ fn existing_with_session_path_unchanged() {
 }
 
 #[test]
+fn select_over_byte_budget_errors() {
+    // ADR 0148 — byte budget breach on the SELECT path.
+    let dir = tempdir().unwrap();
+    setup(dir.path());
+    let db = open_registered(dir.path());
+    seed(&db, 3);
+    let err = db.with_session_budget(QueryBudget {
+        max_bytes_materialized: Some(0),
+        ..QueryBudget::unbounded()
+    }, |s| {
+        s.execute("BEGIN")?;
+        s.execute("SELECT id FROM app.public.items")
+    }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })),
+        "expected Budget::Bytes, got {err:?}");
+}
+
+#[test]
 fn insert_charges_one_row_and_second_breaches_cap_of_one() {
     // ADR 0147 — INSERT now charges 1 row per statement.
     let dir = tempdir().unwrap();

@@ -92,6 +92,32 @@ pub struct BudgetTracker {
     iterations: u64,
 }
 
+/// ADR 0148 — approximate materialized byte size of one
+/// row. Used by the SQL engines' SELECT paths to charge
+/// the budget's `max_bytes_materialized` knob. Size
+/// matches the stored width of each `Value` variant, not
+/// the Rust `std::mem::size_of` footprint — the caller
+/// cares about "bytes the query produced", not
+/// alignment / discriminant padding.
+pub fn row_bytes(row: &[crate::typed_table::Value]) -> u64 {
+    use crate::typed_table::Value;
+    row.iter().map(|v| match v {
+        Value::Null => 1,
+        Value::Boolean(_) => 1,
+        Value::Int32(_) => 4,
+        Value::Int64(_) => 8,
+        Value::Decimal(_) => 16,
+        Value::TimestampTz(_) => 8,
+        Value::Uuid(_) => 16,
+        Value::String(s) => s.len() as u64,
+    }).sum()
+}
+
+/// ADR 0148 — sum of `row_bytes` across a row slice.
+pub fn rows_bytes(rows: &[Vec<crate::typed_table::Value>]) -> u64 {
+    rows.iter().map(|r| row_bytes(r)).sum()
+}
+
 impl BudgetTracker {
     pub fn new(budget: QueryBudget) -> Self {
         Self {
@@ -269,5 +295,37 @@ mod tests {
         t.charge_rows(u64::MAX).unwrap();
         t.charge_rows(100).unwrap();  // saturates, does not panic
         assert_eq!(t.rows_scanned(), u64::MAX);
+    }
+
+    #[test]
+    fn row_bytes_counts_variants_correctly() {
+        use crate::typed_table::Value;
+        let r = [
+            Value::Null,                 // 1
+            Value::Boolean(true),         // 1
+            Value::Int32(0),              // 4
+            Value::Int64(0),              // 8
+            Value::Decimal(0),            // 16
+            Value::TimestampTz(0),        // 8
+            Value::Uuid([0; 16]),         // 16
+            Value::String("abcde".into()),// 5
+        ];
+        assert_eq!(row_bytes(&r), 1 + 1 + 4 + 8 + 16 + 8 + 16 + 5);
+    }
+
+    #[test]
+    fn rows_bytes_sums_across_rows() {
+        use crate::typed_table::Value;
+        let rows = vec![
+            vec![Value::Int32(0), Value::Int32(0)],
+            vec![Value::String("x".into()), Value::String("yz".into())],
+        ];
+        assert_eq!(rows_bytes(&rows), 4 + 4 + 1 + 2);
+    }
+
+    #[test]
+    fn empty_row_is_zero_bytes() {
+        let r: Vec<crate::typed_table::Value> = vec![];
+        assert_eq!(row_bytes(&r), 0);
     }
 }

@@ -153,3 +153,29 @@ fn truncate_charges_every_row_removed() {
     // seed_engine created 5 rows.
     assert_eq!(tracker.rows_scanned(), 5);
 }
+
+#[test]
+fn select_charges_byte_size_of_materialized_rows() {
+    // ADR 0148 — the SELECT path charges bytes alongside
+    // rows. seed_engine inserts id=0..4 + "row0".."row4";
+    // each row is 8-byte Int64 + ~4-byte string.
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded());
+    eng.execute_with_budget(
+        "SELECT id FROM app.public.items", &mut tracker).unwrap();
+    // 5 rows × (8-byte id + 4-byte name) = 60 bytes.
+    assert_eq!(tracker.bytes_materialized(), 60);
+}
+
+#[test]
+fn select_over_byte_budget_errors_with_sqlerror_budget() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget {
+        max_bytes_materialized: Some(10),  // too tight
+        ..QueryBudget::unbounded()
+    });
+    let err = eng.execute_with_budget(
+        "SELECT id FROM app.public.items", &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })),
+        "expected Budget::Bytes, got {err:?}");
+}

@@ -317,8 +317,10 @@ impl<'a> MvccSqlSession<'a> {
                         };
                         p.end()?;
                         // ADR 0146 — charge rows after scan.
+                        // ADR 0148 — charge materialized bytes.
                         if let Some(b) = self.budget.as_mut() {
                             b.charge_rows(rows.len() as u64)?;
+                            b.charge_bytes(crate::query_budget::rows_bytes(&rows))?;
                             b.check_deadline()?;
                         }
                         Ok(SqlResultSet::Rows {
