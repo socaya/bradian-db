@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use bradian_relational::query_budget::{BudgetExceeded, BudgetTracker, QueryBudget};
+use bradian_relational::query_budget::{BudgetExceeded, BudgetTracker, CancellationHandle, QueryBudget};
 use bradian_relational::sql::{SqlEngine, SqlError, SqlResultSet};
 
 fn seed_engine() -> (tempfile::TempDir, SqlEngine) {
@@ -263,6 +263,24 @@ fn delete_over_byte_budget_is_rejected_before_storage_side_effect() {
         "SELECT id FROM app.public.items WHERE id = 1").unwrap();
     let SqlResultSet::Rows { rows, .. } = rs else { panic!(); };
     assert_eq!(rows.len(), 1, "rejected DELETE must not remove the row");
+}
+
+#[test]
+fn cancellation_handle_aborts_next_statement() {
+    // ADR 0152 — cooperative cancellation via a shared
+    // CancellationHandle. Attach to a BudgetTracker.
+    let (_d, eng) = seed_engine();
+    let handle = CancellationHandle::new();
+    let mut tracker = BudgetTracker::new(QueryBudget::unbounded())
+        .with_cancellation(handle.clone());
+    // First SELECT runs fine.
+    eng.execute_with_budget(
+        "SELECT id FROM app.public.items", &mut tracker).unwrap();
+    // Flip cancellation from "another thread" (same here).
+    handle.cancel();
+    let err = eng.execute_with_budget(
+        "SELECT id FROM app.public.items", &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Cancelled)));
 }
 
 #[test]

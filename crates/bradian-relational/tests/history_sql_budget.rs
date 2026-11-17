@@ -9,7 +9,7 @@ use fixture::migrated;
 use std::time::Duration;
 
 use bradian_relational::history_sql::HistorySqlEngine;
-use bradian_relational::query_budget::{BudgetExceeded, QueryBudget};
+use bradian_relational::query_budget::{BudgetExceeded, CancellationHandle, QueryBudget};
 use bradian_relational::sql::{SqlError, SqlResultSet};
 
 #[test]
@@ -124,6 +124,27 @@ fn update_charges_affected_count() {
     }).unwrap_err();
     assert!(matches!(err, SqlError::Budget(BudgetExceeded::Rows { .. })),
         "expected Budget::Rows, got {err:?}");
+}
+
+#[test]
+fn cancellation_from_another_thread_aborts_next_statement() {
+    // ADR 0152 — a canceled handle causes the next
+    // check-point to return BudgetExceeded::Cancelled.
+    let (_dir, root) = migrated();
+    let db = HistorySqlEngine::open(&root).unwrap();
+    let handle = CancellationHandle::new();
+    let h2 = handle.clone();
+    let err = db.with_session_budget_and_cancellation(
+        QueryBudget::unbounded(), handle, |s| {
+            s.execute("BEGIN")?;
+            s.execute("SELECT id FROM bank.public.audit")?;
+            // Cancel from another "thread" (same thread here,
+            // but the AtomicBool semantics are identical).
+            h2.cancel();
+            s.execute("SELECT id FROM bank.public.audit")
+        }).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Cancelled)),
+        "expected Cancelled, got {err:?}");
 }
 
 #[test]

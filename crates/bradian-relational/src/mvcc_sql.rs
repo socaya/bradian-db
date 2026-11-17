@@ -205,6 +205,25 @@ impl MvccSqlEngine {
         };
         callback(&mut session)
     }
+
+    /// ADR 0152 — session with a budget + cooperative
+    /// cancellation handle.
+    pub fn with_session_budget_and_cancellation<R>(
+        &self,
+        budget: crate::query_budget::QueryBudget,
+        cancellation: crate::query_budget::CancellationHandle,
+        callback: impl FnOnce(&mut MvccSqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        let tracker = crate::query_budget::BudgetTracker::new(budget)
+            .with_cancellation(cancellation);
+        let mut session = MvccSqlSession {
+            engine: self,
+            active: None,
+            last_commit_lsn: None,
+            budget: Some(tracker),
+        };
+        callback(&mut session)
+    }
 }
 
 /// A scoped SQL session that may access several registered catalog tables.

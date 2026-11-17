@@ -28,6 +28,8 @@
 //! - CPU-time budget (needs libc getrusage).
 //! - Priority / fair scheduling.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -77,6 +79,24 @@ pub enum BudgetExceeded {
     Bytes { bytes: u64, max: u64 },
     #[error("query exceeded iteration budget: iterations {iterations} > max {max}")]
     Iterations { iterations: u64, max: u64 },
+    /// ADR 0152 — cooperative cancellation triggered.
+    #[error("query cancelled by caller")]
+    Cancelled,
+}
+
+/// ADR 0152 — cooperative cancellation handle. Clone-able;
+/// all clones share one `AtomicBool`. Flip from any thread
+/// to signal the budget tracker to reject its next check
+/// point with `BudgetExceeded::Cancelled`.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationHandle {
+    flag: Arc<AtomicBool>,
+}
+
+impl CancellationHandle {
+    pub fn new() -> Self { Self::default() }
+    pub fn cancel(&self) { self.flag.store(true, Ordering::Relaxed); }
+    pub fn is_cancelled(&self) -> bool { self.flag.load(Ordering::Relaxed) }
 }
 
 pub type BudgetResult<T> = std::result::Result<T, BudgetExceeded>;
@@ -90,6 +110,8 @@ pub struct BudgetTracker {
     rows_scanned: u64,
     bytes_materialized: u64,
     iterations: u64,
+    /// ADR 0152 — optional cooperative cancellation handle.
+    cancellation: Option<CancellationHandle>,
 }
 
 /// ADR 0148 — approximate materialized byte size of one
@@ -123,7 +145,17 @@ impl BudgetTracker {
         Self {
             budget, start: Instant::now(),
             rows_scanned: 0, bytes_materialized: 0, iterations: 0,
+            cancellation: None,
         }
+    }
+
+    /// ADR 0152 — attach a cooperative cancellation handle.
+    /// Flipping the handle from another thread causes the
+    /// next `check_deadline` / `preview_charge` /
+    /// `charge_*` call to return `BudgetExceeded::Cancelled`.
+    pub fn with_cancellation(mut self, handle: CancellationHandle) -> Self {
+        self.cancellation = Some(handle);
+        self
     }
 
     pub fn budget(&self) -> &QueryBudget { &self.budget }
@@ -188,8 +220,11 @@ impl BudgetTracker {
 
     /// Check only the wall-clock budget — cheap enough to
     /// call from an inner loop every few thousand
-    /// iterations.
+    /// iterations. Also checks ADR 0152 cancellation.
     pub fn check_deadline(&self) -> BudgetResult<()> {
+        if let Some(h) = self.cancellation.as_ref() {
+            if h.is_cancelled() { return Err(BudgetExceeded::Cancelled); }
+        }
         if let Some(m) = self.budget.max_duration {
             let e = self.elapsed();
             if e > m {
@@ -385,6 +420,47 @@ mod tests {
         let err = t.preview_charge(0, 11).unwrap_err();
         assert!(matches!(err, BudgetExceeded::Bytes { .. }));
         assert_eq!(t.bytes_materialized(), 0);
+    }
+
+    #[test]
+    fn cancellation_handle_defaults_to_not_cancelled() {
+        let h = CancellationHandle::new();
+        assert!(!h.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_handle_cancel_flips_flag() {
+        let h = CancellationHandle::new();
+        h.cancel();
+        assert!(h.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_clones_share_flag() {
+        let a = CancellationHandle::new();
+        let b = a.clone();
+        a.cancel();
+        assert!(b.is_cancelled());
+    }
+
+    #[test]
+    fn check_deadline_fires_when_cancelled() {
+        let h = CancellationHandle::new();
+        let t = BudgetTracker::new(QueryBudget::unbounded())
+            .with_cancellation(h.clone());
+        h.cancel();
+        let err = t.check_deadline().unwrap_err();
+        assert_eq!(err, BudgetExceeded::Cancelled);
+    }
+
+    #[test]
+    fn preview_charge_fires_when_cancelled() {
+        let h = CancellationHandle::new();
+        let t = BudgetTracker::new(QueryBudget::unbounded())
+            .with_cancellation(h.clone());
+        h.cancel();
+        let err = t.preview_charge(1, 1).unwrap_err();
+        assert_eq!(err, BudgetExceeded::Cancelled);
     }
 
     #[test]
