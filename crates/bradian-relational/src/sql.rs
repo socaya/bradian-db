@@ -718,12 +718,17 @@ impl SqlEngine {
                         .ok_or_else(|| SqlError::Resolution(format!("missing column {}", column.name)))?;
                     coerce(&literal, column)
                 }).collect::<SqlResult<Vec<_>>>()?;
+                // ADR 0151 — preflight the budget BEFORE touching
+                // storage. The base SqlEngine has no transaction
+                // wrapping, so a post-mutation charge would leave
+                // the row committed on budget breach.
+                let row_bytes = crate::query_budget::row_bytes(&values);
+                if let Some(b) = budget.as_deref() { b.preview_charge(1, row_bytes)?; }
                 self.table_store(&table)?.insert(&values)?;
-                // ADR 0147 — one row mutated.
-                // ADR 0149 — charge the bytes of the inserted row.
+                // Commit the charge — guaranteed not to breach.
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(1)?;
-                    b.charge_bytes(crate::query_budget::row_bytes(&values))?;
+                    b.charge_bytes(row_bytes)?;
                 }
                 Ok(SqlResultSet::Command { affected: 1 })
             }
@@ -782,14 +787,16 @@ impl SqlEngine {
                 // ADR 0147 — deadline check before mutation.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 let store = self.table_store(&table)?;
+                let existing = store.get(&pk)?;
                 let mut written_bytes = 0u64;
-                let affected = if let Some(mut row) = store.get(&pk)? {
+                let affected = if let Some(mut row) = existing {
                     for (pos, value) in assignments { row[pos] = value; }
                     written_bytes = crate::query_budget::row_bytes(&row);
+                    // ADR 0151 — preflight before replace.
+                    if let Some(b) = budget.as_deref() { b.preview_charge(1, written_bytes)?; }
                     store.replace(&row)?;
                     1
                 } else { 0 };
-                // ADR 0147 rows + ADR 0149 bytes.
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(affected)?;
                     if affected > 0 { b.charge_bytes(written_bytes)?; }
@@ -808,6 +815,10 @@ impl SqlEngine {
                 let existing = store.get(&pk)?;
                 let deleted_bytes = existing.as_ref()
                     .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
+                // ADR 0151 — preflight before delete.
+                if existing.is_some() {
+                    if let Some(b) = budget.as_deref() { b.preview_charge(1, deleted_bytes)?; }
+                }
                 let affected = if existing.is_some() {
                     store.delete(&pk)?;
                     1
@@ -832,6 +843,10 @@ impl SqlEngine {
                 let rows = store.scan()?;
                 // ADR 0149 — charge bytes once for the whole truncated set.
                 let truncated_bytes = crate::query_budget::rows_bytes(&rows);
+                // ADR 0151 — preflight before bulk delete.
+                if let Some(b) = budget.as_deref() {
+                    b.preview_charge(rows.len() as u64, truncated_bytes)?;
+                }
                 let mut affected = 0u64;
                 for row in rows {
                     let pk_values: Vec<Value> = table.primary_key.columns.iter()

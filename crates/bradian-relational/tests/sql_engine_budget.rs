@@ -227,6 +227,45 @@ fn truncate_charges_sum_of_all_rows() {
 }
 
 #[test]
+fn insert_over_byte_budget_is_rejected_before_storage_side_effect() {
+    // ADR 0151 — preflight: a budget breach must prevent the
+    // mutation from reaching storage. After the rejected
+    // INSERT, the row must NOT be visible.
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget {
+        max_bytes_materialized: Some(5),  // too tight
+        ..QueryBudget::unbounded()
+    });
+    let err = eng.execute_with_budget(
+        "INSERT INTO app.public.items (id, name) VALUES (1000, 'rejected')",
+        &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })));
+    // Verify the row is NOT present (no post-commit leak).
+    let rs = eng.execute(
+        "SELECT id FROM app.public.items WHERE id = 1000").unwrap();
+    let SqlResultSet::Rows { rows, .. } = rs else { panic!("expected rows"); };
+    assert!(rows.is_empty(), "rejected INSERT must not leave a row behind");
+}
+
+#[test]
+fn delete_over_byte_budget_is_rejected_before_storage_side_effect() {
+    let (_d, eng) = seed_engine();
+    let mut tracker = BudgetTracker::new(QueryBudget {
+        max_bytes_materialized: Some(5),
+        ..QueryBudget::unbounded()
+    });
+    let err = eng.execute_with_budget(
+        "DELETE FROM app.public.items WHERE id = 1",
+        &mut tracker).unwrap_err();
+    assert!(matches!(err, SqlError::Budget(BudgetExceeded::Bytes { .. })));
+    // Verify id=1 still exists.
+    let rs = eng.execute(
+        "SELECT id FROM app.public.items WHERE id = 1").unwrap();
+    let SqlResultSet::Rows { rows, .. } = rs else { panic!(); };
+    assert_eq!(rows.len(), 1, "rejected DELETE must not remove the row");
+}
+
+#[test]
 fn iteration_counter_increments_per_statement() {
     // ADR 0150 — one iteration = one executed statement.
     let (_d, eng) = seed_engine();

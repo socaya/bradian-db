@@ -163,6 +163,29 @@ impl BudgetTracker {
         Ok(())
     }
 
+    /// ADR 0151 — would charging `rows` + `bytes` breach the
+    /// budget? Returns `Err` with the matching variant but
+    /// DOES NOT mutate the tracker. Callers use this to
+    /// pre-flight a mutation before committing storage side
+    /// effects. Deadline and iteration are checked too —
+    /// they are read-only regardless.
+    pub fn preview_charge(&self, rows: u64, bytes: u64) -> BudgetResult<()> {
+        self.check_deadline()?;
+        if let Some(m) = self.budget.max_rows_scanned {
+            let projected = self.rows_scanned.saturating_add(rows);
+            if projected > m {
+                return Err(BudgetExceeded::Rows { scanned: projected, max: m });
+            }
+        }
+        if let Some(m) = self.budget.max_bytes_materialized {
+            let projected = self.bytes_materialized.saturating_add(bytes);
+            if projected > m {
+                return Err(BudgetExceeded::Bytes { bytes: projected, max: m });
+            }
+        }
+        Ok(())
+    }
+
     /// Check only the wall-clock budget — cheap enough to
     /// call from an inner loop every few thousand
     /// iterations.
@@ -327,5 +350,60 @@ mod tests {
     fn empty_row_is_zero_bytes() {
         let r: Vec<crate::typed_table::Value> = vec![];
         assert_eq!(row_bytes(&r), 0);
+    }
+
+    #[test]
+    fn preview_charge_does_not_mutate_on_success() {
+        let t = BudgetTracker::new(QueryBudget {
+            max_rows_scanned: Some(100),
+            max_bytes_materialized: Some(1000),
+            ..QueryBudget::unbounded()
+        });
+        t.preview_charge(10, 100).unwrap();
+        // Counters unchanged.
+        assert_eq!(t.rows_scanned(), 0);
+        assert_eq!(t.bytes_materialized(), 0);
+    }
+
+    #[test]
+    fn preview_charge_rejects_over_row_budget_without_mutation() {
+        let t = BudgetTracker::new(QueryBudget {
+            max_rows_scanned: Some(5),
+            ..QueryBudget::unbounded()
+        });
+        let err = t.preview_charge(6, 0).unwrap_err();
+        assert!(matches!(err, BudgetExceeded::Rows { .. }));
+        assert_eq!(t.rows_scanned(), 0);
+    }
+
+    #[test]
+    fn preview_charge_rejects_over_byte_budget_without_mutation() {
+        let t = BudgetTracker::new(QueryBudget {
+            max_bytes_materialized: Some(10),
+            ..QueryBudget::unbounded()
+        });
+        let err = t.preview_charge(0, 11).unwrap_err();
+        assert!(matches!(err, BudgetExceeded::Bytes { .. }));
+        assert_eq!(t.bytes_materialized(), 0);
+    }
+
+    #[test]
+    fn preview_then_commit_accumulates() {
+        let mut t = BudgetTracker::new(QueryBudget {
+            max_rows_scanned: Some(10),
+            max_bytes_materialized: Some(100),
+            ..QueryBudget::unbounded()
+        });
+        t.preview_charge(3, 30).unwrap();
+        t.charge_rows(3).unwrap();
+        t.charge_bytes(30).unwrap();
+        t.preview_charge(3, 30).unwrap();
+        t.charge_rows(3).unwrap();
+        t.charge_bytes(30).unwrap();
+        // Third preview: projected 9 rows / 90 bytes — still fits.
+        t.preview_charge(3, 30).unwrap();
+        // But projected 11 rows (over cap 10) — breaches.
+        let err = t.preview_charge(5, 0).unwrap_err();
+        assert!(matches!(err, BudgetExceeded::Rows { .. }));
     }
 }
