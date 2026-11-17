@@ -456,6 +456,29 @@ impl HistorySqlEngine {
             active: None,
             failed_statement: false,
             last_commit_lsn: None,
+            budget: None,
+        };
+        callback(&mut session)
+    }
+
+    /// ADR 0143 — session with a caller-supplied per-query
+    /// budget (`BudgetTracker`). The SELECT path charges
+    /// scanned rows + checks the wall-clock deadline at
+    /// scan admission; breach returns `SqlError::Budget`.
+    /// Other paths are unchanged.
+    pub fn with_session_budget<R>(
+        &self, budget: crate::query_budget::QueryBudget,
+        callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        self.require_ready()?;
+        let mut session = HistorySqlSession {
+            engine: self,
+            control: ScanControl::default(),
+            staging: StagingLimits::default(),
+            active: None,
+            failed_statement: false,
+            last_commit_lsn: None,
+            budget: Some(crate::query_budget::BudgetTracker::new(budget)),
         };
         callback(&mut session)
     }
@@ -469,6 +492,8 @@ pub struct HistorySqlSession<'a> {
     active: Option<DurableTypedTransaction<'a>>,
     last_commit_lsn: Option<u64>,
     failed_statement: bool,
+    /// ADR 0143 — optional per-query budget tracker.
+    budget: Option<crate::query_budget::BudgetTracker>,
 }
 
 impl<'a> HistorySqlSession<'a> {
@@ -626,6 +651,8 @@ impl<'a> HistorySqlSession<'a> {
                     }
                     "select" => {
                         self.control.check()?;
+                        // ADR 0143 — deadline check before scan.
+                        if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         let requested = if p.consume_symbol('*') { None } else {
                             let mut names = vec![p.word()?];
                             while p.consume_symbol(',') { names.push(p.word()?); }
@@ -672,6 +699,12 @@ impl<'a> HistorySqlSession<'a> {
                             }
                         };
                         control.check()?;
+                        // ADR 0143 — charge the budget for the
+                        // materialized row count before windowing.
+                        if let Some(b) = self.budget.as_mut() {
+                            b.charge_rows(rows.len() as u64)?;
+                            b.check_deadline()?;
+                        }
                         let rows = window.apply(rows, &table)?;
                         control.check()?;
                         Ok(SqlResultSet::Rows {

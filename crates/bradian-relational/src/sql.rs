@@ -46,6 +46,11 @@ pub enum SqlError {
     /// for the statement.
     #[error(transparent)]
     Authz(#[from] bradian_core::AuthorizationDenied),
+    /// ADR 0143 — per-query budget breach. Returned by the
+    /// SELECT path when a caller-supplied `BudgetTracker`
+    /// reports wall-clock / row / byte / iteration overrun.
+    #[error(transparent)]
+    Budget(#[from] crate::query_budget::BudgetExceeded),
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
