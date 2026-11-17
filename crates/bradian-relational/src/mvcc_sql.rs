@@ -184,6 +184,8 @@ impl MvccSqlEngine {
             active: None,
             last_commit_lsn: None,
             budget: None,
+            policy: None,
+            authz: None,
         };
         callback(&mut session)
     }
@@ -202,6 +204,8 @@ impl MvccSqlEngine {
             active: None,
             last_commit_lsn: None,
             budget: Some(crate::query_budget::BudgetTracker::new(budget)),
+            policy: None,
+            authz: None,
         };
         callback(&mut session)
     }
@@ -221,6 +225,28 @@ impl MvccSqlEngine {
             active: None,
             last_commit_lsn: None,
             budget: Some(tracker),
+            policy: None,
+            authz: None,
+        };
+        callback(&mut session)
+    }
+
+    /// ADR 0154 — session with an ADR 0123 row/column/
+    /// tenant policy. SELECT output filtered by
+    /// `TableAccessPolicy::allows_row`.
+    pub fn with_session_policy<R>(
+        &self,
+        policy: crate::access_policy::TableAccessPolicy,
+        authz: bradian_core::AuthorizationContext,
+        callback: impl FnOnce(&mut MvccSqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        let mut session = MvccSqlSession {
+            engine: self,
+            active: None,
+            last_commit_lsn: None,
+            budget: None,
+            policy: Some(policy),
+            authz: Some(authz),
         };
         callback(&mut session)
     }
@@ -233,6 +259,10 @@ pub struct MvccSqlSession<'a> {
     last_commit_lsn: Option<u64>,
     /// ADR 0146 — optional per-query budget tracker.
     budget: Option<crate::query_budget::BudgetTracker>,
+    /// ADR 0154 — optional row/column/tenant policy.
+    policy: Option<crate::access_policy::TableAccessPolicy>,
+    /// ADR 0154 — authorization context paired with policy.
+    authz: Option<bradian_core::AuthorizationContext>,
 }
 
 impl<'a> MvccSqlSession<'a> {
@@ -348,6 +378,20 @@ impl<'a> MvccSqlSession<'a> {
                             b.charge_bytes(crate::query_budget::rows_bytes(&rows))?;
                             b.check_deadline()?;
                         }
+                        // ADR 0154 — row/column/tenant policy filter.
+                        let rows: Vec<Vec<_>> = if let (Some(p_), Some(a)) =
+                            (self.policy.as_ref(), self.authz.as_ref())
+                        {
+                            let schema_cols: Vec<String> = table.columns.iter()
+                                .map(|c| c.name.clone()).collect();
+                            let mut kept = Vec::with_capacity(rows.len());
+                            for row in rows {
+                                if p_.allows_row(&row, &schema_cols, a)? {
+                                    kept.push(row);
+                                }
+                            }
+                            kept
+                        } else { rows };
                         Ok(SqlResultSet::Rows {
                             columns,
                             rows: rows.into_iter().map(|row: Vec<_>|

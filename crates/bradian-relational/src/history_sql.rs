@@ -457,6 +457,8 @@ impl HistorySqlEngine {
             failed_statement: false,
             last_commit_lsn: None,
             budget: None,
+            policy: None,
+            authz: None,
         };
         callback(&mut session)
     }
@@ -479,6 +481,8 @@ impl HistorySqlEngine {
             failed_statement: false,
             last_commit_lsn: None,
             budget: Some(crate::query_budget::BudgetTracker::new(budget)),
+            policy: None,
+            authz: None,
         };
         callback(&mut session)
     }
@@ -504,6 +508,34 @@ impl HistorySqlEngine {
             failed_statement: false,
             last_commit_lsn: None,
             budget: Some(tracker),
+            policy: None,
+            authz: None,
+        };
+        callback(&mut session)
+    }
+
+    /// ADR 0154 — session with an ADR 0123 row/column/
+    /// tenant policy. The SELECT path filters output
+    /// rows via `TableAccessPolicy::allows_row` using
+    /// the caller's `AuthorizationContext`. Writes are
+    /// not filtered.
+    pub fn with_session_policy<R>(
+        &self,
+        policy: crate::access_policy::TableAccessPolicy,
+        authz: bradian_core::AuthorizationContext,
+        callback: impl FnOnce(&mut HistorySqlSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        self.require_ready()?;
+        let mut session = HistorySqlSession {
+            engine: self,
+            control: ScanControl::default(),
+            staging: StagingLimits::default(),
+            active: None,
+            failed_statement: false,
+            last_commit_lsn: None,
+            budget: None,
+            policy: Some(policy),
+            authz: Some(authz),
         };
         callback(&mut session)
     }
@@ -519,6 +551,11 @@ pub struct HistorySqlSession<'a> {
     failed_statement: bool,
     /// ADR 0143 — optional per-query budget tracker.
     budget: Option<crate::query_budget::BudgetTracker>,
+    /// ADR 0154 — optional row/column/tenant policy.
+    policy: Option<crate::access_policy::TableAccessPolicy>,
+    /// ADR 0154 — authorization context supplied with the
+    /// policy (only consulted alongside `policy`).
+    authz: Option<bradian_core::AuthorizationContext>,
 }
 
 impl<'a> HistorySqlSession<'a> {
@@ -740,6 +777,20 @@ impl<'a> HistorySqlSession<'a> {
                             b.charge_bytes(crate::query_budget::rows_bytes(&rows))?;
                             b.check_deadline()?;
                         }
+                        // ADR 0154 — row/column/tenant policy filter.
+                        let rows = if let (Some(p_), Some(a)) =
+                            (self.policy.as_ref(), self.authz.as_ref())
+                        {
+                            let schema_cols: Vec<String> = table.columns.iter()
+                                .map(|c| c.name.clone()).collect();
+                            let mut kept = Vec::with_capacity(rows.len());
+                            for row in rows {
+                                if p_.allows_row(&row, &schema_cols, a)? {
+                                    kept.push(row);
+                                }
+                            }
+                            kept
+                        } else { rows };
                         let rows = window.apply(rows, &table)?;
                         control.check()?;
                         Ok(SqlResultSet::Rows {
