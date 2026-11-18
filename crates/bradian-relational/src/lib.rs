@@ -70,6 +70,10 @@ pub mod htap_watermark;
 pub mod driver;
 /// ADR 0158 — SqlEngine driver adapter.
 pub mod driver_adapter;
+/// ADR 0160 — session-engine driver adapters.
+pub mod driver_adapter_sessions;
+/// ADR 0162 — in-process transport primitive.
+pub mod local_transport;
 /// ADR 0131 — bounded reader fuzzing harness.
 pub mod reader_fuzz;
 /// ADR 0132 — PITR restore-plan selector.
@@ -80,6 +84,10 @@ pub mod column_batch;
 pub mod committed_projection;
 /// ADR 0159 — projector worker (watermark advancer).
 pub mod projector_worker;
+/// ADR 0163 — durable projection segment writer.
+pub mod projection_segment;
+/// ADR 0164 — projector scheduler.
+pub mod projector_scheduler;
 /// ADR 0135 — SET NOT NULL backfill validator.
 pub mod backfill_validator;
 /// ADR 0136 — DEFAULT expression primitive.

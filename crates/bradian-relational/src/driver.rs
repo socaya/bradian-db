@@ -74,6 +74,85 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
     /// must NOT accept a batch — multi-statement execution
     /// belongs in a future session API.
     fn execute(&self, sql: &str) -> DriverResult<DriverResponse>;
+
+    /// ADR 0161 — execute a parameterised prepared
+    /// statement. The default implementation validates
+    /// the envelope, binds parameters into literal
+    /// positions via `bind_literals`, and delegates to
+    /// `execute(sql)`. Native-backed drivers can override
+    /// for caching / server-side plans.
+    fn execute_prepared(
+        &self,
+        stmt: &crate::prepared::PreparedStatement,
+    ) -> DriverResult<DriverResponse> {
+        stmt.validate().map_err(|e| DriverError::Sql(e.to_string()))?;
+        let sql = bind_literals(&stmt.sql, &stmt.params)
+            .map_err(DriverError::Sql)?;
+        self.execute(&sql)
+    }
+}
+
+/// ADR 0161 — textual parameter binding. Replaces `$N`
+/// positional placeholders with literal SQL. Not a
+/// substitute for server-side prepared plans, but
+/// sufficient for the current driver surface where the
+/// backing engine re-parses every statement.
+///
+/// Honest scope: minimal literal emission. No SQL
+/// injection protection beyond parameter typing — the
+/// caller is responsible for validating parameter
+/// provenance before passing them through a trusted
+/// `Driver`.
+pub fn bind_literals(
+    template: &str,
+    params: &[crate::typed_table::Value],
+) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let mut j = i + 1;
+            let mut n: u32 = 0;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                n = n.saturating_mul(10)
+                    .saturating_add((bytes[j] - b'0') as u32);
+                j += 1;
+            }
+            if n == 0 { return Err("placeholder $0 is invalid".into()); }
+            if (n as usize) > params.len() {
+                return Err(format!("placeholder ${n} out of range"));
+            }
+            out.push_str(&value_to_sql(&params[(n - 1) as usize]));
+            i = j;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn value_to_sql(v: &crate::typed_table::Value) -> String {
+    use crate::typed_table::Value;
+    match v {
+        Value::Null => "NULL".into(),
+        Value::Boolean(b) => if *b { "TRUE".into() } else { "FALSE".into() },
+        Value::Int32(n) => n.to_string(),
+        Value::Int64(n) => n.to_string(),
+        Value::Decimal(d) => d.to_string(),
+        Value::TimestampTz(micros) => micros.to_string(),
+        Value::Uuid(bytes) => {
+            let mut hex = String::with_capacity(32);
+            for b in bytes { hex.push_str(&format!("{b:02x}")); }
+            format!("'{hex}'")
+        }
+        Value::String(s) => {
+            // Single-quote-escape via doubling.
+            let escaped = s.replace('\'', "''");
+            format!("'{escaped}'")
+        }
+    }
 }
 
 /// ADR 0129 — stub driver that never executes anything.
@@ -157,5 +236,69 @@ mod tests {
             values: vec![Value::Int32(1), Value::String("x".into())],
         };
         assert_eq!(r.columns.len(), r.values.len());
+    }
+
+    #[test]
+    fn bind_literals_substitutes_positional_placeholders() {
+        let out = bind_literals(
+            "SELECT * FROM t WHERE id = $1 AND name = $2",
+            &[Value::Int64(42), Value::String("alice".into())],
+        ).unwrap();
+        assert_eq!(out, "SELECT * FROM t WHERE id = 42 AND name = 'alice'");
+    }
+
+    #[test]
+    fn bind_literals_escapes_single_quotes_in_strings() {
+        let out = bind_literals(
+            "INSERT INTO t VALUES ($1)",
+            &[Value::String("it's".into())],
+        ).unwrap();
+        assert_eq!(out, "INSERT INTO t VALUES ('it''s')");
+    }
+
+    #[test]
+    fn bind_literals_rejects_out_of_range_placeholder() {
+        let err = bind_literals(
+            "SELECT $5", &[Value::Int64(1)],
+        ).unwrap_err();
+        assert!(err.contains("out of range"));
+    }
+
+    #[test]
+    fn bind_literals_rejects_zero_indexed_placeholder() {
+        let err = bind_literals("SELECT $0", &[]).unwrap_err();
+        assert!(err.contains("$0"));
+    }
+
+    #[test]
+    fn bind_literals_handles_null_boolean_and_uuid() {
+        let out = bind_literals(
+            "VALUES ($1, $2, $3, $4)",
+            &[
+                Value::Null,
+                Value::Boolean(true),
+                Value::Boolean(false),
+                Value::Uuid([0xab; 16]),
+            ],
+        ).unwrap();
+        assert!(out.contains("NULL"));
+        assert!(out.contains("TRUE"));
+        assert!(out.contains("FALSE"));
+        assert!(out.contains("'abababababababababababababababab'"));
+    }
+
+    #[test]
+    fn noop_driver_execute_prepared_routes_through_execute() {
+        let d = NoopDriver::new();
+        let stmt = crate::prepared::PreparedStatement::new(
+            "SELECT $1",
+            vec![Value::Int64(7)],
+        );
+        // NoopDriver returns NotWired, but the bind step
+        // runs first and the submission log records the
+        // bound SQL.
+        let _ = d.execute_prepared(&stmt);
+        let log = d.log();
+        assert_eq!(log, vec!["SELECT 7".to_string()]);
     }
 }

@@ -49,7 +49,7 @@ pub type BatchResult<T> = std::result::Result<T, BatchError>;
 /// One column of a batch. `dtype` carries the declared
 /// type for validation; `values` has one entry per row,
 /// with `Value::Null` representing SQL NULL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnBatch {
     pub name: String,
     pub dtype: DataType,
@@ -58,7 +58,7 @@ pub struct ColumnBatch {
 
 /// Row-oriented batch: a shared column order + a Vec of
 /// equal-width rows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RowBatch {
     pub columns: Vec<(String, DataType)>,
     pub rows: Vec<Vec<Value>>,
