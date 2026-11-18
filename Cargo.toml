@@ -49,6 +49,7 @@ bradian-sources = { path = "crates/bradian-sources" }
 bradian-security  = { path = "crates/bradian-security" }
 bradian-serving   = { path = "crates/bradian-serving" }
 bradian-admin     = { path = "crates/bradian-admin" }
+bradian-relational = { path = "crates/bradian-relational" }
 
 # external
 serde            = { version = "1", features = ["derive", "rc"] }

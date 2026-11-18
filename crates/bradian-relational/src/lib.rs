@@ -78,6 +78,8 @@ pub mod local_transport;
 pub mod reader_fuzz;
 /// ADR 0132 — PITR restore-plan selector.
 pub mod pitr_planner;
+/// ADR 0167 — PITR restore executor.
+pub mod pitr_executor;
 /// ADR 0133 — row ↔ column batch converter.
 pub mod column_batch;
 /// ADR 0134 — committed columnar projection primitive.
@@ -88,6 +90,8 @@ pub mod projector_worker;
 pub mod projection_segment;
 /// ADR 0164 — projector scheduler.
 pub mod projector_scheduler;
+/// ADR 0168 — projection segment catalog.
+pub mod projection_catalog;
 /// ADR 0135 — SET NOT NULL backfill validator.
 pub mod backfill_validator;
 /// ADR 0136 — DEFAULT expression primitive.

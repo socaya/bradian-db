@@ -933,6 +933,72 @@ impl SqlEngine {
                 }
                 Ok(SqlResultSet::Command { affected })
             }
+            // ADR 0165/0166 — ALTER TABLE statements.
+            //   ALTER TABLE <name> RENAME TO <new_name>
+            //   ALTER TABLE <name> RENAME COLUMN <old> TO <new>
+            //   ALTER TABLE <name> DROP COLUMN <name>
+            //   ALTER TABLE <name> ALTER COLUMN <col> SET DEFAULT <literal>
+            //   ALTER TABLE <name> ALTER COLUMN <col> DROP DEFAULT
+            //   ALTER TABLE <name> ALTER COLUMN <col> TYPE <type>
+            "alter" => {
+                p.expect("table")?;
+                let name = p.name()?;
+                let table = self.resolve(&name)?;
+                if p.consume_word("rename") {
+                    if p.consume_word("to") {
+                        let new_name = p.word()?;
+                        p.end()?;
+                        self.catalog.rename_table(table.id, &new_name)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
+                    p.expect("column")?;
+                    let old = p.word()?;
+                    p.expect("to")?;
+                    let new = p.word()?;
+                    p.end()?;
+                    self.catalog.rename_column(table.id, &old, &new)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
+                if p.consume_word("drop") {
+                    p.expect("column")?;
+                    let col = p.word()?;
+                    p.end()?;
+                    self.catalog.drop_column(table.id, &col)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
+                if p.consume_word("alter") {
+                    p.expect("column")?;
+                    let col = p.word()?;
+                    if p.consume_word("set") {
+                        p.expect("default")?;
+                        let column = table.columns.iter()
+                            .find(|c| c.name == col)
+                            .ok_or_else(|| SqlError::Resolution(
+                                format!("unknown column {col}")))?;
+                        let literal = p.literal()?;
+                        let value = coerce(&literal, column)?;
+                        p.end()?;
+                        self.catalog.set_column_default(table.id, &col, value)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
+                    if p.consume_word("drop") {
+                        p.expect("default")?;
+                        p.end()?;
+                        self.catalog.drop_column_default(table.id, &col)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
+                    if p.consume_word("type") {
+                        let new_type = p.data_type()?;
+                        p.end()?;
+                        self.catalog.widen_column_type(table.id, &col, new_type)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
+                    return Err(SqlError::Syntax(
+                        "ALTER COLUMN expects SET DEFAULT / DROP DEFAULT / TYPE".into()));
+                }
+                Err(SqlError::Syntax(
+                    "ALTER TABLE expects RENAME / DROP COLUMN / ALTER COLUMN".into()))
+            }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),
         }
     }

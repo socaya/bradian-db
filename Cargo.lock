@@ -506,6 +506,7 @@ dependencies = [
  "bradian-dhis2",
  "bradian-ingest",
  "bradian-planner",
+ "bradian-relational",
  "bradian-runtime",
  "bradian-security",
  "bradian-storage",

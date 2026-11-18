@@ -18,6 +18,7 @@ bradian-ingest   = { workspace = true }
 bradian-views    = { workspace = true }
 bradian-dhis2    = { workspace = true }
 bradian-security = { workspace = true }
+bradian-relational = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }

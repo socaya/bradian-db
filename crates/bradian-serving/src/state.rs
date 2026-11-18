@@ -17,6 +17,9 @@ pub struct ServerState {
     pub data_products: RwLock<HashMap<String, DataProduct>>,
     pub jobs: Arc<JobRegistry>,
     pub api_tokens: TokenStore,
+    /// ADR 0169 — shared metrics registry powering the
+    /// public `/metrics` Prometheus endpoint.
+    pub metrics: bradian_relational::metrics::MetricsRegistry,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +54,7 @@ impl ServerState {
             data_products: RwLock::new(HashMap::new()),
             jobs: JobRegistry::new(),
             api_tokens: TokenStore::new(),
+            metrics: bradian_relational::metrics::MetricsRegistry::new(),
         })
     }
 }

@@ -65,6 +65,17 @@ enum Command {
     ProposeDefaultedRevision { table: TableId, proposed: Table },
     ActivateTableRevision { revision: CatalogTableRevision },
     CancelTableRevision { revision: CatalogTableRevision },
+    /// ADR 0165 — direct catalog ALTER (RENAME / DROP /
+    /// SET DEFAULT / DROP DEFAULT / WIDEN). Journaled for
+    /// durable replay; each kind is applied through the
+    /// matching `Catalog::*` mutator and so inherits its
+    /// validation + dependency checks.
+    RenameTable { table: TableId, new_name: String },
+    RenameColumn { table: TableId, old: String, new: String },
+    DropColumn { table: TableId, column: String },
+    SetColumnDefault { table: TableId, column: String, value: crate::typed_table::Value },
+    DropColumnDefault { table: TableId, column: String },
+    WidenColumnType { table: TableId, column: String, new_type: crate::model::DataType },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +130,30 @@ impl Event {
                     catalog.activate_nullable_revision(proposed)?;
                 }
                 revisions.remove(&proposed.id);
+                None
+            }
+            Command::RenameTable { table, new_name } => {
+                catalog.rename_table(*table, new_name)?;
+                None
+            }
+            Command::RenameColumn { table, old, new } => {
+                catalog.rename_column(*table, old, new)?;
+                None
+            }
+            Command::DropColumn { table, column } => {
+                catalog.drop_column(*table, column)?;
+                None
+            }
+            Command::SetColumnDefault { table, column, value } => {
+                catalog.set_column_default(*table, column, value.clone())?;
+                None
+            }
+            Command::DropColumnDefault { table, column } => {
+                catalog.drop_column_default(*table, column)?;
+                None
+            }
+            Command::WidenColumnType { table, column, new_type } => {
+                catalog.widen_column_type(*table, column, new_type.clone())?;
                 None
             }
             Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } | Command::ProposeDefaultedRevision { table, proposed } => {
@@ -419,6 +454,58 @@ impl PersistentCatalog {
         &self, table: TableId, proposed: Table,
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::ProposeTableRevision { table, proposed })?.1)
+    }
+
+    /// ADR 0165 — durable ALTER TABLE RENAME TO.
+    pub fn rename_table(&self, table: TableId, new_name: &str) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::RenameTable {
+            table, new_name: new_name.into(),
+        })?.1)
+    }
+
+    /// ADR 0165 — durable ALTER TABLE RENAME COLUMN.
+    pub fn rename_column(&self, table: TableId, old: &str, new: &str)
+        -> PersistentCatalogResult<u64>
+    {
+        Ok(self.commit(Command::RenameColumn {
+            table, old: old.into(), new: new.into(),
+        })?.1)
+    }
+
+    /// ADR 0165 — durable ALTER TABLE DROP COLUMN.
+    pub fn drop_column(&self, table: TableId, column: &str) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::DropColumn {
+            table, column: column.into(),
+        })?.1)
+    }
+
+    /// ADR 0166 — durable ALTER COLUMN SET DEFAULT.
+    pub fn set_column_default(
+        &self, table: TableId, column: &str,
+        value: crate::typed_table::Value,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::SetColumnDefault {
+            table, column: column.into(), value,
+        })?.1)
+    }
+
+    /// ADR 0166 — durable ALTER COLUMN DROP DEFAULT.
+    pub fn drop_column_default(&self, table: TableId, column: &str)
+        -> PersistentCatalogResult<u64>
+    {
+        Ok(self.commit(Command::DropColumnDefault {
+            table, column: column.into(),
+        })?.1)
+    }
+
+    /// ADR 0166 — durable ALTER COLUMN TYPE widen.
+    pub fn widen_column_type(
+        &self, table: TableId, column: &str,
+        new_type: crate::model::DataType,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::WidenColumnType {
+            table, column: column.into(), new_type,
+        })?.1)
     }
 
     /// G39 proposal supporting non-key NOT NULL relaxation as well as nullable additions.

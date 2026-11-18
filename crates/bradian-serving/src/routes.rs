@@ -48,7 +48,21 @@ pub fn api_router(state: SharedState) -> Router {
             crate::auth::require_bootstrap_admin,
         ))
         .route("/healthz", get(healthz))
+        // ADR 0169 — Prometheus scrape endpoint. Public by
+        // convention; renders ADR 0125 text format. Follow-up
+        // ADR can gate behind a scrape-token header when the
+        // network identity story lands.
+        .route("/metrics", get(metrics_endpoint))
         .with_state(state)
+}
+
+async fn metrics_endpoint(State(state): State<SharedState>) -> impl IntoResponse {
+    let body = state.metrics.render_prometheus();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    )
 }
 
 /// Serve the API alongside a built static UI. `ui_dir` must contain `index.html` plus
