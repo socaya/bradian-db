@@ -26,6 +26,8 @@ pub struct MvccSqlEngine {
     catalog: PersistentCatalog,
     domain: TypedMvccStore,
     _root: PathBuf,
+    /// ADR 0170 — workspace-wide admission cap.
+    global_budget: crate::workspace_usage::GlobalBudget,
 }
 
 impl MvccSqlEngine {
@@ -137,7 +139,10 @@ impl MvccSqlEngine {
                 (catalog, domain)
             }
         };
-        Ok(Self { catalog, domain, _root: root.to_owned() })
+        Ok(Self {
+            catalog, domain, _root: root.to_owned(),
+            global_budget: crate::workspace_usage::GlobalBudget::default(),
+        })
     }
 
     fn resolve(&self, parts: &[String]) -> SqlResult<Table> {
@@ -160,6 +165,17 @@ impl MvccSqlEngine {
     }
 
     /// Only schema pins already recorded by G15/G18 may be used.
+    /// ADR 0170 — attach a workspace-wide admission cap.
+    pub fn with_global_budget(mut self, budget: crate::workspace_usage::GlobalBudget) -> Self {
+        self.global_budget = budget;
+        self
+    }
+
+    /// ADR 0170 — introspect the current cap.
+    pub fn global_budget(&self) -> crate::workspace_usage::GlobalBudget {
+        self.global_budget
+    }
+
     pub fn registered_table_ids(&self) -> Vec<crate::TableId> {
         self.domain.active_tables()
     }
@@ -300,6 +316,14 @@ impl<'a> MvccSqlSession<'a> {
     }
 
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // ADR 0170 — workspace-wide admission cap. Populate
+        // the MVCC fields directly from TypedMvccStore::stats()
+        // since the underlying MvccStore is private.
+        let mut usage = crate::workspace_usage::WorkspaceUsage::for_catalog(&self.engine.catalog);
+        let stats = self.engine.domain.stats();
+        usage.mvcc_distinct_keys = Some(stats.keys_retained);
+        usage.mvcc_total_versions = Some(stats.versions_retained);
+        self.engine.global_budget.check(&usage)?;
         let mut p = Parser::new(sql)?;
         let command = p.word()?;
         // ADR 0150 — one iteration = one executed statement.

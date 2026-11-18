@@ -29,6 +29,8 @@ pub struct HistorySqlEngine {
     /// `history_backup::backup_history_database` so staging-side
     /// verification routes through `_with_bace` opens.
     bace_wiring: Option<BaceWiring>,
+    /// ADR 0170 — workspace-wide admission cap.
+    global_budget: crate::workspace_usage::GlobalBudget,
 }
 
 impl HistorySqlEngine {
@@ -116,6 +118,7 @@ impl HistorySqlEngine {
         Ok(Self {
             catalog, domain, _root: root.to_owned(),
             failed_ddl: false, bace_wiring,
+            global_budget: crate::workspace_usage::GlobalBudget::default(),
         })
     }
 
@@ -147,6 +150,17 @@ impl HistorySqlEngine {
     }
 
     /// Explicitly retire inactive G28-G31 work without applying any proposal.
+    /// ADR 0170 — attach a workspace-wide admission cap.
+    pub fn with_global_budget(mut self, budget: crate::workspace_usage::GlobalBudget) -> Self {
+        self.global_budget = budget;
+        self
+    }
+
+    /// ADR 0170 — introspect the current cap.
+    pub fn global_budget(&self) -> crate::workspace_usage::GlobalBudget {
+        self.global_budget
+    }
+
     pub fn retire_legacy_schema_intents(&mut self) -> SqlResult<crate::schema_activation::LegacyDdlRetirementReceipt> {
         self.require_ready()?;
         Ok(self.domain.retire_legacy_schema_intents(&self.catalog)?)
@@ -612,6 +626,12 @@ impl<'a> HistorySqlSession<'a> {
     }
 
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // ADR 0170 — workspace-wide admission cap. Catalog
+        // counts only for now (durable-history byte totals
+        // live on DurableTypedStore internals we don't
+        // expose publicly yet).
+        let usage = crate::workspace_usage::WorkspaceUsage::for_catalog(&self.engine.catalog);
+        self.engine.global_budget.check(&usage)?;
         let mut p = Parser::new_expressions(sql)?;
         let command = p.word()?;
         if self.failed_statement && command != "rollback" {

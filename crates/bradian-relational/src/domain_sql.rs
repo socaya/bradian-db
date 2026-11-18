@@ -27,6 +27,11 @@ pub struct DomainSqlEngine {
     domain: MultiTableStore,
     operation: Mutex<()>,
     _root: PathBuf,
+    /// ADR 0170 — optional workspace-wide admission cap.
+    /// Sampled against `WorkspaceUsage::for_catalog(&catalog)
+    /// .with_domain(&domain)` before every statement.
+    /// Default `GlobalBudget::default()` never rejects.
+    global_budget: crate::workspace_usage::GlobalBudget,
 }
 
 impl DomainSqlEngine {
@@ -103,7 +108,10 @@ impl DomainSqlEngine {
                 MultiTableStore::open_with_limits(root.join("shared-domain"), domain_limits)?,
             ),
         };
-        Ok(Self { catalog, domain, operation: Mutex::new(()), _root: root.to_owned() })
+        Ok(Self {
+            catalog, domain, operation: Mutex::new(()), _root: root.to_owned(),
+            global_budget: crate::workspace_usage::GlobalBudget::default(),
+        })
     }
 
     fn resolve(&self, parts: &[String]) -> SqlResult<Table> {
@@ -123,6 +131,17 @@ impl DomainSqlEngine {
     /// Explicitly bind one catalog table to this shared WAL, including a
     /// persisted immutable schema pin. Re-running this for the same schema
     /// is idempotent; incompatible definitions are rejected.
+    /// ADR 0170 — attach a workspace-wide admission cap.
+    pub fn with_global_budget(mut self, budget: crate::workspace_usage::GlobalBudget) -> Self {
+        self.global_budget = budget;
+        self
+    }
+
+    /// ADR 0170 — introspect the current cap.
+    pub fn global_budget(&self) -> crate::workspace_usage::GlobalBudget {
+        self.global_budget
+    }
+
     pub fn register_catalog_table(&self, qualified_name: &str) -> SqlResult<u64> {
         let _guard = self.operation.lock();
         let mut parser = Parser::new(qualified_name)?;
@@ -266,6 +285,12 @@ impl<'a> DomainSqlSession<'a> {
     }
 
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // ADR 0170 — workspace-wide admission cap. Sampled
+        // before every statement against catalog + domain
+        // counts. Unlimited default never rejects.
+        let usage = crate::workspace_usage::WorkspaceUsage::for_catalog(&self.engine.catalog)
+            .with_domain(&self.engine.domain);
+        self.engine.global_budget.check(&usage)?;
         let mut p = Parser::new(sql)?;
         let command = p.word()?;
         // ADR 0150 — one iteration = one executed statement.

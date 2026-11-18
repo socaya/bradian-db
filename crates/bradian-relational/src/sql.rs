@@ -457,6 +457,10 @@ pub struct SqlEngine {
     /// `open_with_bace`. Each lazy `TableStore::open_with_bace`
     /// in `table_store()` consults this.
     bace_wiring: Option<BaceWiring>,
+    /// ADR 0170 — optional workspace-wide admission cap.
+    /// Default `GlobalBudget::default()` is unlimited and
+    /// never rejects, so existing callers see no change.
+    global_budget: crate::workspace_usage::GlobalBudget,
 }
 
 impl SqlEngine {
@@ -488,7 +492,24 @@ impl SqlEngine {
             catalog,
             operation: Mutex::new(()),
             bace_wiring: wiring,
+            global_budget: crate::workspace_usage::GlobalBudget::default(),
         })
+    }
+
+    /// ADR 0170 — attach a workspace-wide admission cap.
+    /// Default (no call) leaves `global_budget` at the
+    /// unlimited defaults; this method swaps in an
+    /// explicit cap that the engine samples before every
+    /// statement.
+    pub fn with_global_budget(mut self, budget: crate::workspace_usage::GlobalBudget) -> Self {
+        self.global_budget = budget;
+        self
+    }
+
+    /// ADR 0170 — expose the current effective budget so
+    /// operators can introspect.
+    pub fn global_budget(&self) -> crate::workspace_usage::GlobalBudget {
+        self.global_budget
     }
 
     fn resolve(&self, parts: &[String]) -> SqlResult<Table> {
@@ -658,6 +679,11 @@ impl SqlEngine {
         authz: Option<&bradian_core::AuthorizationContext>,
     ) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
+        // ADR 0170 — workspace-wide admission cap. Sampled
+        // before every statement; unlimited default never
+        // rejects.
+        let usage = crate::workspace_usage::WorkspaceUsage::for_catalog(&self.catalog);
+        self.global_budget.check(&usage)?;
         // ADR 0150 — one iteration = one executed statement.
         if let Some(b) = budget.as_mut() { b.charge_iteration()?; }
         let mut p = Parser::new(sql)?;
