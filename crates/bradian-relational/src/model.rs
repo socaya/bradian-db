@@ -98,6 +98,11 @@ pub struct Table {
     /// column name so adding/removing columns is tolerant.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub column_collations: std::collections::BTreeMap<String, crate::collation::Collation>,
+    /// ADR 0157 — named row/column/tenant policies attached
+    /// to this table. Keyed by policy name. Empty map
+    /// preserves pre-ADR-0157 schema bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub policies: std::collections::BTreeMap<String, crate::access_policy::TableAccessPolicy>,
 }
 
 #[cfg(test)]

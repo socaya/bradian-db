@@ -239,6 +239,7 @@ impl Catalog {
             unique_keys, foreign_keys: Vec::new(),
             column_defaults: BTreeMap::new(),
             column_collations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
         Ok(id)
     }
@@ -574,6 +575,46 @@ impl Catalog {
         self.tables.get_mut(&id).expect("validated table")
             .column_defaults.remove(&name);
         Ok(())
+    }
+
+    /// ADR 0157 — attach a named row/column/tenant policy
+    /// to a table. `name` must be a valid identifier.
+    /// Overwrites any existing policy with the same name.
+    pub fn set_policy(
+        &mut self,
+        id: TableId,
+        name: &str,
+        policy: crate::access_policy::TableAccessPolicy,
+    ) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get_mut(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        table.policies.insert(name, policy);
+        Ok(())
+    }
+
+    /// ADR 0157 — drop a named policy. No-op if absent.
+    pub fn drop_policy(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get_mut(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        table.policies.remove(&name);
+        Ok(())
+    }
+
+    /// ADR 0157 — get a named policy.
+    pub fn get_policy(&self, id: TableId, name: &str)
+        -> Option<&crate::access_policy::TableAccessPolicy>
+    {
+        let name = identifier(name).ok()?;
+        self.tables.get(&id)?.policies.get(&name)
+    }
+
+    /// ADR 0157 — iterate every policy attached to a table.
+    pub fn policies_for_table(&self, id: TableId)
+        -> Option<&BTreeMap<String, crate::access_policy::TableAccessPolicy>>
+    {
+        self.tables.get(&id).map(|t| &t.policies)
     }
 
     pub fn drop_database(&mut self, id: DatabaseId) -> Result<(), CatalogError> {

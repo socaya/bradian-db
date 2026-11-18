@@ -145,6 +145,7 @@ mod tests {
             foreign_keys: vec![],
             column_defaults: Default::default(),
             column_collations: Default::default(),
+            policies: Default::default(),
         }
     }
 

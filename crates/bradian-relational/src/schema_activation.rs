@@ -127,7 +127,10 @@ pub(crate) fn validate_evolution(old: &Table, proposed: &Table) -> Result<(), Do
     Ok(())
 }
 
-enum Event { Intent(ActivationIntent), Active(ActivationCommit) }
+// ADR 0157 widened ActivationIntent (via the Table struct's new
+// policies map). Box the large variant to avoid the clippy
+// large_enum_variant lint without changing semantics.
+enum Event { Intent(Box<ActivationIntent>), Active(ActivationCommit) }
 impl SchemaChanges {
     pub(crate) fn load(
         versions: &[RetainedVersion], mut timeline: SchemaTimeline,
@@ -149,7 +152,7 @@ impl SchemaChanges {
             let id = u64::from_be_bytes(key[prefix.len()..].try_into().unwrap());
             let event = if intent {
                 if id != *lsn { return Err(invalid("intent identity differs from WAL position")); }
-                Event::Intent(serde_json::from_slice(bytes)?)
+                Event::Intent(Box::new(serde_json::from_slice(bytes)?))
             } else {
                 let commit: ActivationCommit = serde_json::from_slice(bytes)?;
                 if commit.intent_lsn != id { return Err(invalid("activation identity mismatch")); }
@@ -179,7 +182,7 @@ impl SchemaChanges {
                         return Err(invalid("intent version does not match default semantics"));
                     }
                     validate_evolution(old, &intent.proposed)?;
-                    let candidate = PendingActivation { intent_lsn: lsn, intent };
+                    let candidate = PendingActivation { intent_lsn: lsn, intent: *intent };
                     candidate.catalog_lsn()?;
                     pending = Some(candidate);
                 }

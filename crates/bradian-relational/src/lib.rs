@@ -68,6 +68,8 @@ pub mod secondary_index;
 pub mod htap_watermark;
 /// ADR 0129 — local driver facade trait.
 pub mod driver;
+/// ADR 0158 — SqlEngine driver adapter.
+pub mod driver_adapter;
 /// ADR 0131 — bounded reader fuzzing harness.
 pub mod reader_fuzz;
 /// ADR 0132 — PITR restore-plan selector.
@@ -76,6 +78,8 @@ pub mod pitr_planner;
 pub mod column_batch;
 /// ADR 0134 — committed columnar projection primitive.
 pub mod committed_projection;
+/// ADR 0159 — projector worker (watermark advancer).
+pub mod projector_worker;
 /// ADR 0135 — SET NOT NULL backfill validator.
 pub mod backfill_validator;
 /// ADR 0136 — DEFAULT expression primitive.
