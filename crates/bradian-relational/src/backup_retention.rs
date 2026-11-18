@@ -95,7 +95,7 @@ pub fn plan_retention(
     // Sort bases by tip_lsn desc so "latest N" picks the
     // highest LSNs (stable regardless of input order).
     let mut by_lsn: Vec<&AgedBase> = bases.iter().collect();
-    by_lsn.sort_by(|a, b| b.base.tip_lsn.cmp(&a.base.tip_lsn));
+    by_lsn.sort_by_key(|a| std::cmp::Reverse(a.base.tip_lsn));
 
     // Start by keeping the latest `floor` bases.
     let mut keep: BTreeSet<String> = by_lsn.iter()
