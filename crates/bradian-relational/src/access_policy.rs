@@ -34,7 +34,7 @@ use crate::typed_table::Value;
 /// candidate row. Minimal: equals / not-equals on a named
 /// column vs a literal. Richer predicates belong in a
 /// future ADR that defines a policy DSL.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RowPredicate {
     ColumnEquals { column: String, value: Value },
     ColumnNotEquals { column: String, value: Value },
@@ -63,7 +63,7 @@ pub type Result<T> = std::result::Result<T, PolicyError>;
 /// Row-level security policy for a single table. Fields
 /// address columns by name so the policy doesn't bind to a
 /// column-index that could shift after ALTER TABLE.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RowLevelPolicy {
     pub predicate: RowPredicate,
 }
@@ -96,7 +96,7 @@ impl RowLevelPolicy {
 /// Column-level security: the allow-list of columns a
 /// principal may READ. Writes are not filtered — CLS is a
 /// projection concept.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnLevelPolicy {
     pub readable: BTreeSet<String>,
 }
@@ -139,7 +139,7 @@ impl ColumnLevelPolicy {
 /// scope + the per-table tenant-column name. Rows whose
 /// tenant column isn't in the principal's scope are
 /// filtered.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TenantIsolation {
     pub tenant_column: String,
     pub allowed_tenants: BTreeSet<String>,
@@ -173,7 +173,7 @@ impl TenantIsolation {
 /// candidate row. Passes only if ALL three sub-policies
 /// pass. The `_authz` parameter is a hook for future
 /// capability-aware refinements (ADR 0098).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableAccessPolicy {
     pub row_level: RowLevelPolicy,
     pub column_level: ColumnLevelPolicy,
