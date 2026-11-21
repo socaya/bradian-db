@@ -87,6 +87,11 @@ pub enum SqlResultSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Word(String),
+    /// ADR 0181 — `"name"` identifier. Case preserved; never
+    /// matched by keyword consume_word/next_is_word paths, so
+    /// `"SELECT"` can name a column without colliding with
+    /// the reserved word.
+    QuotedWord(String),
     Number(String),
     Text(String),
     Symbol(char),
@@ -116,6 +121,27 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 }
             }
             out.push(Token::Text(value));
+        } else if ch == '"' {
+            // ADR 0181 — quoted identifier. `""` inside is an
+            // escaped double-quote, mirroring the SQL standard
+            // and matching the `''` escape inside a string.
+            chars.next();
+            let mut value = String::new();
+            loop {
+                match chars.next() {
+                    Some('"') if chars.peek() == Some(&'"') => {
+                        chars.next();
+                        value.push('"');
+                    }
+                    Some('"') => break,
+                    Some(c) => value.push(c),
+                    None => return Err(SqlError::Syntax("unterminated quoted identifier".into())),
+                }
+            }
+            if value.is_empty() {
+                return Err(SqlError::Syntax("quoted identifier must not be empty".into()));
+            }
+            out.push(Token::QuotedWord(value));
         } else if ch.is_ascii_alphabetic() || ch == '_' {
             let mut word = String::new();
             while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') {
@@ -195,7 +221,19 @@ impl Parser {
                 self.pos += 1;
                 Ok(word.to_ascii_lowercase())
             }
-            _ => Err(SqlError::Syntax("expected an unquoted identifier".into())),
+            // ADR 0181 — quoted identifier. The lexer preserves
+            // case in the token so keyword matching can skip
+            // quoted forms, but at the identifier boundary we
+            // fold to lowercase to match the catalog's ADR 0006
+            // case-insensitive storage rule. The practical value
+            // of quoting is therefore to let reserved words name
+            // user objects, not to introduce case-sensitive
+            // identifiers.
+            Some(Token::QuotedWord(word)) => {
+                self.pos += 1;
+                Ok(word.to_ascii_lowercase())
+            }
+            _ => Err(SqlError::Syntax("expected an identifier".into())),
         }
     }
 
