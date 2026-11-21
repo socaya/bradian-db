@@ -63,6 +63,11 @@ pub enum SqlError {
     /// so callers never record a silent gap in the chain.
     #[error("audit error: {0}")]
     Audit(String),
+    /// ADR 0176 — table-level UNIQUE constraint violated at
+    /// INSERT. Carries the offending constraint name and the
+    /// columns it covers.
+    #[error(transparent)]
+    Unique(#[from] crate::unique_check::UniqueViolation),
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -769,6 +774,7 @@ impl SqlEngine {
                         let mut primary = Vec::<String>::new();
                         let mut column_collations =
                             std::collections::BTreeMap::new();
+                        let mut unique_keys = Vec::<crate::model::UniqueKey>::new();
                         p.symbol('(')?;
                         loop {
                             if p.consume_word("primary") {
@@ -777,6 +783,21 @@ impl SqlEngine {
                                     return Err(SqlError::Syntax("multiple PRIMARY KEY definitions".into()));
                                 }
                                 primary = p.list(|parser| parser.word())?;
+                            } else if p.consume_word("unique") {
+                                // ADR 0176 — table-level UNIQUE (col[, ...]).
+                                // Constraint name is auto-generated:
+                                // "uq_<col1>_<col2>_...".  Catalog
+                                // validates column existence; INSERT
+                                // path enforces at commit via
+                                // UniqueConstraintChecker.
+                                let cols = p.list(|parser| parser.word())?;
+                                if cols.is_empty() {
+                                    return Err(SqlError::Syntax("UNIQUE requires at least one column".into()));
+                                }
+                                let uq_name = format!("uq_{}", cols.join("_"));
+                                unique_keys.push(crate::model::UniqueKey {
+                                    name: uq_name, columns: cols,
+                                });
                             } else {
                                 let column = p.word()?;
                                 let data_type = p.data_type()?;
@@ -821,7 +842,7 @@ impl SqlEngine {
                         self.catalog.create_table(schema.id, TableSpec {
                             name: name[2].clone(), columns,
                             primary_key: PrimaryKey { columns: primary },
-                            unique_keys: vec![],
+                            unique_keys,
                             column_collations,
                         })?;
                         // TableStore is provisioned on first use. Catalog and
@@ -862,7 +883,18 @@ impl SqlEngine {
                 // the row committed on budget breach.
                 let row_bytes = crate::query_budget::row_bytes(&values);
                 if let Some(b) = budget.as_deref() { b.preview_charge(1, row_bytes)?; }
-                self.table_store(&table)?.insert(&values)?;
+                let store = self.table_store(&table)?;
+                // ADR 0176 — enforce table-level UNIQUE before
+                // insert. Scans all existing rows; honest O(N)
+                // cost per INSERT until a disk-backed secondary
+                // index (ADR 0096 follow-up) lands. No-op when
+                // table.unique_keys is empty.
+                if !table.unique_keys.is_empty() {
+                    let existing = store.scan()?;
+                    crate::unique_check::UniqueConstraintChecker::new(&table)
+                        .check(&values, existing)?;
+                }
+                store.insert(&values)?;
                 // Commit the charge — guaranteed not to breach.
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(1)?;

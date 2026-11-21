@@ -282,9 +282,14 @@ impl TableStore {
 }
 
 pub(crate) fn validate_table(table: &Table) -> TableResult<Vec<usize>> {
-    if !table.unique_keys.is_empty() || !table.foreign_keys.is_empty() {
+    // ADR 0176 — UNIQUE is now enforced at the SQL-engine INSERT
+    // path via UniqueConstraintChecker (whole-table scan). The
+    // table-store itself is still schema-neutral about UNIQUE;
+    // operators who bypass SqlEngine must call the checker
+    // themselves. FOREIGN KEY remains unimplemented and refused.
+    if !table.foreign_keys.is_empty() {
         return Err(TableError::Schema(
-            "secondary UNIQUE and FOREIGN KEY constraints are not implemented in this table store".into()
+            "FOREIGN KEY constraints are not implemented in this table store".into()
         ));
     }
     if table.id.0 == 0 || table.columns.is_empty()

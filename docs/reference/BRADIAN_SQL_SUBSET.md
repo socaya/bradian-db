@@ -56,7 +56,7 @@ and validate as long as the content is serde_json-parsable.
 |---|---|
 | `CREATE DATABASE <name>` | `ddl_create_and_insert_select_update_delete_cycle` |
 | `CREATE SCHEMA <db>.<schema>` | `ddl_create_and_insert_select_update_delete_cycle` |
-| `CREATE TABLE <db>.<schema>.<table> (col type [NOT NULL] [COLLATE <name>], PRIMARY KEY (col, ...))` — ADR 0175: `<name>` is `binary` (default) or `nocase`; TEXT / VARCHAR only; applies to ORDER BY on this column | `tests/collation_sql.rs::create_table_accepts_collate_binary_and_nocase_on_text_columns` |
+| `CREATE TABLE <db>.<schema>.<table> (col type [NOT NULL] [COLLATE <name>], [UNIQUE (col, ...),] PRIMARY KEY (col, ...))` — ADR 0175 COLLATE: `<name>` is `binary` (default) or `nocase`; TEXT / VARCHAR only; applies to ORDER BY. ADR 0176 UNIQUE: table-level clause, constraint name auto-generated `uq_<col1>_<col2>_...`; enforced at INSERT by scan (O(N)); NULL disables per SQL semantics | `tests/collation_sql.rs::create_table_accepts_collate_binary_and_nocase_on_text_columns`, `tests/unique_enforcement_sql.rs::parser_accepts_unique_clause_and_first_insert_succeeds` |
 
 ## 4. DML across all three engines
 
