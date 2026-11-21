@@ -40,6 +40,7 @@ current master gate until its exit conditions pass.
 | Point reads are never validated at commit | Opt-in bounded read validation, including absent keys, scans and savepoint observations | [G42](../gates/BRD-G42-transaction-read-validation.md), concurrent and twenty-schedule tests |
 | Historical UPDATE accepts literals only | Bounded checked arithmetic, same-type column references and standalone DEFAULT, evaluated from the original row | [G43](../gates/BRD-G43-checked-update-expressions.md), numeric corpus and transaction tests |
 | Historical SELECT cannot order or page results | Typed ORDER BY, explicit NULL placement and bounded LIMIT/OFFSET with deterministic PK ties | [G44](../gates/BRD-G44-ordered-query-windows.md), paging, conflict and restore tests |
+| JSON SQL round-trip lost declared type | `typed_table::Value::Json(String)` variant + tag 8 encoding; `coerce` emits `Value::Json`; backward-compat decode for pre-ADR-0173 tag-5 rows; BRADIAN_SQL_SUBSET.md §1 updated | [ADR 0173](../adr/0173-value-json-variant.md), 7 round-trip tests in `tests/json_value_type.rs` |
 
 ## Remaining implementation and qualification
 

@@ -147,8 +147,11 @@ fn value_to_sql(v: &crate::typed_table::Value) -> String {
             for b in bytes { hex.push_str(&format!("{b:02x}")); }
             format!("'{hex}'")
         }
-        Value::String(s) => {
-            // Single-quote-escape via doubling.
+        Value::String(s) | Value::Json(s) => {
+            // Single-quote-escape via doubling. ADR 0173 — JSON
+            // renders as a quoted string literal; the SQL coerce
+            // layer validates its content as serde_json-parsable
+            // before it ever reaches this encoder.
             let escaped = s.replace('\'', "''");
             format!("'{escaped}'")
         }

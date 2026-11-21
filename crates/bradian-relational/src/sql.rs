@@ -377,13 +377,14 @@ pub(crate) fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
         (DataType::Varchar { max_length }, Literal::Text(s))
             if s.len() <= *max_length as usize => Ok(Value::String(s.clone())),
         // ADR 0113 — JSON column accepts a TEXT literal that
-        // must parse as valid JSON. Invalid JSON is rejected
-        // with Type error; no application-level JSON path
-        // operators yet.
+        // must parse as valid JSON. ADR 0173 — the coerced
+        // value is `Value::Json`, so round-trips preserve the
+        // declared type. Invalid JSON is rejected with Type
+        // error; no application-level JSON path operators yet.
         (DataType::Json, Literal::Text(s)) => {
             serde_json::from_str::<serde_json::Value>(s)
                 .map_err(|e| SqlError::Type(format!("invalid JSON literal: {e}")))?;
-            Ok(Value::String(s.clone()))
+            Ok(Value::Json(s.clone()))
         }
         // ADR 0113 — TimestampTz accepts an integer literal
         // (micros since epoch). ISO-string parsing reserved
@@ -1284,7 +1285,7 @@ fn value_to_sql_literal(v: &Value) -> String {
         Value::Int32(n) => n.to_string(),
         Value::Int64(n) => n.to_string(),
         Value::Decimal(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::String(s) | Value::Json(s) => format!("'{}'", s.replace('\'', "''")),
         Value::TimestampTz(micros) => micros.to_string(),
         Value::Uuid(bytes) => {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();

@@ -26,16 +26,17 @@ Every object reference **must** be fully qualified: `database.schema.table`.
 | `TEXT` | `Value::String(String)` | `literal_text_empty_and_escaped_and_utf8` |
 | `VARCHAR(n)` | `Value::String(String)` (max length enforced at insert) | `type_int32_and_int64_and_varchar_and_decimal_round_trip` |
 | `DECIMAL(p,s)` / `NUMERIC(p,s)` | `Value::Decimal(i128)` scaled by column `scale` | `type_int32_and_int64_and_varchar_and_decimal_round_trip` |
+| `JSON` | `Value::Json(String)` — ADR 0173 round-trip-preserving variant (canonical UTF-8 serde_json-valid) | `tests/json_value_type.rs::sql_engine_insert_round_trip_returns_value_json` |
+| `TIMESTAMPTZ` / `TIMESTAMP` | `Value::TimestampTz(i64)` (micros since epoch) | `tests/sql_grammar_extensions.rs::timestamptz_column_accepts_integer_micros` |
+| `UUID` | `Value::Uuid([u8; 16])` (32-hex literal, dashes optional) | `tests/sql_grammar_extensions.rs::uuid_column_accepts_hex_literal` |
 
-`TimestampTz`, `Uuid` and `JSON` are `Value` / `LogicalType` variants
-used internally (typed-table engine; ADR 0099 `LogicalType::Json`)
-but are **not accepted by the SQL parser** in `CREATE TABLE`,
-`INSERT` or any other statement on any of the three engines. See
-`unsupported_data_types_in_create_table_are_rejected` and
-`json_data_type_in_create_table_is_rejected_by_parser` (ADR 0112).
-The `LogicalType::Json` variant and `Value::Json(String)` are
-reachable via the core-crate API for library callers, but today
-they are unreachable through SQL.
+ADR 0113 reversed the pre-ADR-0113 rejection: `JSON`, `TIMESTAMPTZ` /
+`TIMESTAMP` and `UUID` are now reachable in `CREATE TABLE` and `INSERT`
+across every engine. ADR 0173 further distinguishes `Value::Json(String)`
+from `Value::String(String)` on the wire (encoding tag 8 vs tag 5) so
+`SELECT` of a `JSON` column round-trips as `Value::Json`. Legacy rows
+stored under tag 5 for a `JSON` column still decode (as `Value::String`)
+and validate as long as the content is serde_json-parsable.
 
 ## 2. Literal syntax
 
@@ -75,8 +76,7 @@ they are unreachable through SQL.
 | Multiple statements in one `execute(...)` | `rejects_multi_statement_in_a_single_execute` |
 | Partial primary-key predicate | `rejects_partial_primary_key_predicate` |
 | `JOIN`, aggregates, `OR`, range `>`/`<`, column aliases, `DISTINCT`, `UNION` | `rejects_join_aggregate_and_or_and_range_and_alias` |
-| `TIMESTAMPTZ`, `UUID` in `CREATE TABLE` | `unsupported_data_types_in_create_table_are_rejected` |
-| `JSON` in `CREATE TABLE` (ADR 0099/0112 honest boundary) | `json_data_type_in_create_table_is_rejected_by_parser` |
+| Unsupported type keywords in `CREATE TABLE` (e.g. `BLOB`, `FLOAT`, `REAL`) | `unsupported_data_types_in_create_table_are_rejected` |
 | Explicit `JOIN` / `INNER JOIN` syntax (ADR 0112) | `join_syntax_in_select_is_rejected` |
 | Subquery in `WHERE` (ADR 0112) | `subquery_in_where_is_rejected` |
 | `SELECT` without `FROM qualified_table` (ADR 0112) | `select_without_from_is_rejected` |

@@ -95,6 +95,8 @@ fn matches_type(value: &Value, data_type: &DataType) -> bool {
         | (Value::Int64(_), DataType::Int64)
         | (Value::Decimal(_), DataType::Decimal { .. })
         | (Value::String(_), DataType::Text | DataType::Varchar { .. })
+        | (Value::Json(_), DataType::Json)
+        | (Value::String(_), DataType::Json)  // legacy pre-ADR-0173 rows
         | (Value::TimestampTz(_), DataType::TimestampTz)
         | (Value::Uuid(_), DataType::Uuid))
 }
@@ -111,7 +113,10 @@ fn compare(left: &Value, right: &Value, descending: bool, nulls_first: bool) -> 
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
         (Value::Decimal(a), Value::Decimal(b)) => a.cmp(b),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
+        // ADR 0173 — JSON compares as its canonical UTF-8 bytes;
+        // legacy String-encoded JSON interleaves naturally with
+        // new Json-tagged rows for the same declared column type.
+        (Value::String(a) | Value::Json(a), Value::String(b) | Value::Json(b)) => a.cmp(b),
         (Value::TimestampTz(a), Value::TimestampTz(b)) => a.cmp(b),
         (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
         _ => unreachable!("sort values were checked against the same column type"),

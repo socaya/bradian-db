@@ -29,6 +29,9 @@ const MAX_RETRIES: usize = 16;
 /// Portable values supported by the first typed row storage profile.
 /// Decimal stores an exact signed unscaled integer; its scale is given by the
 /// corresponding column type. TimestampTz is UTC microseconds since Unix epoch.
+/// Json holds a canonical UTF-8 serde_json-valid payload, distinguished from
+/// a plain Text/Varchar String so SQL round-trips preserve the declared type
+/// (ADR 0173 — BRD-REL-004).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Null,
@@ -39,6 +42,7 @@ pub enum Value {
     String(String),
     TimestampTz(i64),
     Uuid([u8; 16]),
+    Json(String),
 }
 
 #[derive(Debug, Error)]
@@ -65,7 +69,10 @@ pub type TableResult<T> = Result<T, TableError>;
 
 pub(crate) fn decoded_row_bytes(row: &Vec<Value>) -> usize {
     std::mem::size_of::<Vec<Value>>().saturating_add(row.capacity().saturating_mul(std::mem::size_of::<Value>()))
-        .saturating_add(row.iter().map(|value| match value { Value::String(text) => text.capacity(), _ => 0 }).fold(0_usize, usize::saturating_add))
+        .saturating_add(row.iter().map(|value| match value {
+            Value::String(text) | Value::Json(text) => text.capacity(),
+            _ => 0,
+        }).fold(0_usize, usize::saturating_add))
 }
 
 /// Bound output amplification before cloning projected values, including duplicates.
@@ -323,10 +330,11 @@ fn validate_value(column: &Column, value: &Value) -> TableResult<()> {
         (DataType::Text, Value::String(_)) |
         (DataType::TimestampTz, Value::TimestampTz(_)) |
         (DataType::Uuid, Value::Uuid(_)) => true,
-        // ADR 0113 — JSON stored as canonical UTF-8 in the
-        // typed-table engine. Content validated at the SQL
-        // coerce layer; storage accepts the resulting String.
-        (DataType::Json, Value::String(s)) => {
+        // ADR 0173 — JSON column accepts Value::Json (new path)
+        // or Value::String (legacy stored rows written before the
+        // Value::Json variant existed). Both must be serde_json-
+        // valid; invalid JSON is rejected.
+        (DataType::Json, Value::Json(s)) | (DataType::Json, Value::String(s)) => {
             serde_json::from_str::<serde_json::Value>(s).is_ok()
         }
         (DataType::Varchar { max_length }, Value::String(s)) =>
@@ -362,6 +370,17 @@ fn write_value(out: &mut Vec<u8>, value: &Value) -> TableResult<()> {
         }
         Value::TimestampTz(v) => { out.push(6); out.extend_from_slice(&v.to_le_bytes()); }
         Value::Uuid(v) => { out.push(7); out.extend_from_slice(v); }
+        // ADR 0173 — Json shares String's length-prefixed UTF-8
+        // body under a distinct tag so decode preserves the
+        // declared type. Legacy rows written under tag 5 for a
+        // JSON column still decode and validate.
+        Value::Json(s) => {
+            out.push(8);
+            let len = u32::try_from(s.len())
+                .map_err(|_| TableError::Value("json length exceeds u32".into()))?;
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
     }
     Ok(())
 }
@@ -375,7 +394,7 @@ fn read_value(input: &[u8], pos: &mut usize) -> TableResult<Value> {
         2 => 4,
         3 | 6 => 8,
         4 | 7 => 16,
-        5 => 4,
+        5 | 8 => 4,
         _ => return Err(TableError::Corruption("unrecognized row value type tag".into())),
     };
     if input.len().saturating_sub(*pos) < width {
@@ -403,6 +422,16 @@ fn read_value(input: &[u8], pos: &mut usize) -> TableResult<Value> {
         }
         6 => Value::TimestampTz(i64::from_le_bytes(data.try_into().unwrap())),
         7 => Value::Uuid(data.try_into().unwrap()),
+        8 => {
+            let length = u32::from_le_bytes(data.try_into().unwrap()) as usize;
+            if input.len().saturating_sub(*pos) < length {
+                return Err(TableError::Corruption("truncated json data".into()));
+            }
+            let text = String::from_utf8(input[*pos..*pos + length].to_vec())
+                .map_err(|_| TableError::Corruption("invalid UTF-8 json".into()))?;
+            *pos += length;
+            Value::Json(text)
+        }
         _ => unreachable!(),
     })
 }

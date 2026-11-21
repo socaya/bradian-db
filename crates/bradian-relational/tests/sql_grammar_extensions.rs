@@ -27,13 +27,16 @@ fn json_column_accepts_valid_json_literal() {
         SqlResultSet::Rows { rows, .. } => {
             assert_eq!(rows.len(), 1);
             let v = &rows[0][0];
+            // ADR 0173 — JSON columns now round-trip as the
+            // dedicated Value::Json variant (previously
+            // Value::String under ADR 0113).
             match v {
-                Value::String(s) => {
+                Value::Json(s) => {
                     let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
                     assert_eq!(parsed["ou"], "abc");
                     assert_eq!(parsed["level"], 3);
                 }
-                other => panic!("expected String; got {other:?}"),
+                other => panic!("expected Json; got {other:?}"),
             }
         }
         other => panic!("expected rows; got {other:?}"),

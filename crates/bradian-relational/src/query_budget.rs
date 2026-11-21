@@ -131,7 +131,7 @@ pub fn row_bytes(row: &[crate::typed_table::Value]) -> u64 {
         Value::Decimal(_) => 16,
         Value::TimestampTz(_) => 8,
         Value::Uuid(_) => 16,
-        Value::String(s) => s.len() as u64,
+        Value::String(s) | Value::Json(s) => s.len() as u64,
     }).sum()
 }
 
