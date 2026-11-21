@@ -38,6 +38,16 @@ pub struct CacheStats {
     pub capacity: usize,
 }
 
+impl CacheStats {
+    /// ADR 0172 — bytes retained in this cache. Every `PageCache` entry
+    /// holds one decoded `Page` whose memory footprint equals `PAGE_SIZE`.
+    /// `resident.saturating_mul(PAGE_SIZE)` is the exact accounting unit
+    /// `WorkspaceUsage::total_bytes()` folds in.
+    pub fn cached_bytes(&self) -> usize {
+        self.resident.saturating_mul(PAGE_SIZE)
+    }
+}
+
 #[derive(Debug)]
 struct Entry {
     page: Page,

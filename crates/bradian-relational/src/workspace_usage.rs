@@ -7,6 +7,7 @@
 //! atomic reading from the engine under its own lock.
 
 use crate::durable_mvcc::DurableMvccStore;
+use crate::durable_typed::DurableTypedStore;
 use crate::mvcc::MvccStore;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::row_store::RowStore;
@@ -31,6 +32,19 @@ pub struct WorkspaceUsage {
     /// (keys, versions, bytes). Separate from `mvcc_*` which is the
     /// in-memory MvccStore.
     pub durable_mvcc: Option<HistoryUsage>,
+    /// G1-MEMORY extension — DurableTypedStore retained-history usage
+    /// (keys, versions, bytes). Separate from `durable_mvcc`: the
+    /// typed store is the catalog-aware historical SQL engine's
+    /// backing store and may be sampled independently from the raw
+    /// `DurableMvccStore`.
+    pub durable_typed: Option<HistoryUsage>,
+    /// ADR 0172 — bytes resident in a `RowStore`'s page caches
+    /// (derived-index B+tree cache + snapshot-page cache) for the
+    /// current checkpoint generation. Separate from
+    /// `row_store.row_bytes` / `row_store.delta_bytes`, which are
+    /// authoritative row state; page-cache bytes are refillable
+    /// decoded-page copies.
+    pub page_cache_bytes: Option<usize>,
 }
 
 impl WorkspaceUsage {
@@ -62,10 +76,31 @@ impl WorkspaceUsage {
         self
     }
 
+    /// ADR 0172 — add a RowStore's aggregate page-cache byte
+    /// footprint (derived-index + snapshot-page caches, current
+    /// checkpoint generation). Independent of `with_row_store`;
+    /// operators may attach one, both or neither. One atomic
+    /// reading under the store's own mutex.
+    pub fn with_row_store_caches(mut self, store: &RowStore) -> Self {
+        self.page_cache_bytes = Some(store.page_cache_bytes());
+        self
+    }
+
     /// Add a DurableMvccStore's retained-history usage. One atomic
     /// reading under the store's own state lock.
     pub fn with_durable_mvcc(mut self, store: &DurableMvccStore) -> Self {
         self.durable_mvcc = Some(store.history_usage());
+        self
+    }
+
+    /// Add a DurableTypedStore's retained-history usage. One atomic
+    /// reading through its public `history_usage()` accessor, which
+    /// forwards to the inner `DurableMvccStore` under its own state
+    /// lock. This closes the G1-MEMORY gap for catalog-aware
+    /// historical SQL engines (`HistorySqlEngine`) that own a typed
+    /// store rather than a raw MVCC store.
+    pub fn with_durable_typed(mut self, store: &DurableTypedStore) -> Self {
+        self.durable_typed = Some(store.history_usage());
         self
     }
 
@@ -80,16 +115,19 @@ impl WorkspaceUsage {
             (u.row_bytes as u64).saturating_add(u.delta_bytes as u64)
         ).unwrap_or(0);
         let dm = self.durable_mvcc.map(|h| h.bytes as u64).unwrap_or(0);
-        rs.saturating_add(dm)
+        let dt = self.durable_typed.map(|h| h.bytes as u64).unwrap_or(0);
+        let pc = self.page_cache_bytes.map(|b| b as u64).unwrap_or(0);
+        rs.saturating_add(dm).saturating_add(dt).saturating_add(pc)
     }
 
     /// ADR 0110 — sum *row* counts across row-store + durable-
-    /// MVCC. Catalog table count is not included (different
-    /// semantic unit).
+    /// MVCC + durable-typed. Catalog table count is not included
+    /// (different semantic unit).
     pub fn total_rows(&self) -> u64 {
         let rs = self.row_store.map(|u| u.rows as u64).unwrap_or(0);
         let dm = self.durable_mvcc.map(|h| h.keys as u64).unwrap_or(0);
-        rs.saturating_add(dm)
+        let dt = self.durable_typed.map(|h| h.keys as u64).unwrap_or(0);
+        rs.saturating_add(dm).saturating_add(dt)
     }
 }
 
@@ -171,6 +209,13 @@ impl std::fmt::Display for WorkspaceUsage {
         if let Some(h) = self.durable_mvcc {
             write!(f, "; durable_mvcc: {} keys / {} versions / {} bytes",
                 h.keys, h.versions, h.bytes)?;
+        }
+        if let Some(h) = self.durable_typed {
+            write!(f, "; durable_typed: {} keys / {} versions / {} bytes",
+                h.keys, h.versions, h.bytes)?;
+        }
+        if let Some(b) = self.page_cache_bytes {
+            write!(f, "; page_cache: {b} bytes")?;
         }
         Ok(())
     }

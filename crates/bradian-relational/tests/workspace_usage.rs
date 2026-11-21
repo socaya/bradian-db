@@ -330,6 +330,273 @@ fn global_budget_bytes_cap_fires_before_rows_cap_when_both_exceeded() {
     }
 }
 
+// ---------- G1-MEMORY extension — DurableTypedStore ----------
+
+fn open_migrated_typed_store(
+    dir: &std::path::Path,
+) -> (std::path::PathBuf, bradian_relational::durable_typed::DurableTypedStore) {
+    use bradian_relational::domain_sql::DomainSqlEngine;
+    use bradian_relational::durable_typed::DurableTypedStore;
+    use bradian_relational::history_migration::migrate_shared_to_history;
+    use bradian_relational::sql::SqlEngine;
+    let source = dir.join("legacy-shared");
+    let history = dir.join("durable-history");
+    {
+        let ddl = SqlEngine::open(&source).unwrap();
+        for sql in [
+            "CREATE DATABASE bank",
+            "CREATE SCHEMA bank.public",
+            "CREATE TABLE bank.public.accounts (id BIGINT NOT NULL, balance BIGINT NOT NULL, PRIMARY KEY(id))",
+        ] { ddl.execute(sql).unwrap(); }
+    }
+    {
+        let db = DomainSqlEngine::open(&source).unwrap();
+        db.register_catalog_table("bank.public.accounts").unwrap();
+        db.with_session(|s| {
+            s.execute("BEGIN")?;
+            s.execute("INSERT INTO bank.public.accounts(id,balance) VALUES(1,1000)")?;
+            s.execute("INSERT INTO bank.public.accounts(id,balance) VALUES(2,600)")?;
+            s.execute("COMMIT")?;
+            Ok(())
+        }).unwrap();
+    }
+    migrate_shared_to_history(&source, &history).unwrap();
+    let definitions: std::collections::BTreeMap<_, _> =
+        PersistentCatalog::open(history.join("catalog")).unwrap()
+        .snapshot().tables().map(|t| (t.id, t.clone())).collect();
+    let store = DurableTypedStore::open(history.join("history-domain"), &definitions).unwrap();
+    (history, store)
+}
+
+#[test]
+fn with_durable_typed_reports_retained_history_counts() {
+    let dir = tempdir().unwrap();
+    let (history, store) = open_migrated_typed_store(dir.path());
+    let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_durable_typed(&store);
+    let h = usage.durable_typed.expect("with_durable_typed installed");
+    assert!(h.keys >= 2, "two INSERTs should retain >=2 keys, got {}", h.keys);
+    assert!(h.versions >= 2);
+    assert!(h.bytes > 0);
+    // Format includes the new engine without hiding earlier engines.
+    let line = format!("{usage}");
+    assert!(line.contains("durable_typed:"));
+    assert!(line.contains("catalog:"));
+}
+
+#[test]
+fn durable_typed_contributes_to_total_bytes_and_rows() {
+    let dir = tempdir().unwrap();
+    let (history, store) = open_migrated_typed_store(dir.path());
+    let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_durable_typed(&store);
+    let h = usage.durable_typed.unwrap();
+    assert_eq!(usage.total_bytes(), h.bytes as u64);
+    assert_eq!(usage.total_rows(), h.keys as u64);
+}
+
+#[test]
+fn durable_typed_is_additive_with_durable_mvcc_in_totals() {
+    use bradian_relational::durable_mvcc::DurableMvccStore;
+    use bradian_relational::runtime_limits::HistoryLimits;
+    let dir = tempdir().unwrap();
+    let (history, typed) = open_migrated_typed_store(dir.path());
+    let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+    let dmv = DurableMvccStore::open_with_limits(
+        dir.path().join("sidecar-hist"), HistoryLimits::default(),
+    ).unwrap();
+    {
+        let mut tx = dmv.begin();
+        tx.insert(b"sidecar-key", b"sidecar-value").unwrap();
+        tx.commit().unwrap();
+    }
+
+    let usage = WorkspaceUsage::for_catalog(&catalog)
+        .with_durable_typed(&typed)
+        .with_durable_mvcc(&dmv);
+    let t = usage.durable_typed.unwrap();
+    let m = usage.durable_mvcc.unwrap();
+    assert_eq!(usage.total_bytes(), (t.bytes + m.bytes) as u64);
+    assert_eq!(usage.total_rows(), (t.keys + m.keys) as u64);
+    let line = format!("{usage}");
+    assert!(line.contains("durable_mvcc:"));
+    assert!(line.contains("durable_typed:"));
+}
+
+#[test]
+fn global_budget_rejects_on_typed_store_bytes() {
+    use bradian_relational::runtime_limits::ResourceError;
+    use bradian_relational::workspace_usage::GlobalBudget;
+    let dir = tempdir().unwrap();
+    let (history, store) = open_migrated_typed_store(dir.path());
+    let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_durable_typed(&store);
+    assert!(usage.total_bytes() > 0);
+
+    let budget = GlobalBudget::unlimited().with_max_total_bytes(0);
+    match budget.check(&usage) {
+        Err(ResourceError::GlobalBudget { resource, actual, limit }) => {
+            assert_eq!(resource, "total_bytes");
+            assert_eq!(limit, 0);
+            assert_eq!(actual, usage.durable_typed.unwrap().bytes as u64);
+        }
+        other => panic!("expected GlobalBudget bytes error; got {other:?}"),
+    }
+}
+
+#[test]
+fn global_budget_rejects_on_typed_store_rows() {
+    use bradian_relational::runtime_limits::ResourceError;
+    use bradian_relational::workspace_usage::GlobalBudget;
+    let dir = tempdir().unwrap();
+    let (history, store) = open_migrated_typed_store(dir.path());
+    let catalog = PersistentCatalog::open(history.join("catalog")).unwrap();
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_durable_typed(&store);
+    let rows = usage.total_rows();
+    assert!(rows >= 2);
+
+    let budget = GlobalBudget::unlimited()
+        .with_max_total_bytes(u64::MAX)
+        .with_max_total_rows(rows - 1);
+    match budget.check(&usage) {
+        Err(ResourceError::GlobalBudget { resource, actual, limit }) => {
+            assert_eq!(resource, "total_rows");
+            assert_eq!(limit, rows - 1);
+            assert_eq!(actual, rows);
+        }
+        other => panic!("expected GlobalBudget rows error; got {other:?}"),
+    }
+}
+
+// ---------- ADR 0172 — RowStore page-cache byte accounting ----------
+
+#[test]
+fn page_cache_bytes_is_zero_before_any_checkpoint_reads() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = RowStore::open(dir.path().join("rows")).unwrap();
+    // No checkpoint yet; no indexed reads done. Page caches are empty.
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store_caches(&store);
+    assert_eq!(usage.page_cache_bytes, Some(0));
+}
+
+#[test]
+fn page_cache_bytes_reports_non_zero_after_indexed_reads() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..100 {
+        store.put(format!("k-{i:04}").as_bytes(), vec![i as u8; 64].as_slice()).unwrap();
+    }
+    store.checkpoint().unwrap();
+    // Prime both the index cache (root + leaf) and snapshot cache (data).
+    for i in [1, 20, 50] {
+        store.indexed_get(format!("k-{i:04}").as_bytes()).unwrap();
+    }
+
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store_caches(&store);
+    let bytes = usage.page_cache_bytes.expect("with_row_store_caches installed");
+    assert!(bytes > 0, "primed caches should expose non-zero bytes");
+    // Every cached page is PAGE_SIZE = 4096 bytes.
+    assert_eq!(bytes % 4096, 0, "cache bytes are a multiple of PAGE_SIZE");
+}
+
+#[test]
+fn page_cache_bytes_folds_into_total_bytes() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..100 {
+        store.put(format!("k-{i:04}").as_bytes(), vec![i as u8; 64].as_slice()).unwrap();
+    }
+    store.checkpoint().unwrap();
+    store.indexed_get(b"k-0001").unwrap();
+
+    let usage = WorkspaceUsage::for_catalog(&catalog)
+        .with_row_store(&store)
+        .with_row_store_caches(&store);
+    let rs = usage.row_store.unwrap();
+    let pc = usage.page_cache_bytes.unwrap();
+    assert_eq!(
+        usage.total_bytes(),
+        (rs.row_bytes as u64) + (rs.delta_bytes as u64) + (pc as u64),
+    );
+    let line = format!("{usage}");
+    assert!(line.contains("page_cache:"),
+        "Display must include page_cache token; got: {line}");
+}
+
+#[test]
+fn page_cache_bytes_invalidates_on_new_checkpoint() {
+    use bradian_relational::row_store::RowStore;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..100 {
+        store.put(format!("k-{i:04}").as_bytes(), vec![i as u8; 64].as_slice()).unwrap();
+    }
+    store.checkpoint().unwrap();
+    store.indexed_get(b"k-0005").unwrap();
+
+    let primed = WorkspaceUsage::for_catalog(&catalog).with_row_store_caches(&store);
+    assert!(primed.page_cache_bytes.unwrap() > 0);
+
+    // New checkpoint invalidates both caches (see buffer_pool.rs tests).
+    store.put(b"k-0005", b"changed").unwrap();
+    store.checkpoint().unwrap();
+    let after = WorkspaceUsage::for_catalog(&catalog).with_row_store_caches(&store);
+    assert_eq!(after.page_cache_bytes, Some(0),
+        "new checkpoint generation drops the page caches");
+}
+
+#[test]
+fn global_budget_rejects_on_page_cache_bytes() {
+    use bradian_relational::row_store::RowStore;
+    use bradian_relational::runtime_limits::ResourceError;
+    use bradian_relational::workspace_usage::GlobalBudget;
+    let dir = tempdir().unwrap();
+    let catalog = PersistentCatalog::open(dir.path().join("catalog")).unwrap();
+    let store = RowStore::open(dir.path().join("rows")).unwrap();
+    for i in 0..100 {
+        store.put(format!("k-{i:04}").as_bytes(), vec![i as u8; 64].as_slice()).unwrap();
+    }
+    store.checkpoint().unwrap();
+    store.indexed_get(b"k-0001").unwrap();
+    // Sample caches only; do NOT attach .with_row_store so that
+    // row_bytes/delta_bytes do not contribute. Page-cache bytes
+    // become the sole positive contributor to total_bytes.
+    let usage = WorkspaceUsage::for_catalog(&catalog).with_row_store_caches(&store);
+    assert!(usage.total_bytes() > 0);
+    assert_eq!(usage.total_bytes(), usage.page_cache_bytes.unwrap() as u64);
+
+    let budget = GlobalBudget::unlimited().with_max_total_bytes(0);
+    match budget.check(&usage) {
+        Err(ResourceError::GlobalBudget { resource, actual, limit }) => {
+            assert_eq!(resource, "total_bytes");
+            assert_eq!(limit, 0);
+            assert_eq!(actual, usage.page_cache_bytes.unwrap() as u64);
+        }
+        other => panic!("expected GlobalBudget bytes error; got {other:?}"),
+    }
+}
+
+#[test]
+fn cached_bytes_on_cache_stats_is_resident_times_page_size() {
+    use bradian_relational::buffer_pool::CacheStats;
+    let stats = CacheStats { hits: 0, misses: 0, evictions: 0,
+        resident: 3, capacity: 16 };
+    assert_eq!(stats.cached_bytes(), 3 * 4096);
+    let empty = CacheStats::default();
+    assert_eq!(empty.cached_bytes(), 0);
+}
+
 #[test]
 fn global_budget_is_post_sampling_check_not_atomic_with_mutations() {
     // Honest: GlobalBudget::check reads a frozen snapshot. A

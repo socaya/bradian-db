@@ -653,6 +653,21 @@ impl RowStore {
         ))
     }
 
+    /// ADR 0172 — total bytes resident in the derived-index B+tree
+    /// page cache and the snapshot-page cache for the current
+    /// checkpoint generation. Safe to sample under the store mutex;
+    /// returns 0 when no index has been opened yet (pre-first-
+    /// checkpoint). Caches are invalidated on every new checkpoint
+    /// generation, so this is a point-in-time reading.
+    pub fn page_cache_bytes(&self) -> usize {
+        let inner = self.inner.lock();
+        let idx_bytes = inner.index.as_ref()
+            .map(|idx| idx.cache_stats().cached_bytes()).unwrap_or(0);
+        let snap_bytes = inner.snapshot_pages.as_ref()
+            .map(|c| PageCache::stats(c).cached_bytes()).unwrap_or(0);
+        idx_bytes.saturating_add(snap_bytes)
+    }
+
     /// Verify every checkpoint index pointer against immutable row pages.
     /// Full verification is intentionally an explicit O(N log N) operation.
     pub fn verify_checkpoint_index(&self) -> StoreResult<IndexRecovery> {
