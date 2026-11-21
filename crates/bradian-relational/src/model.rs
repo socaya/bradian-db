@@ -43,6 +43,30 @@ pub struct UniqueKey {
     pub columns: Vec<String>,
 }
 
+/// ADR 0182 — simple per-column CHECK operator. The RHS is a
+/// stored literal; the LHS is implicitly the column the
+/// constraint is attached to. Evaluated at INSERT and UPDATE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheckOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CheckOp {
+    /// Human-readable form used in error messages.
+    pub fn sql(self) -> &'static str {
+        match self {
+            CheckOp::Eq => "=", CheckOp::Ne => "<>",
+            CheckOp::Lt => "<", CheckOp::Le => "<=",
+            CheckOp::Gt => ">", CheckOp::Ge => ">=",
+        }
+    }
+}
+
 /// Target table and columns are resolved to stable object identifiers by the catalog.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignKey {
@@ -73,6 +97,11 @@ pub struct TableSpec {
     /// pre-ADR-0175 TableSpec bytes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub column_collations: std::collections::BTreeMap<String, crate::collation::Collation>,
+    /// ADR 0182 — per-column CHECK predicates. One column may
+    /// carry multiple checks; all must pass. Empty map preserves
+    /// pre-ADR-0182 TableSpec bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub column_checks: std::collections::BTreeMap<String, Vec<(CheckOp, crate::typed_table::Value)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +139,11 @@ pub struct Table {
     /// preserves pre-ADR-0157 schema bytes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub policies: std::collections::BTreeMap<String, crate::access_policy::TableAccessPolicy>,
+    /// ADR 0182 — per-column CHECK predicates persisted on the
+    /// durable catalog. Evaluated at INSERT / UPDATE by every
+    /// SQL engine. Empty map preserves pre-ADR-0182 bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub column_checks: std::collections::BTreeMap<String, Vec<(CheckOp, crate::typed_table::Value)>>,
 }
 
 #[cfg(test)]

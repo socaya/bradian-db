@@ -68,6 +68,10 @@ pub enum SqlError {
     /// columns it covers.
     #[error(transparent)]
     Unique(#[from] crate::unique_check::UniqueViolation),
+    /// ADR 0182 — per-column CHECK constraint violated by a
+    /// candidate row at INSERT or UPDATE.
+    #[error("CHECK constraint on column {column:?} failed: value does not satisfy {op} {literal}")]
+    Check { column: String, op: &'static str, literal: String },
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -170,7 +174,14 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 }
             }
             out.push(Token::Number(number));
-        } else if "(),.=;*".contains(ch) || (expressions && "+-/".contains(ch)) {
+        } else if "(),.=;*<>".contains(ch) || (expressions && "+-/".contains(ch)) {
+            // ADR 0182 — `<` and `>` admitted so the CHECK
+            // grammar can parse comparison operators. The
+            // existing grammar paths reject these symbols
+            // outside CHECK (e.g. `rejects_join_aggregate_and_or_and_range_and_alias`
+            // continues to reject range predicates in WHERE
+            // because the WHERE parser's `predicate` only
+            // consumes `=`).
             chars.next();
             out.push(Token::Symbol(ch));
         } else {
@@ -263,6 +274,27 @@ impl Parser {
     pub(crate) fn symbol(&mut self, value: char) -> SqlResult<()> {
         if self.consume_symbol(value) { Ok(()) }
         else { Err(SqlError::Syntax(format!("expected '{value}'"))) }
+    }
+
+    /// ADR 0182 — parse a comparison operator for the CHECK
+    /// clause. Accepts `=`, `<>`, `<`, `<=`, `>`, `>=`.
+    pub(crate) fn word_or_symbol_pair_for_check(&mut self) -> SqlResult<crate::model::CheckOp> {
+        use crate::model::CheckOp;
+        match self.peek().cloned() {
+            Some(Token::Symbol('=')) => { self.pos += 1; Ok(CheckOp::Eq) }
+            Some(Token::Symbol('<')) => {
+                self.pos += 1;
+                if self.consume_symbol('=') { Ok(CheckOp::Le) }
+                else if self.consume_symbol('>') { Ok(CheckOp::Ne) }
+                else { Ok(CheckOp::Lt) }
+            }
+            Some(Token::Symbol('>')) => {
+                self.pos += 1;
+                if self.consume_symbol('=') { Ok(CheckOp::Ge) }
+                else { Ok(CheckOp::Gt) }
+            }
+            _ => Err(SqlError::Syntax("expected CHECK operator (=, <>, <, <=, >, >=)".into())),
+        }
     }
 
     pub(crate) fn name(&mut self) -> SqlResult<Vec<String>> {
@@ -486,6 +518,52 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
         .checked_add(hour * 3600 + minute * 60 + second)?
         .checked_sub(offset_sec)?;
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
+}
+
+/// ADR 0182 — evaluate every column CHECK on a candidate row.
+/// Returns `SqlError::Check` on the first violation. NULL
+/// columns skip their checks (SQL-standard three-valued logic:
+/// NULL compared to anything is UNKNOWN, treated as not-false).
+pub(crate) fn check_row(table: &Table, row: &[Value]) -> SqlResult<()> {
+    for (column_name, predicates) in &table.column_checks {
+        let position = locate(table, column_name)?;
+        let value = &row[position];
+        if matches!(value, Value::Null) { continue; }
+        for (op, literal) in predicates {
+            let ord = compare_values_for_check(value, literal);
+            let satisfied = match op {
+                crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+            };
+            if !satisfied {
+                return Err(SqlError::Check {
+                    column: column_name.clone(),
+                    op: op.sql(),
+                    literal: format!("{literal:?}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compare_values_for_check(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+        (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
+        (Value::Decimal(a), Value::Decimal(b)) => a.cmp(b),
+        (Value::String(a) | Value::Json(a), Value::String(b) | Value::Json(b)) => a.cmp(b),
+        (Value::TimestampTz(a), Value::TimestampTz(b)) => a.cmp(b),
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
+        // Mismatched types cannot occur: the catalog checks
+        // literal/column type compatibility at CREATE TABLE.
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 pub(crate) fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
@@ -898,6 +976,8 @@ impl SqlEngine {
                         let mut primary = Vec::<String>::new();
                         let mut column_collations =
                             std::collections::BTreeMap::new();
+                        let mut column_checks =
+                            std::collections::BTreeMap::<String, Vec<(crate::model::CheckOp, crate::typed_table::Value)>>::new();
                         let mut unique_keys = Vec::<crate::model::UniqueKey>::new();
                         p.symbol('(')?;
                         loop {
@@ -949,6 +1029,23 @@ impl SqlEngine {
                                     };
                                     column_collations.insert(column.clone(), collation);
                                 }
+                                // ADR 0182 — optional per-column CHECK
+                                // clause: `CHECK (<op> <literal>)`.
+                                // Multiple CHECK clauses on one column
+                                // are AND-joined. Supported ops:
+                                // =, <>, <, <=, >, >=.
+                                while p.consume_word("check") {
+                                    p.symbol('(')?;
+                                    let op_sym = p.word_or_symbol_pair_for_check()?;
+                                    let literal = p.literal()?;
+                                    p.symbol(')')?;
+                                    let column_def = Column {
+                                        name: column.clone(), data_type: data_type.clone(), nullable,
+                                    };
+                                    let value = coerce(&literal, &column_def)?;
+                                    column_checks.entry(column.clone()).or_default()
+                                        .push((op_sym, value));
+                                }
                                 columns.push(Column { name: column, data_type, nullable });
                             }
                             if !p.consume_symbol(',') { break; }
@@ -968,6 +1065,7 @@ impl SqlEngine {
                             primary_key: PrimaryKey { columns: primary },
                             unique_keys,
                             column_collations,
+                            column_checks,
                         })?;
                         // TableStore is provisioned on first use. Catalog and
                         // user-table directories are not one atomic DDL commit.
@@ -1008,6 +1106,10 @@ impl SqlEngine {
                 let row_bytes = crate::query_budget::row_bytes(&values);
                 if let Some(b) = budget.as_deref() { b.preview_charge(1, row_bytes)?; }
                 let store = self.table_store(&table)?;
+                // ADR 0182 — evaluate per-column CHECK predicates
+                // against the candidate row. No-op when
+                // table.column_checks is empty.
+                check_row(&table, &values)?;
                 // ADR 0176 — enforce table-level UNIQUE before
                 // insert. Scans all existing rows; honest O(N)
                 // cost per INSERT until a disk-backed secondary
@@ -1117,6 +1219,9 @@ impl SqlEngine {
                 let mut written_bytes = 0u64;
                 let affected = if let Some(mut row) = existing {
                     for (pos, value) in assignments { row[pos] = value; }
+                    // ADR 0182 — evaluate per-column CHECKs on
+                    // the mutated row.
+                    check_row(&table, &row)?;
                     // ADR 0177 — UNIQUE enforcement on UPDATE.
                     // Scan all rows, exclude the one being
                     // updated (matched by PK projection), and

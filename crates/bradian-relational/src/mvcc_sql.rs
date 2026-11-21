@@ -384,6 +384,8 @@ impl<'a> MvccSqlSession<'a> {
                                 .ok_or_else(|| SqlError::Resolution("missing column".into()))?;
                             coerce(&lit, column)
                         }).collect::<SqlResult<Vec<_>>>()?;
+                        // ADR 0182 — per-column CHECK.
+                        crate::sql::check_row(&table, &row)?;
                         // ADR 0179 — UNIQUE enforcement at
                         // MVCC-SQL INSERT mirrors the pattern
                         // across the other three engines.
@@ -489,6 +491,9 @@ impl<'a> MvccSqlSession<'a> {
                         let mut written_bytes = 0u64;
                         let affected = if let Some(mut row) = tx.get(table.id, &key)? {
                             for (position, value) in replacements { row[position] = value; }
+                            // ADR 0182 — per-column CHECK on
+                            // the mutated row.
+                            crate::sql::check_row(&table, &row)?;
                             // ADR 0179 — UNIQUE enforcement at
                             // MVCC-SQL UPDATE: self-filter by PK
                             // and run the checker on the mutated

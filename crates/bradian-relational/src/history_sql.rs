@@ -759,6 +759,8 @@ impl<'a> HistorySqlSession<'a> {
                                 },
                             }
                         }).collect::<SqlResult<Vec<_>>>()?;
+                        // ADR 0182 — per-column CHECK.
+                        crate::sql::check_row(&table, &row)?;
                         // ADR 0179 — UNIQUE enforcement at historical
                         // INSERT mirrors ADR 0176/0178. `tx.scan`
                         // reads current (post-retention-floor) rows
@@ -897,6 +899,9 @@ impl<'a> HistorySqlSession<'a> {
                             for (position, expression) in replacements {
                                 row[position] = expression.evaluate(&original, &table.columns[position])?;
                             }
+                            // ADR 0182 — per-column CHECK on
+                            // the mutated row.
+                            crate::sql::check_row(&table, &row)?;
                             // ADR 0179 — UNIQUE enforcement at
                             // historical UPDATE. Filter the row
                             // being updated by PK projection from

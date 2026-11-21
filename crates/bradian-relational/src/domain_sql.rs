@@ -351,6 +351,8 @@ impl<'a> DomainSqlSession<'a> {
                                 .ok_or_else(|| SqlError::Resolution("missing column".into()))?;
                             coerce(&lit, column)
                         }).collect::<SqlResult<Vec<_>>>()?;
+                        // ADR 0182 — per-column CHECK.
+                        crate::sql::check_row(&table, &row)?;
                         // ADR 0178 — UNIQUE enforcement at INSERT
                         // mirrors ADR 0176 for the single-table
                         // engine. Scan this table under the active
@@ -457,6 +459,9 @@ impl<'a> DomainSqlSession<'a> {
                         let mut written_bytes = 0u64;
                         let affected = if let Some(mut row) = tx.get(table.id, &key)? {
                             for (position, value) in replacements { row[position] = value; }
+                            // ADR 0182 — per-column CHECK on
+                            // the mutated row.
+                            crate::sql::check_row(&table, &row)?;
                             // ADR 0178 — UNIQUE enforcement at
                             // UPDATE mirrors ADR 0177: scan the
                             // table under the active transaction

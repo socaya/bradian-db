@@ -102,6 +102,15 @@ fn is_widening(from: &DataType, to: &DataType) -> bool {
 
 /// ADR 0124 — permissive type-matching for column DEFAULTs.
 /// Must stay a *subset* of `typed_table::validate_value`;
+/// ADR 0182 — alias used by column_checks validation so
+/// CHECK literals are type-compatible with their column.
+/// Null is rejected (CHECK against a NULL literal is a
+/// misuse — the standard semantics are IS NULL which is
+/// not in this grammar's scope).
+pub(crate) fn type_matches(ty: &DataType, v: &crate::typed_table::Value) -> bool {
+    default_matches_type(ty, v)
+}
+
 /// NULLs are rejected (SET DEFAULT NULL = DROP DEFAULT).
 fn default_matches_type(ty: &DataType, v: &crate::typed_table::Value) -> bool {
     use crate::typed_table::Value;
@@ -251,6 +260,26 @@ impl Catalog {
             }
             column_collations.insert(col_name, collation);
         }
+        // ADR 0182 — accept per-column CHECK declarations. Keys
+        // must name an existing column; the stored literal must
+        // match its declared type (so we fail fast at CREATE
+        // rather than at every INSERT). No cross-column refs in
+        // the minimal grammar.
+        let mut column_checks = BTreeMap::new();
+        for (col_name, checks) in spec.column_checks {
+            let col_name = identifier(&col_name)?;
+            let column = columns.iter().find(|c| c.name == col_name)
+                .ok_or_else(|| CatalogError::InvalidDefinition(
+                    format!("CHECK on unknown column {col_name}")))?;
+            for (_op, value) in &checks {
+                if !crate::catalog::type_matches(&column.data_type, value) {
+                    return Err(CatalogError::InvalidDefinition(
+                        format!("CHECK literal does not match column {col_name} type {:?}",
+                            column.data_type)));
+                }
+            }
+            column_checks.insert(col_name, checks);
+        }
         let id = TableId(self.allocate()?);
         self.tables.insert(id, Table {
             id, schema, name: table_name, columns,
@@ -259,6 +288,7 @@ impl Catalog {
             column_defaults: BTreeMap::new(),
             column_collations,
             policies: BTreeMap::new(),
+            column_checks,
         });
         Ok(id)
     }

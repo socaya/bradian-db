@@ -148,7 +148,7 @@ mod tests {
         Table { id: TableId(1), schema: SchemaId(1), name: "items".into(),
             columns: vec![Column { name: "id".into(), data_type: DataType::Int64, nullable: false },
                 Column { name: "value".into(), data_type, nullable: true }],
-            primary_key: PrimaryKey { columns: vec!["id".into()] }, unique_keys: vec![], foreign_keys: vec![], column_defaults: Default::default(), column_collations: Default::default(), policies: Default::default() }
+            primary_key: PrimaryKey { columns: vec!["id".into()] }, unique_keys: vec![], foreign_keys: vec![], column_defaults: Default::default(), column_collations: Default::default(), policies: Default::default(), column_checks: Default::default() }
     }
 
     #[test]
