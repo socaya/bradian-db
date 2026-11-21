@@ -72,6 +72,15 @@ pub enum SqlError {
     /// candidate row at INSERT or UPDATE.
     #[error("CHECK constraint on column {column:?} failed: value does not satisfy {op} {literal}")]
     Check { column: String, op: &'static str, literal: String },
+    /// ADR 0184 — FOREIGN KEY constraint violated.
+    /// `reason` distinguishes the three paths:
+    ///   - `missing-parent` — INSERT or UPDATE child FK cols
+    ///     reference no parent row.
+    ///   - `restrict` — DELETE / PK-UPDATE on parent while a
+    ///     child row still references it (RESTRICT default
+    ///     action per ADR 0184).
+    #[error("FOREIGN KEY constraint {constraint:?} violated: {reason}")]
+    ForeignKey { constraint: String, reason: &'static str },
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -518,6 +527,84 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
         .checked_add(hour * 3600 + minute * 60 + second)?
         .checked_sub(offset_sec)?;
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
+}
+
+/// ADR 0184 — for a child INSERT or FK-column UPDATE, every
+/// foreign key on `table` requires a matching parent row.
+/// A NULL in any FK column disables that FK for the row
+/// (SQL-standard semantics; matches the UNIQUE NULL rule).
+pub(crate) fn foreign_key_check(
+    engine: &SqlEngine, table: &Table, row: &[Value],
+) -> SqlResult<()> {
+    if table.foreign_keys.is_empty() { return Ok(()); }
+    for fk in &table.foreign_keys {
+        let child_positions: Vec<usize> = fk.columns.iter()
+            .map(|c| locate(table, c)).collect::<SqlResult<Vec<_>>>()?;
+        let projection: Vec<Value> = child_positions.iter().map(|p| row[*p].clone()).collect();
+        if projection.iter().any(|v| matches!(v, Value::Null)) {
+            continue;
+        }
+        let snap = engine.catalog.snapshot();
+        let parent = snap.tables().find(|t| t.id == fk.referenced_table)
+            .ok_or_else(|| SqlError::Resolution(format!("foreign key {} target missing", fk.name)))?;
+        let parent_positions: Vec<usize> = fk.referenced_columns.iter()
+            .map(|c| parent.columns.iter().position(|col| col.name == *c)
+                .ok_or_else(|| SqlError::Resolution(format!("foreign key {} referenced column {c} missing", fk.name))))
+            .collect::<SqlResult<Vec<_>>>()?;
+        let parent_table = parent.clone();
+        drop(snap);
+        let parent_store = engine.table_store(&parent_table)?;
+        let parent_rows = parent_store.scan()?;
+        let hit = parent_rows.iter().any(|r|
+            parent_positions.iter().zip(projection.iter())
+                .all(|(pos, val)| &r[*pos] == val));
+        if !hit {
+            return Err(SqlError::ForeignKey {
+                constraint: fk.name.clone(), reason: "missing-parent",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// ADR 0184 — RESTRICT: before deleting a parent row (or
+/// updating its PK), scan every child table whose FK points
+/// at this table and ensure no row references the departing
+/// PK projection. Default action per SQL; CASCADE / SET NULL
+/// are ADR 0185 follow-up.
+pub(crate) fn foreign_key_restrict(
+    engine: &SqlEngine, parent: &Table, parent_pk: &[Value],
+) -> SqlResult<()> {
+    let snap = engine.catalog.snapshot();
+    let parent_pk_positions: Vec<usize> = parent.primary_key.columns.iter()
+        .map(|c| locate(parent, c)).collect::<SqlResult<Vec<_>>>()?;
+    let mut children = Vec::new();
+    for child in snap.tables() {
+        for fk in &child.foreign_keys {
+            if fk.referenced_table == parent.id
+                && fk.referenced_columns == parent.primary_key.columns
+            {
+                children.push((child.clone(), fk.clone()));
+            }
+        }
+    }
+    drop(snap);
+    for (child, fk) in children {
+        let child_positions: Vec<usize> = fk.columns.iter()
+            .map(|c| locate(&child, c)).collect::<SqlResult<Vec<_>>>()?;
+        let child_store = engine.table_store(&child)?;
+        let rows = child_store.scan()?;
+        for r in rows {
+            let matches_pk = child_positions.iter().zip(parent_pk_positions.iter())
+                .all(|(ch, pa)| r[*ch] == parent_pk[*pa]);
+            if matches_pk {
+                return Err(SqlError::ForeignKey {
+                    constraint: fk.name, reason: "restrict",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// ADR 0182 — evaluate every column CHECK on a candidate row.
@@ -979,6 +1066,10 @@ impl SqlEngine {
                         let mut column_checks =
                             std::collections::BTreeMap::<String, Vec<(crate::model::CheckOp, crate::typed_table::Value)>>::new();
                         let mut unique_keys = Vec::<crate::model::UniqueKey>::new();
+                        // ADR 0184 — parser collects inline FK clauses
+                        // and the catalog's add_foreign_key is called
+                        // after create_table resolves the child id.
+                        let mut pending_fks: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
                         p.symbol('(')?;
                         loop {
                             if p.consume_word("primary") {
@@ -1002,6 +1093,22 @@ impl SqlEngine {
                                 unique_keys.push(crate::model::UniqueKey {
                                     name: uq_name, columns: cols,
                                 });
+                            } else if p.consume_word("foreign") {
+                                // ADR 0184 — FOREIGN KEY (child_cols)
+                                // REFERENCES <qual_parent> (parent_cols).
+                                // No ON DELETE / ON UPDATE clauses yet
+                                // (RESTRICT default — ADR 0185 adds
+                                // action keywords).
+                                p.expect("key")?;
+                                let child_cols = p.list(|parser| parser.word())?;
+                                p.expect("references")?;
+                                let parent_name = p.name()?;
+                                qualified(&parent_name, 3)?;
+                                let parent_cols = p.list(|parser| parser.word())?;
+                                if child_cols.is_empty() || parent_cols.is_empty() {
+                                    return Err(SqlError::Syntax("FOREIGN KEY requires at least one column pair".into()));
+                                }
+                                pending_fks.push((child_cols, parent_name, parent_cols));
                             } else {
                                 let column = p.word()?;
                                 let data_type = p.data_type()?;
@@ -1060,13 +1167,36 @@ impl SqlEngine {
                             .ok_or_else(|| SqlError::Resolution("unknown database".into()))?;
                         let schema = snapshot.schemas().find(|s| s.database == database.id && s.name == name[1])
                             .ok_or_else(|| SqlError::Resolution("unknown schema".into()))?;
-                        self.catalog.create_table(schema.id, TableSpec {
+                        let child_id = self.catalog.create_table(schema.id, TableSpec {
                             name: name[2].clone(), columns,
                             primary_key: PrimaryKey { columns: primary },
                             unique_keys,
                             column_collations,
                             column_checks,
                         })?;
+                        // ADR 0184 — resolve each FK's parent name
+                        // via a fresh catalog snapshot and call
+                        // add_foreign_key. The catalog's existing
+                        // validation (arity, type match, target is
+                        // PK or non-null UNIQUE) handles the rest.
+                        if !pending_fks.is_empty() {
+                            let snap = self.catalog.snapshot();
+                            for (i, (child_cols, parent_name, parent_cols)) in pending_fks.into_iter().enumerate() {
+                                let db = snap.databases().find(|d| d.name == parent_name[0])
+                                    .ok_or_else(|| SqlError::Resolution(format!("unknown database {}", parent_name[0])))?;
+                                let sc = snap.schemas().find(|s| s.database == db.id && s.name == parent_name[1])
+                                    .ok_or_else(|| SqlError::Resolution(format!("unknown schema {}.{}", parent_name[0], parent_name[1])))?;
+                                let parent = snap.tables().find(|t| t.schema == sc.id && t.name == parent_name[2])
+                                    .ok_or_else(|| SqlError::Resolution(format!("unknown table {}.{}.{}",
+                                        parent_name[0], parent_name[1], parent_name[2])))?;
+                                self.catalog.add_foreign_key(child_id, crate::model::ForeignKeySpec {
+                                    name: format!("fk_{}_{i}", name[2]),
+                                    columns: child_cols,
+                                    referenced_table: parent.id,
+                                    referenced_columns: parent_cols,
+                                })?;
+                            }
+                        }
                         // TableStore is provisioned on first use. Catalog and
                         // user-table directories are not one atomic DDL commit.
                     }
@@ -1110,6 +1240,10 @@ impl SqlEngine {
                 // against the candidate row. No-op when
                 // table.column_checks is empty.
                 check_row(&table, &values)?;
+                // ADR 0184 — FOREIGN KEY parent-exists check
+                // for every FK on this table. No-op when
+                // table.foreign_keys is empty.
+                foreign_key_check(self, &table, &values)?;
                 // ADR 0176 — enforce table-level UNIQUE before
                 // insert. Scans all existing rows; honest O(N)
                 // cost per INSERT until a disk-backed secondary
@@ -1222,6 +1356,12 @@ impl SqlEngine {
                     // ADR 0182 — evaluate per-column CHECKs on
                     // the mutated row.
                     check_row(&table, &row)?;
+                    // ADR 0184 — FOREIGN KEY parent-exists check
+                    // on the mutated row. Covers the case where
+                    // an FK column is being changed to a value
+                    // whose parent does not exist. NULL FK cols
+                    // disable the FK for the row.
+                    foreign_key_check(self, &table, &row)?;
                     // ADR 0177 — UNIQUE enforcement on UPDATE.
                     // Scan all rows, exclude the one being
                     // updated (matched by PK projection), and
@@ -1267,6 +1407,11 @@ impl SqlEngine {
                 // ADR 0151 — preflight before delete.
                 if existing.is_some() {
                     if let Some(b) = budget.as_deref() { b.preview_charge(1, deleted_bytes)?; }
+                }
+                // ADR 0184 — RESTRICT: if any child row references
+                // this parent's PK, refuse the DELETE.
+                if existing.is_some() {
+                    foreign_key_restrict(self, &table, &pk)?;
                 }
                 let affected = if existing.is_some() {
                     store.delete(&pk)?;

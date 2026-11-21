@@ -282,16 +282,14 @@ impl TableStore {
 }
 
 pub(crate) fn validate_table(table: &Table) -> TableResult<Vec<usize>> {
-    // ADR 0176 — UNIQUE is now enforced at the SQL-engine INSERT
-    // path via UniqueConstraintChecker (whole-table scan). The
-    // table-store itself is still schema-neutral about UNIQUE;
-    // operators who bypass SqlEngine must call the checker
-    // themselves. FOREIGN KEY remains unimplemented and refused.
-    if !table.foreign_keys.is_empty() {
-        return Err(TableError::Schema(
-            "FOREIGN KEY constraints are not implemented in this table store".into()
-        ));
-    }
+    // ADR 0176 — UNIQUE is enforced at the SQL-engine INSERT
+    // path via UniqueConstraintChecker. ADR 0184 — FOREIGN KEY
+    // is enforced at the SQL-engine INSERT / UPDATE / DELETE
+    // paths via `foreign_key_check` + `foreign_key_restrict`
+    // in sql.rs. The table-store itself stays schema-neutral
+    // about these; operators who bypass SqlEngine must call
+    // the checkers themselves.
+    let _ = table.foreign_keys.len();
     if table.id.0 == 0 || table.columns.is_empty()
         || table.columns.len() > u16::MAX as usize
         || table.primary_key.columns.is_empty()
