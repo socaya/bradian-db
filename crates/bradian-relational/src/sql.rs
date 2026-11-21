@@ -372,6 +372,84 @@ pub(crate) fn qualified(parts: &[String], expected: usize) -> SqlResult<()> {
     else { Err(SqlError::Resolution(format!("expected {expected}-part qualified name"))) }
 }
 
+/// ADR 0180 — parse `YYYY-MM-DDTHH:MM:SS[.ffffff][Z|±HH:MM]` into
+/// microseconds since the Unix epoch. Returns `None` for any
+/// syntax deviation (unknown separator, out-of-range field,
+/// missing offset). Uses Howard Hinnant's days-from-civil
+/// algorithm to compute the date part without an external
+/// dependency.
+pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+    // Minimum: "YYYY-MM-DDTHH:MM:SSZ" = 20 chars.
+    if bytes.len() < 20 { return None; }
+    let digit = |i: usize| -> Option<i64> {
+        let c = *bytes.get(i)?;
+        if c.is_ascii_digit() { Some((c - b'0') as i64) } else { None }
+    };
+    if bytes[4] != b'-' || bytes[7] != b'-'
+        || (bytes[10] != b'T' && bytes[10] != b' ')
+        || bytes[13] != b':' || bytes[16] != b':'
+    { return None; }
+    let year = digit(0)? * 1000 + digit(1)? * 100 + digit(2)? * 10 + digit(3)?;
+    let month = digit(5)? * 10 + digit(6)?;
+    let day = digit(8)? * 10 + digit(9)?;
+    let hour = digit(11)? * 10 + digit(12)?;
+    let minute = digit(14)? * 10 + digit(15)?;
+    let second = digit(17)? * 10 + digit(18)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day)
+        || hour > 23 || minute > 59 || second > 60  // leap second permitted
+    { return None; }
+
+    let mut pos = 19;
+    // Optional fractional seconds: .ffffff (up to 6 digits).
+    let mut micros_frac: i64 = 0;
+    if bytes.get(pos) == Some(&b'.') {
+        pos += 1;
+        let mut count = 0;
+        while count < 6 && pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            micros_frac = micros_frac * 10 + (bytes[pos] - b'0') as i64;
+            pos += 1; count += 1;
+        }
+        // Pad to microsecond precision if fewer digits were given.
+        for _ in count..6 { micros_frac *= 10; }
+        // Reject extra fractional digits past microsecond precision.
+        if pos < bytes.len() && bytes[pos].is_ascii_digit() { return None; }
+    }
+
+    // Timezone designator: Z or ±HH:MM.
+    let (offset_sec, consumed) = match bytes.get(pos) {
+        Some(&b'Z') => (0_i64, 1),
+        Some(&b'+') | Some(&b'-') => {
+            if bytes.len() < pos + 6 || bytes[pos + 3] != b':' { return None; }
+            let sign = if bytes[pos] == b'+' { 1_i64 } else { -1_i64 };
+            let hh = digit(pos + 1)? * 10 + digit(pos + 2)?;
+            let mm = digit(pos + 4)? * 10 + digit(pos + 5)?;
+            if hh > 23 || mm > 59 { return None; }
+            (sign * (hh * 3600 + mm * 60), 6)
+        }
+        _ => return None,
+    };
+    pos += consumed;
+    if pos != bytes.len() { return None; }
+
+    // Howard Hinnant's days_from_civil, adjusted for a 1970-01-01
+    // epoch. `m` is the Hinnant-offset month index (March = 0,
+    // ..., January = 10, February = 11) so the `doy` formula uses
+    // `m` directly rather than `m - 3`.
+    let (y, m) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch = era * 146097 + doe - 719468;
+
+    let secs = days_since_epoch
+        .checked_mul(86400)?
+        .checked_add(hour * 3600 + minute * 60 + second)?
+        .checked_sub(offset_sec)?;
+    secs.checked_mul(1_000_000)?.checked_add(micros_frac)
+}
+
 pub(crate) fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
     if matches!(lit, Literal::Null) {
         return if column.nullable { Ok(Value::Null) }
@@ -398,11 +476,19 @@ pub(crate) fn coerce(lit: &Literal, column: &Column) -> SqlResult<Value> {
             Ok(Value::Json(s.clone()))
         }
         // ADR 0113 — TimestampTz accepts an integer literal
-        // (micros since epoch). ISO-string parsing reserved
-        // for a future ADR when a documented format is
-        // chosen.
+        // (micros since epoch).
         (DataType::TimestampTz, Literal::Number(s)) if !s.contains('.') =>
             Ok(Value::TimestampTz(s.parse().map_err(|_| invalid())?)),
+        // ADR 0180 — TimestampTz also accepts an ISO 8601
+        // TEXT literal: `YYYY-MM-DDTHH:MM:SS[.ffffff][Z|±HH:MM]`.
+        // Exact microsecond precision; unknown format is
+        // rejected cleanly as a Type error.
+        (DataType::TimestampTz, Literal::Text(s)) => {
+            parse_iso8601_micros(s)
+                .map(Value::TimestampTz)
+                .ok_or_else(|| SqlError::Type(format!(
+                    "invalid ISO 8601 timestamp literal: {s:?}")))
+        }
         // ADR 0113 — Uuid accepts a 32-hex-char TEXT literal.
         (DataType::Uuid, Literal::Text(s)) => {
             let hex = s.replace('-', "");
