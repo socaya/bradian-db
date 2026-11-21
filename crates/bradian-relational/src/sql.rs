@@ -57,6 +57,12 @@ pub enum SqlError {
     /// into this variant.
     #[error(transparent)]
     Policy(#[from] crate::access_policy::PolicyError),
+    /// ADR 0174 — audit chain append failed in
+    /// `execute_as_audited`. The SQL result itself is
+    /// discarded in favor of surfacing the audit failure
+    /// so callers never record a silent gap in the chain.
+    #[error("audit error: {0}")]
+    Audit(String),
 }
 
 pub type SqlResult<T> = Result<T, SqlError>;
@@ -626,6 +632,54 @@ impl SqlEngine {
     ) -> SqlResult<SqlResultSet> {
         authz.check_sql(sql)?;
         self.execute(sql)
+    }
+
+    /// ADR 0174 — `execute_as` + tamper-evident audit.
+    /// Appends one BLAKE3-chained record to `chain` covering
+    /// the statement's principal, SQL text and outcome
+    /// (success, authz denial or statement error). Preserves
+    /// ADR 0098 fast-fail-on-authz-denial behavior: on an
+    /// authz rejection the audit record records the
+    /// `AuthzDenied(msg)` outcome and then the original
+    /// `SqlError::Authz` is returned. On downstream statement
+    /// errors the outcome is `Err(msg)` and the original
+    /// error is returned. If the audit append itself fails,
+    /// the SQL result is preserved and a bubbled
+    /// `SqlError::Audit` is returned instead — the caller
+    /// chooses whether to retry or escalate; no silent drop.
+    pub fn execute_as_audited(
+        &self,
+        authz: &bradian_core::AuthorizationContext,
+        sql: &str,
+        chain: &crate::audit_chain::AuditChain,
+    ) -> SqlResult<SqlResultSet> {
+        use crate::audit_chain::{ChainedAuditEntry, ChainedOutcome};
+        let now_ms: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let (result, outcome) = match authz.check_sql(sql) {
+            Err(denied) => {
+                let outcome = ChainedOutcome::AuthzDenied(denied.to_string());
+                (Err(SqlError::Authz(denied)), outcome)
+            }
+            Ok(()) => match self.execute(sql) {
+                Ok(rs) => (Ok(rs), ChainedOutcome::Ok),
+                Err(err) => {
+                    let msg = err.to_string();
+                    (Err(err), ChainedOutcome::Err(msg))
+                }
+            },
+        };
+        let entry = ChainedAuditEntry {
+            timestamp_ms: now_ms,
+            principal_id: authz.principal_id().to_string(),
+            sql: sql.to_string(),
+            outcome,
+        };
+        chain.append(&entry).map_err(|e|
+            SqlError::Audit(format!("audit chain append failed: {e}")))?;
+        result
     }
 
     /// ADR 0144 — `execute` with a caller-supplied
