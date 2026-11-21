@@ -759,6 +759,16 @@ impl<'a> HistorySqlSession<'a> {
                                 },
                             }
                         }).collect::<SqlResult<Vec<_>>>()?;
+                        // ADR 0179 — UNIQUE enforcement at historical
+                        // INSERT mirrors ADR 0176/0178. `tx.scan`
+                        // reads current (post-retention-floor) rows
+                        // under the active transaction; historical
+                        // AS OF reads are not affected.
+                        if !table.unique_keys.is_empty() {
+                            let existing = tx.scan(table.id)?;
+                            crate::unique_check::UniqueConstraintChecker::new(&table)
+                                .check(&row, existing)?;
+                        }
                         tx.insert(table.id, &row)?;
                         // ADR 0147 rows + ADR 0149 bytes.
                         if let Some(b) = self.budget.as_mut() {
@@ -886,6 +896,21 @@ impl<'a> HistorySqlSession<'a> {
                             let original = row.clone();
                             for (position, expression) in replacements {
                                 row[position] = expression.evaluate(&original, &table.columns[position])?;
+                            }
+                            // ADR 0179 — UNIQUE enforcement at
+                            // historical UPDATE. Filter the row
+                            // being updated by PK projection from
+                            // the scan and run the checker on the
+                            // mutated row.
+                            if !table.unique_keys.is_empty() {
+                                let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                                    .map(|c| locate(&table, c))
+                                    .collect::<SqlResult<Vec<_>>>()?;
+                                let others = tx.scan(table.id)?.into_iter()
+                                    .filter(|r| pk_positions.iter().zip(key.iter())
+                                        .any(|(pos, k)| &r[*pos] != k));
+                                crate::unique_check::UniqueConstraintChecker::new(&table)
+                                    .check(&row, others)?;
                             }
                             written_bytes = crate::query_budget::row_bytes(&row);
                             tx.replace(table.id, &row)?;

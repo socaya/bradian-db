@@ -384,6 +384,14 @@ impl<'a> MvccSqlSession<'a> {
                                 .ok_or_else(|| SqlError::Resolution("missing column".into()))?;
                             coerce(&lit, column)
                         }).collect::<SqlResult<Vec<_>>>()?;
+                        // ADR 0179 — UNIQUE enforcement at
+                        // MVCC-SQL INSERT mirrors the pattern
+                        // across the other three engines.
+                        if !table.unique_keys.is_empty() {
+                            let existing = tx.scan(table.id)?;
+                            crate::unique_check::UniqueConstraintChecker::new(&table)
+                                .check(&row, existing)?;
+                        }
                         tx.insert(table.id, &row)?;
                         // ADR 0147 rows + ADR 0149 bytes.
                         if let Some(b) = self.budget.as_mut() {
@@ -481,6 +489,20 @@ impl<'a> MvccSqlSession<'a> {
                         let mut written_bytes = 0u64;
                         let affected = if let Some(mut row) = tx.get(table.id, &key)? {
                             for (position, value) in replacements { row[position] = value; }
+                            // ADR 0179 — UNIQUE enforcement at
+                            // MVCC-SQL UPDATE: self-filter by PK
+                            // and run the checker on the mutated
+                            // row.
+                            if !table.unique_keys.is_empty() {
+                                let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                                    .map(|c| locate(&table, c))
+                                    .collect::<SqlResult<Vec<_>>>()?;
+                                let others = tx.scan(table.id)?.into_iter()
+                                    .filter(|r| pk_positions.iter().zip(key.iter())
+                                        .any(|(pos, k)| &r[*pos] != k));
+                                crate::unique_check::UniqueConstraintChecker::new(&table)
+                                    .check(&row, others)?;
+                            }
                             written_bytes = crate::query_budget::row_bytes(&row);
                             tx.replace(table.id, &row)?;
                             1
