@@ -23,6 +23,7 @@ fn one_db_two_tables(catalog: &PersistentCatalog) -> Vec<bradian_relational::Tab
             ],
             primary_key: PrimaryKey { columns: vec!["id".into()] },
             unique_keys: vec![],
+        ..Default::default()
         }).unwrap();
         out.push(catalog.snapshot().tables().find(|t| t.id == id).unwrap().clone());
     }

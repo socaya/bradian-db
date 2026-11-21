@@ -10,6 +10,7 @@ fn revision_fixture(catalog: &PersistentCatalog) -> (bradian_relational::TableId
         name: "items".into(),
         columns: vec![Column { name: "id".into(), data_type: DataType::Int64, nullable: false }],
         primary_key: PrimaryKey { columns: vec!["id".into()] }, unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
     let mut proposed = catalog.snapshot().table(id).unwrap().clone();
     proposed.columns.push(Column { name: "notes".into(), data_type: DataType::Text, nullable: true });

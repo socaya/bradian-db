@@ -24,6 +24,7 @@ fn schema() -> Table {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
     catalog.table(table_id).unwrap().clone()
 }

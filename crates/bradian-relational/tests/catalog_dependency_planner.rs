@@ -24,6 +24,7 @@ fn mk() -> (Catalog, TableId, TableId) {
             name: "items_sku_key".into(),
             columns: vec!["sku".into()],
         }],
+        ..Default::default()
     }).unwrap();
     let child = c.create_table(sch, TableSpec {
         name: "lines".into(),
@@ -34,6 +35,7 @@ fn mk() -> (Catalog, TableId, TableId) {
         ],
         primary_key: PrimaryKey { columns: vec!["lid".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     c.add_foreign_key(child, ForeignKeySpec {
         name: "fk_item_id".into(),
@@ -125,6 +127,7 @@ fn column_dependents_reports_last_column_only() {
         columns: vec![Column { name: "only".into(), data_type: DataType::Int32, nullable: false }],
         primary_key: PrimaryKey { columns: vec!["only".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     let deps = c.column_dependents(t, "only");
     assert!(deps.iter().any(|d| matches!(d, Dependency::LastColumn)));

@@ -232,13 +232,32 @@ impl Catalog {
             uk.columns = names(&uk.columns, &colnames)?;
             unique_keys.push(uk);
         }
+        // ADR 0175 — accept per-column collation declarations.
+        // Keys must name an existing column; only Text/Varchar
+        // may carry a non-default collation (any mismatch is a
+        // definition error, not silently dropped).
+        let mut column_collations = BTreeMap::new();
+        for (col_name, collation) in spec.column_collations {
+            let col_name = identifier(&col_name)?;
+            let column = columns.iter().find(|c| c.name == col_name)
+                .ok_or_else(|| CatalogError::InvalidDefinition(
+                    format!("COLLATE on unknown column {col_name}")))?;
+            match column.data_type {
+                crate::model::DataType::Text
+                | crate::model::DataType::Varchar { .. } => {}
+                _ => return Err(CatalogError::InvalidDefinition(
+                    format!("COLLATE requires a text column; {col_name} is {:?}",
+                        column.data_type))),
+            }
+            column_collations.insert(col_name, collation);
+        }
         let id = TableId(self.allocate()?);
         self.tables.insert(id, Table {
             id, schema, name: table_name, columns,
             primary_key: PrimaryKey { columns: pk },
             unique_keys, foreign_keys: Vec::new(),
             column_defaults: BTreeMap::new(),
-            column_collations: BTreeMap::new(),
+            column_collations,
             policies: BTreeMap::new(),
         });
         Ok(id)

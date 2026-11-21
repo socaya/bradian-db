@@ -27,6 +27,7 @@ fn mk_catalog() -> (Catalog, TableId) {
             name: "items_sku_key".into(),
             columns: vec!["sku".into()],
         }],
+        ..Default::default()
     }).unwrap();
     (c, t)
 }
@@ -47,6 +48,7 @@ fn rename_table_rejects_duplicate() {
         columns: vec![Column { name: "a".into(), data_type: DataType::Int32, nullable: false }],
         primary_key: PrimaryKey { columns: vec!["a".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     let err = c.rename_table(t, "other").unwrap_err();
     assert!(matches!(err, CatalogError::Duplicate(_)));
@@ -87,6 +89,7 @@ fn rename_column_updates_incoming_fk() {
         ],
         primary_key: PrimaryKey { columns: vec!["lid".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     c.add_foreign_key(child, ForeignKeySpec {
         name: "fk_item".into(),
@@ -130,6 +133,7 @@ fn drop_column_rejects_last_column() {
         columns: vec![Column { name: "only".into(), data_type: DataType::Int32, nullable: false }],
         primary_key: PrimaryKey { columns: vec!["only".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     let err = c.drop_column(t, "only").unwrap_err();
     // Last-column check or PK-check — either is acceptable.
@@ -148,6 +152,7 @@ fn drop_column_rejects_incoming_fk_referenced() {
         ],
         primary_key: PrimaryKey { columns: vec!["lid".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     c.add_foreign_key(child, ForeignKeySpec {
         name: "fk_sku".into(),

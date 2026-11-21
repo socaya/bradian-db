@@ -32,7 +32,7 @@ pub struct Column {
     pub nullable: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrimaryKey {
     pub columns: Vec<String>,
 }
@@ -60,12 +60,19 @@ pub struct ForeignKeySpec {
     pub referenced_columns: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableSpec {
     pub name: String,
     pub columns: Vec<Column>,
     pub primary_key: PrimaryKey,
     pub unique_keys: Vec<UniqueKey>,
+    /// ADR 0175 — optional per-column collation declared in
+    /// CREATE TABLE via `COLLATE <name>`. Only Text / Varchar
+    /// columns may carry a non-default collation; the parser
+    /// rejects COLLATE on other types. Empty map preserves
+    /// pre-ADR-0175 TableSpec bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub column_collations: std::collections::BTreeMap<String, crate::collation::Collation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

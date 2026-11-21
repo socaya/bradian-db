@@ -23,6 +23,7 @@ fn one_table(catalog: &mut Catalog, name: &str) -> Table {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
     catalog.table(id).unwrap().clone()
 }

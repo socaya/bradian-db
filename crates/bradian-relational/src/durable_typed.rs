@@ -1140,6 +1140,7 @@ mod activation_tests {
                 Column { name: "id".into(), data_type: DataType::Int64, nullable: false },
                 Column { name: "amount".into(), data_type: DataType::Int64, nullable: false },
             ], primary_key: PrimaryKey { columns: vec!["id".into()] }, unique_keys: vec![],
+            ..Default::default()
         }).unwrap();
         let table = catalog.snapshot().table(id).unwrap().clone();
         let raw = DurableMvccStore::open(dir.path().join("history-domain")).unwrap();

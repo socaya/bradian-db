@@ -19,6 +19,7 @@ fn mk() -> (Catalog, TableId) {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     (c, t)
 }
@@ -129,6 +130,7 @@ fn widen_uk_column_rejected_dependency() {
             name: "sku_uk".into(),
             columns: vec!["sku".into()],
         }],
+        ..Default::default()
     }).unwrap();
     let err = c.widen_column_type(t, "sku", DataType::Varchar { max_length: 64 }).unwrap_err();
     assert!(matches!(err, CatalogError::DependentObjects(_)));
@@ -146,6 +148,7 @@ fn widen_incoming_fk_column_rejected() {
         ],
         primary_key: PrimaryKey { columns: vec!["rid".into()] },
         unique_keys: vec![],
+        ..Default::default()
     }).unwrap();
     c.add_foreign_key(child, ForeignKeySpec {
         name: "fk_t".into(),

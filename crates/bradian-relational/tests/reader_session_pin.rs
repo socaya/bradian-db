@@ -26,6 +26,7 @@ fn ddl_does_not_invalidate_active_reader_snapshot() {
         columns: vec![Column { name: "id".into(), data_type: DataType::Int64, nullable: false }],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
 
     // Session's snapshot is frozen — still sees exactly one DB.

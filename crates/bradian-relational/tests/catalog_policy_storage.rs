@@ -20,6 +20,7 @@ fn make_table() -> (Catalog, bradian_relational::TableId) {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
     (c, t)
 }

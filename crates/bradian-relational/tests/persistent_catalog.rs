@@ -19,6 +19,7 @@ fn table(name: &str) -> TableSpec {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }
 }
 

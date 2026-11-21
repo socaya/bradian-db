@@ -767,6 +767,8 @@ impl SqlEngine {
                         qualified(&name, 3)?;
                         let mut columns = Vec::<Column>::new();
                         let mut primary = Vec::<String>::new();
+                        let mut column_collations =
+                            std::collections::BTreeMap::new();
                         p.symbol('(')?;
                         loop {
                             if p.consume_word("primary") {
@@ -784,6 +786,23 @@ impl SqlEngine {
                                     nullable = false;
                                 } else {
                                     p.consume_word("null");
+                                }
+                                // ADR 0175 — optional per-column
+                                // COLLATE <name>. Accepts binary
+                                // (default) and nocase. Parser
+                                // records the collation; the
+                                // catalog rejects it on non-text
+                                // columns (central definition
+                                // check — not silently dropped).
+                                if p.consume_word("collate") {
+                                    let collation_name = p.word()?;
+                                    let collation = match collation_name.as_str() {
+                                        "binary" => crate::collation::Collation::Binary,
+                                        "nocase" => crate::collation::Collation::CaseInsensitive,
+                                        other => return Err(SqlError::Unsupported(
+                                            format!("unknown COLLATE {other}; want binary or nocase"))),
+                                    };
+                                    column_collations.insert(column.clone(), collation);
                                 }
                                 columns.push(Column { name: column, data_type, nullable });
                             }
@@ -803,6 +822,7 @@ impl SqlEngine {
                             name: name[2].clone(), columns,
                             primary_key: PrimaryKey { columns: primary },
                             unique_keys: vec![],
+                            column_collations,
                         })?;
                         // TableStore is provisioned on first use. Catalog and
                         // user-table directories are not one atomic DDL commit.

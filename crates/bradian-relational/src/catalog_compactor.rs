@@ -127,6 +127,7 @@ mod tests {
             }],
             primary_key: crate::model::PrimaryKey { columns: vec!["id".into()] },
             unique_keys: vec![],
+            ..Default::default()
         }).unwrap();
         cat
     }

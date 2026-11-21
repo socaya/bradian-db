@@ -2,6 +2,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use crate::{DataType, Table};
+use crate::collation::Collation;
 use crate::sql::{locate, Parser, SqlError, SqlResult};
 use crate::typed_table::Value;
 
@@ -14,6 +15,11 @@ struct SortKey {
     position: usize,
     descending: bool,
     nulls_first: bool,
+    /// ADR 0175 — per-column collation looked up from
+    /// `Table.column_collations` at parse time.  Non-text
+    /// columns always resolve to `Binary` (the natural
+    /// cmp on their native type).
+    collation: Collation,
 }
 
 pub(crate) struct SelectWindow {
@@ -32,7 +38,8 @@ impl SelectWindow {
         if ordered {
             p.expect("by")?;
             loop {
-                let position = locate(table, &p.word()?)?;
+                let column_name = p.word()?;
+                let position = locate(table, &column_name)?;
                 if !seen.insert(position) { return Err(SqlError::Syntax("duplicate ORDER BY column".into())); }
                 if keys.len() == MAX_SORT_KEYS { return Err(SqlError::Unsupported("ORDER BY exceeds 16 columns".into())); }
                 let descending = if p.consume_word("desc") { true } else { p.consume_word("asc"); false };
@@ -40,7 +47,9 @@ impl SelectWindow {
                     if p.consume_word("first") { true }
                     else { p.expect("last")?; false }
                 } else { descending };
-                keys.push(SortKey { position, descending, nulls_first });
+                let collation = table.column_collations.get(&column_name)
+                    .copied().unwrap_or_default();
+                keys.push(SortKey { position, descending, nulls_first, collation });
                 if !p.consume_symbol(',') { break; }
             }
         }
@@ -75,11 +84,13 @@ impl SelectWindow {
         }
         rows.sort_by(|left, right| {
             for key in &self.keys {
-                let order = compare(&left[key.position], &right[key.position], key.descending, key.nulls_first);
+                let order = compare(&left[key.position], &right[key.position], key.descending, key.nulls_first, key.collation);
                 if order != Ordering::Equal { return order; }
             }
             for position in &self.primary_key {
-                let order = compare(&left[*position], &right[*position], false, false);
+                // Primary-key tie-break ignores COLLATE: logical PK
+                // ordering is binary to keep ties deterministic.
+                let order = compare(&left[*position], &right[*position], false, false, Collation::Binary);
                 if order != Ordering::Equal { return order; }
             }
             Ordering::Equal
@@ -101,7 +112,7 @@ fn matches_type(value: &Value, data_type: &DataType) -> bool {
         | (Value::Uuid(_), DataType::Uuid))
 }
 
-fn compare(left: &Value, right: &Value, descending: bool, nulls_first: bool) -> Ordering {
+fn compare(left: &Value, right: &Value, descending: bool, nulls_first: bool, collation: Collation) -> Ordering {
     match (left, right) {
         (Value::Null, Value::Null) => return Ordering::Equal,
         (Value::Null, _) => return if nulls_first { Ordering::Less } else { Ordering::Greater },
@@ -116,7 +127,11 @@ fn compare(left: &Value, right: &Value, descending: bool, nulls_first: bool) -> 
         // ADR 0173 — JSON compares as its canonical UTF-8 bytes;
         // legacy String-encoded JSON interleaves naturally with
         // new Json-tagged rows for the same declared column type.
-        (Value::String(a) | Value::Json(a), Value::String(b) | Value::Json(b)) => a.cmp(b),
+        // ADR 0175 — Text/Varchar comparison applies the declared
+        // column collation; JSON stays binary (no COLLATE allowed
+        // on JSON columns per catalog check).
+        (Value::String(a) | Value::Json(a), Value::String(b) | Value::Json(b)) =>
+            collation.compare(a, b),
         (Value::TimestampTz(a), Value::TimestampTz(b)) => a.cmp(b),
         (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
         _ => unreachable!("sort values were checked against the same column type"),

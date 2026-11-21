@@ -56,7 +56,7 @@ and validate as long as the content is serde_json-parsable.
 |---|---|
 | `CREATE DATABASE <name>` | `ddl_create_and_insert_select_update_delete_cycle` |
 | `CREATE SCHEMA <db>.<schema>` | `ddl_create_and_insert_select_update_delete_cycle` |
-| `CREATE TABLE <db>.<schema>.<table> (col type [NOT NULL], PRIMARY KEY (col, ...))` | `ddl_create_and_insert_select_update_delete_cycle` |
+| `CREATE TABLE <db>.<schema>.<table> (col type [NOT NULL] [COLLATE <name>], PRIMARY KEY (col, ...))` — ADR 0175: `<name>` is `binary` (default) or `nocase`; TEXT / VARCHAR only; applies to ORDER BY on this column | `tests/collation_sql.rs::create_table_accepts_collate_binary_and_nocase_on_text_columns` |
 
 ## 4. DML across all three engines
 

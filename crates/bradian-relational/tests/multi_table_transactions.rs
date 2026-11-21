@@ -22,6 +22,7 @@ fn tables() -> (Table, Table) {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
     let movements = catalog.create_table(schema, TableSpec {
         name: "movements".into(),
@@ -32,6 +33,7 @@ fn tables() -> (Table, Table) {
         ],
         primary_key: PrimaryKey { columns: vec!["id".into()] },
         unique_keys: vec![],
+    ..Default::default()
     }).unwrap();
     (catalog.table(account).unwrap().clone(), catalog.table(movements).unwrap().clone())
 }
