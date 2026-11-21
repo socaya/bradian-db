@@ -993,6 +993,24 @@ impl SqlEngine {
                 let mut written_bytes = 0u64;
                 let affected = if let Some(mut row) = existing {
                     for (pos, value) in assignments { row[pos] = value; }
+                    // ADR 0177 — UNIQUE enforcement on UPDATE.
+                    // Scan all rows, exclude the one being
+                    // updated (matched by PK projection), and
+                    // run the checker against the mutated row.
+                    // Primary key cannot change (checked above),
+                    // so PK comparison before/after the mutation
+                    // is stable.
+                    if !table.unique_keys.is_empty() {
+                        let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                            .map(|c| locate(&table, c))
+                            .collect::<SqlResult<Vec<_>>>()?;
+                        let others = store.scan()?.into_iter()
+                            .filter(|r| pk_positions.iter()
+                                .zip(pk.iter())
+                                .any(|(p_, k)| &r[*p_] != k));
+                        crate::unique_check::UniqueConstraintChecker::new(&table)
+                            .check(&row, others)?;
+                    }
                     written_bytes = crate::query_budget::row_bytes(&row);
                     // ADR 0151 — preflight before replace.
                     if let Some(b) = budget.as_deref() { b.preview_charge(1, written_bytes)?; }
