@@ -86,10 +86,50 @@ pub trait Driver: Send + Sync + std::fmt::Debug {
         stmt: &crate::prepared::PreparedStatement,
     ) -> DriverResult<DriverResponse> {
         stmt.validate().map_err(|e| DriverError::Sql(e.to_string()))?;
-        let sql = bind_literals(&stmt.sql, &stmt.params)
+        let positional = bind_literals(&stmt.sql, &stmt.params)
+            .map_err(DriverError::Sql)?;
+        let sql = bind_named_literals(&positional, &stmt.named_params)
             .map_err(DriverError::Sql)?;
         self.execute(&sql)
     }
+}
+
+/// ADR 0183 — textual binding for `:name` named parameters.
+/// Runs after `bind_literals` on the already-positional-
+/// substituted template so one statement may use both styles.
+/// Missing bindings return `Err`; that case is already caught
+/// by `PreparedStatement::validate`, but keeping the check
+/// here protects callers of this function in isolation.
+pub fn bind_named_literals(
+    template: &str,
+    params: &std::collections::BTreeMap<String, crate::typed_table::Value>,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':' && i + 1 < bytes.len()
+            && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_')
+        {
+            let mut j = i + 1;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
+            {
+                j += 1;
+            }
+            let name = std::str::from_utf8(&bytes[i + 1..j])
+                .expect("ascii identifier is valid utf8");
+            match params.get(name) {
+                Some(v) => out.push_str(&value_to_sql(v)),
+                None => return Err(format!("missing named parameter :{name}")),
+            }
+            i = j;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 
 /// ADR 0161 — textual parameter binding. Replaces `$N`
