@@ -563,16 +563,47 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
 }
 
-/// ADR 0186 + ADR 0189 — SELECT projection element. Either a
-/// bare column or a chained JSON path extraction with one or
-/// more key segments. `as_text` applies to the **final** step;
-/// intermediate steps are always `->` (JSON out), rejected at
-/// parse if a caller writes `col ->> 'a' -> 'b'` (the `->>` can
-/// only appear last).
+/// ADR 0191 — one segment of a JSON path chain. A key
+/// addresses an object member; an index addresses an array
+/// element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum JsonSegment {
+    Key(String),
+    Index(usize),
+}
+
+impl JsonSegment {
+    fn apply<'v>(&self, value: &'v serde_json::Value) -> Option<&'v serde_json::Value> {
+        match self {
+            JsonSegment::Key(k) => value.get(k.as_str()),
+            JsonSegment::Index(i) => value.get(*i),
+        }
+    }
+
+    fn render(&self, out: &mut String) {
+        match self {
+            JsonSegment::Key(k) => {
+                out.push('\'');
+                out.push_str(k);
+                out.push('\'');
+            }
+            JsonSegment::Index(i) => {
+                use std::fmt::Write;
+                let _ = write!(out, "{i}");
+            }
+        }
+    }
+}
+
+/// ADR 0186 + ADR 0189 + ADR 0191 — SELECT projection element.
+/// Either a bare column or a chained JSON path extraction with
+/// one or more segments (object keys or array indices).
+/// `as_text` applies to the **final** step only; intermediate
+/// steps are always `->`. A `->>` can only appear last.
 #[derive(Clone, Debug)]
 pub(crate) enum Projection {
     Column(String),
-    JsonPath { column: String, path: Vec<String>, as_text: bool },
+    JsonPath { column: String, path: Vec<JsonSegment>, as_text: bool },
 }
 
 impl Projection {
@@ -589,16 +620,13 @@ impl Projection {
             Projection::JsonPath { column, path, as_text } => {
                 let mut out = column.clone();
                 if let Some((last, mids)) = path.split_last() {
-                    for key in mids {
-                        out.push_str("->'");
-                        out.push_str(key);
-                        out.push('\'');
+                    for seg in mids {
+                        out.push_str("->");
+                        seg.render(&mut out);
                     }
                     let op = if *as_text { "->>" } else { "->" };
                     out.push_str(op);
-                    out.push('\'');
-                    out.push_str(last);
-                    out.push('\'');
+                    last.render(&mut out);
                 }
                 out
             }
@@ -621,7 +649,7 @@ pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
 /// WHERE-side JSON path predicate parser so the chain grammar
 /// has exactly one implementation.
 pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult<Projection> {
-    let mut path = Vec::new();
+    let mut path: Vec<JsonSegment> = Vec::new();
     let mut as_text = false;
     loop {
         let final_text = match p.peek() {
@@ -633,12 +661,21 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
             return Err(SqlError::Unsupported(
                 "`->>` JSON path terminator cannot be followed by more segments".into()));
         }
-        let key = match p.peek().cloned() {
-            Some(Token::Text(s)) => { p.advance(); s }
+        // ADR 0191 — a segment may be a quoted string key or
+        // a non-negative integer literal (array index).
+        let segment = match p.peek().cloned() {
+            Some(Token::Text(s)) => { p.advance(); JsonSegment::Key(s) }
+            Some(Token::Number(s)) if !s.contains('.') && !s.starts_with('-') => {
+                p.advance();
+                let idx: usize = s.parse()
+                    .map_err(|_| SqlError::Syntax(
+                        format!("JSON path array index {s} is not a valid usize")))?;
+                JsonSegment::Index(idx)
+            }
             _ => return Err(SqlError::Syntax(
-                "JSON path key must be a single-quoted string literal".into())),
+                "JSON path segment must be a single-quoted string key or a non-negative integer index".into())),
         };
-        path.push(key);
+        path.push(segment);
         as_text = final_text;
     }
     if path.is_empty() {
@@ -787,8 +824,11 @@ pub(crate) fn apply_projection(pj: &Projection, cell: Value) -> SqlResult<Value>
             };
             let mut current: serde_json::Value = serde_json::from_str(source)
                 .map_err(|e| SqlError::Type(format!("JSON path source does not parse: {e}")))?;
-            for key in path {
-                current = current.get(key.as_str()).cloned().unwrap_or(serde_json::Value::Null);
+            for seg in path {
+                current = match seg.apply(&current) {
+                    Some(next) => next.clone(),
+                    None => return Ok(Value::Null),
+                };
                 if matches!(current, serde_json::Value::Null) {
                     return Ok(Value::Null);
                 }
