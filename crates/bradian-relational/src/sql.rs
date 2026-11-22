@@ -1468,6 +1468,12 @@ pub(crate) enum JsonMatcher {
     Between { low: Value, high: Value },
     /// ADR 0208 — negated range.
     NotBetween { low: Value, high: Value },
+    /// ADR 0209 — SQL-style pattern match: `%` = any run, `_` =
+    /// one character. Case-sensitive. Text pattern stored as-is;
+    /// matching converts the extracted value to a string.
+    Like { pattern: String },
+    /// ADR 0209 — negated pattern match.
+    NotLike { pattern: String },
 }
 
 #[derive(Clone, Debug)]
@@ -1521,6 +1527,8 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             };
             let matcher = if p.consume_word("in") {
                 JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
+            } else if p.consume_word("like") {
+                JsonMatcher::Like { pattern: parse_like_pattern(p)? }
             } else if p.consume_word("between") {
                 parse_between_tail(p, as_text, /*negated=*/false)?
             } else if p.consume_word("is") {
@@ -1533,14 +1541,16 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
                 }
                 if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
             } else if p.consume_word("not") {
-                // ADR 0206 / 0208 — NOT IN or NOT BETWEEN.
+                // ADR 0206 / 0208 / 0209 — NOT IN / NOT BETWEEN / NOT LIKE.
                 if p.consume_word("in") {
                     JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
                 } else if p.consume_word("between") {
                     parse_between_tail(p, as_text, /*negated=*/true)?
+                } else if p.consume_word("like") {
+                    JsonMatcher::NotLike { pattern: parse_like_pattern(p)? }
                 } else {
                     return Err(SqlError::Unsupported(
-                        "NOT must be followed by IN or BETWEEN in a JSON-path predicate".into()));
+                        "NOT must be followed by IN, BETWEEN, or LIKE in a JSON-path predicate".into()));
                 }
             } else {
                 let op = p.word_or_symbol_pair_for_check()?;
@@ -1600,6 +1610,72 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             .map(|name| key.remove(name).expect("validated"))
             .collect();
         Ok(SelectWhere::KeyPredicate(ordered))
+    }
+}
+
+/// ADR 0209 — parse a LIKE / NOT LIKE pattern. Must be a quoted
+/// text literal. Numeric or other literal forms are rejected
+/// (SQL-standard LIKE takes a character-string pattern).
+fn parse_like_pattern(p: &mut Parser) -> SqlResult<String> {
+    match p.literal()? {
+        Literal::Text(s) => Ok(s),
+        _ => Err(SqlError::Syntax(
+            "LIKE / NOT LIKE requires a single-quoted text pattern".into())),
+    }
+}
+
+/// ADR 0209 — SQL LIKE semantics: `%` matches zero or more
+/// characters, `_` matches exactly one character. Everything
+/// else is a literal character match. No ESCAPE clause support
+/// yet; a literal `%` or `_` in the data must use a different
+/// matcher. Case-sensitive.
+pub(crate) fn like_matches(pattern: &str, value: &str) -> bool {
+    // Compile into (literal, is_wildcard_percent) segments for
+    // bounded backtracking. `_` is a single-character wildcard
+    // between literal runs.
+    let pat: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = value.chars().collect();
+    fn go(pat: &[char], text: &[char]) -> bool {
+        if pat.is_empty() { return text.is_empty(); }
+        match pat[0] {
+            '%' => {
+                // Collapse consecutive `%`.
+                let mut i = 1;
+                while i < pat.len() && pat[i] == '%' { i += 1; }
+                if i == pat.len() { return true; }
+                // Try every suffix of `text`.
+                for start in 0..=text.len() {
+                    if go(&pat[i..], &text[start..]) { return true; }
+                }
+                false
+            }
+            '_' => {
+                if text.is_empty() { return false; }
+                go(&pat[1..], &text[1..])
+            }
+            c => {
+                if text.is_empty() || text[0] != c { return false; }
+                go(&pat[1..], &text[1..])
+            }
+        }
+    }
+    go(&pat, &text)
+}
+
+/// ADR 0209 — extract a string view of a value for LIKE
+/// matching. Handles `Value::String` directly; a `Value::Json`
+/// string scalar is unwrapped (JSON strings are quoted in
+/// storage). Any other variant yields `None` so the predicate
+/// evaluates to false.
+fn like_source(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Json(j) => {
+            if let Ok(serde_json::Value::String(s)) = serde_json::from_str(j) {
+                Some(s)
+            } else { None }
+        }
+        _ => None,
     }
 }
 
@@ -1764,6 +1840,14 @@ pub(crate) fn apply_where_filter(
                                 == std::cmp::Ordering::Greater
                         }
                     }
+                    JsonMatcher::Like { pattern } => match like_source(&extracted) {
+                        Some(s) => like_matches(pattern, &s),
+                        None => false,
+                    },
+                    JsonMatcher::NotLike { pattern } => match like_source(&extracted) {
+                        Some(s) => !like_matches(pattern, &s),
+                        None => false,
+                    },
                     JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
                         unreachable!("handled above the NULL guard"),
                 };
