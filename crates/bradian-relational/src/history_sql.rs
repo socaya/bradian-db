@@ -743,6 +743,8 @@ impl<'a> HistorySqlSession<'a> {
                             tuples.push(p.list(|parser| parser.insert_literal())?);
                             if !p.consume_symbol(',') { break; }
                         }
+                        // ADR 0221 — optional RETURNING tail.
+                        let returning = crate::sql::parse_returning(&mut p, &table)?;
                         p.end()?;
                         for lits in &tuples {
                             if lits.len() != names.len() {
@@ -775,7 +777,7 @@ impl<'a> HistorySqlSession<'a> {
                         let mut unique_pool: Vec<Vec<_>> = if !table.unique_keys.is_empty() {
                             tx.scan(table.id)?
                         } else { Vec::new() };
-                        let mut inserted: u64 = 0;
+                        let mut captured: Vec<Vec<_>> = Vec::new();
                         let mut inserted_bytes: u64 = 0;
                         for row in rows {
                             crate::sql::check_row(&table, &row)?;
@@ -786,16 +788,16 @@ impl<'a> HistorySqlSession<'a> {
                             }
                             inserted_bytes += crate::query_budget::row_bytes(&row);
                             tx.insert(table.id, &row)?;
-                            inserted += 1;
                             if !table.unique_keys.is_empty() {
-                                unique_pool.push(row);
+                                unique_pool.push(row.clone());
                             }
+                            captured.push(row);
                         }
                         if let Some(b) = self.budget.as_mut() {
-                            b.charge_rows(inserted)?;
+                            b.charge_rows(captured.len() as u64)?;
                             b.charge_bytes(inserted_bytes)?;
                         }
-                        Ok(SqlResultSet::Command { affected: inserted })
+                        crate::sql::finish_dml_result_with_table(&table, captured, returning.as_deref())
                     }
                     "select" => {
                         self.control.check()?;
@@ -982,6 +984,7 @@ impl<'a> HistorySqlSession<'a> {
                         let updates = crate::sql_expression::mixed_assignments(&mut p)?;
                         // ADR 0199 — PK equality or JSON path.
                         let where_clause = crate::sql::parse_select_where(&mut p, &table)?;
+                        let returning = crate::sql::parse_returning(&mut p, &table)?;
                         p.end()?;
                         let mut replacements = BTreeMap::new();
                         let mut json_assignments: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
@@ -1049,6 +1052,7 @@ impl<'a> HistorySqlSession<'a> {
                         };
                         let mut written_bytes: u64 = 0;
                         let mut affected: u64 = 0;
+                        let mut captured: Vec<Vec<crate::typed_table::Value>> = Vec::new();
                         for (pk, mut row) in targets {
                             let original = row.clone();
                             for (position, expression) in &replacements {
@@ -1089,13 +1093,14 @@ impl<'a> HistorySqlSession<'a> {
                             }
                             written_bytes = written_bytes.saturating_add(crate::query_budget::row_bytes(&row));
                             tx.replace(table.id, &row)?;
+                            captured.push(row);
                             affected += 1;
                         }
                         if let Some(b) = self.budget.as_mut() {
                             b.charge_rows(affected)?;
                             if affected > 0 { b.charge_bytes(written_bytes)?; }
                         }
-                        Ok(SqlResultSet::Command { affected })
+                        crate::sql::finish_dml_result_with_table(&table, captured, returning.as_deref())
                     }
                     "delete" => {
                         // ADR 0147 — deadline check before mutation.
@@ -1104,6 +1109,7 @@ impl<'a> HistorySqlSession<'a> {
                         let table = self.engine.resolve(&p.name()?)?;
                         // ADR 0199 — PK equality or JSON path.
                         let where_clause = crate::sql::parse_select_where(&mut p, &table)?;
+                        let returning = crate::sql::parse_returning(&mut p, &table)?;
                         p.end()?;
                         let pk_positions: Vec<usize> = table.primary_key.columns.iter()
                             .map(|c| locate(&table, c))
@@ -1125,18 +1131,20 @@ impl<'a> HistorySqlSession<'a> {
                         };
                         let mut deleted_bytes: u64 = 0;
                         let mut affected: u64 = 0;
+                        let mut captured: Vec<Vec<crate::typed_table::Value>> = Vec::new();
                         for (pk, row) in targets {
                             crate::sql::fk_apply_parent_delete_tx(
                                 &self.engine.catalog, &table, &pk, tx)?;
                             tx.delete(table.id, &pk)?;
                             deleted_bytes = deleted_bytes.saturating_add(crate::query_budget::row_bytes(&row));
+                            captured.push(row);
                             affected += 1;
                         }
                         if let Some(b) = self.budget.as_mut() {
                             b.charge_rows(affected)?;
                             if affected > 0 { b.charge_bytes(deleted_bytes)?; }
                         }
-                        Ok(SqlResultSet::Command { affected })
+                        crate::sql::finish_dml_result_with_table(&table, captured, returning.as_deref())
                     }
                     _ => unreachable!(),
                 }

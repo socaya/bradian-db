@@ -1257,6 +1257,52 @@ impl AggSpec {
     }
 }
 
+/// ADR 0221 — optional `RETURNING col[, col] | *` tail on
+/// INSERT / UPDATE / DELETE. Returns `None` when absent; `Some(vec)`
+/// with a list of `Projection`s otherwise. A bare `*` expands to
+/// every table column.
+pub(crate) fn parse_returning(
+    p: &mut Parser, table: &Table,
+) -> SqlResult<Option<Vec<Projection>>> {
+    if !p.consume_word("returning") { return Ok(None); }
+    if p.consume_symbol('*') {
+        return Ok(Some(table.columns.iter()
+            .map(|c| Projection::Column(c.name.clone())).collect()));
+    }
+    let mut items = vec![parse_projection(p)?];
+    while p.consume_symbol(',') { items.push(parse_projection(p)?); }
+    for item in &items { locate(table, item.source_column())?; }
+    Ok(Some(items))
+}
+
+/// ADR 0221 — turn captured full-schema rows from a DML
+/// statement into the appropriate `SqlResultSet`. When
+/// `projections` is `None`, return the legacy
+/// `Command { affected }` shape; otherwise apply each
+/// projection per captured row and return `Rows { columns, rows }`.
+pub(crate) fn finish_dml_result_with_table(
+    table: &Table,
+    captured: Vec<Vec<Value>>,
+    projections: Option<&[Projection]>,
+) -> SqlResult<SqlResultSet> {
+    let affected = captured.len() as u64;
+    match projections {
+        None => Ok(SqlResultSet::Command { affected }),
+        Some(projs) => {
+            let positions: Vec<usize> = projs.iter()
+                .map(|pj| locate(table, pj.source_column()))
+                .collect::<SqlResult<Vec<_>>>()?;
+            let columns: Vec<String> = projs.iter().map(|pj| pj.label()).collect();
+            let rows: Vec<Vec<Value>> = captured.into_iter().map(|row| {
+                positions.iter().zip(projs).map(|(pos, pj)|
+                    apply_projection(pj, row[*pos].clone())
+                ).collect::<SqlResult<Vec<Value>>>()
+            }).collect::<SqlResult<Vec<Vec<Value>>>>()?;
+            Ok(SqlResultSet::Rows { columns, rows })
+        }
+    }
+}
+
 /// ADR 0219 — dedup a slice of row tuples using the same
 /// cross-type equality (`compare_values_for_check`) that GROUP
 /// BY and COUNT(DISTINCT) use. Preserves first-seen order for
@@ -3392,6 +3438,8 @@ impl SqlEngine {
                     tuples.push(p.list(|parser| parser.literal())?);
                     if !p.consume_symbol(',') { break; }
                 }
+                // ADR 0221 — optional RETURNING tail.
+                let returning = parse_returning(&mut p, &table)?;
                 p.end()?;
                 if names.len() != table.columns.len() {
                     return Err(SqlError::Unsupported(
@@ -3439,7 +3487,7 @@ impl SqlEngine {
                 let mut unique_pool: Vec<Vec<Value>> = if !table.unique_keys.is_empty() {
                     store.scan()?
                 } else { Vec::new() };
-                let mut inserted: u64 = 0;
+                let mut captured: Vec<Vec<Value>> = Vec::new();
                 let mut inserted_bytes: u64 = 0;
                 for values in rows {
                     check_row(&table, &values)?;
@@ -3450,17 +3498,17 @@ impl SqlEngine {
                     }
                     let row_bytes = crate::query_budget::row_bytes(&values);
                     store.insert(&values)?;
-                    inserted += 1;
                     inserted_bytes += row_bytes;
                     if !table.unique_keys.is_empty() {
-                        unique_pool.push(values);
+                        unique_pool.push(values.clone());
                     }
+                    captured.push(values);
                 }
                 if let Some(b) = budget.as_mut() {
-                    b.charge_rows(inserted)?;
+                    b.charge_rows(captured.len() as u64)?;
                     b.charge_bytes(inserted_bytes)?;
                 }
-                Ok(SqlResultSet::Command { affected: inserted })
+                finish_dml_result_with_table(&table, captured, returning.as_deref())
             }
             "select" => {
                 control.check()?;
@@ -3665,6 +3713,8 @@ impl SqlEngine {
                 // ADR 0199 — WHERE accepts PK equality OR a
                 // JSON-path predicate (full-scan + filter).
                 let where_clause = parse_select_where(&mut p, &table)?;
+                // ADR 0221 — optional RETURNING tail.
+                let returning = parse_returning(&mut p, &table)?;
                 p.end()?;
                 let mut column_assignments: BTreeMap<usize, Value> = BTreeMap::new();
                 let mut json_assignments: Vec<(usize, Vec<JsonSegment>, bool, Literal)> = Vec::new();
@@ -3737,6 +3787,8 @@ impl SqlEngine {
                 };
                 let mut written_bytes: u64 = 0;
                 let mut affected: u64 = 0;
+                // ADR 0221 — capture mutated rows for RETURNING.
+                let mut captured: Vec<Vec<Value>> = Vec::new();
                 for (pk, mut row) in targets {
                     for (pos, value) in &column_assignments {
                         row[*pos] = value.clone();
@@ -3783,13 +3835,14 @@ impl SqlEngine {
                         b.preview_charge(1, row_bytes)?;
                     }
                     store.replace(&row)?;
+                    captured.push(row);
                     affected += 1;
                 }
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(affected)?;
                     if affected > 0 { b.charge_bytes(written_bytes)?; }
                 }
-                Ok(SqlResultSet::Command { affected })
+                finish_dml_result_with_table(&table, captured, returning.as_deref())
             }
             "delete" => {
                 // ADR 0147 — deadline check before mutation.
@@ -3800,6 +3853,9 @@ impl SqlEngine {
                 // ADR 0199 — WHERE accepts PK equality OR a
                 // JSON-path predicate (full-scan + filter).
                 let where_clause = parse_select_where(&mut p, &table)?;
+                // ADR 0221 — optional RETURNING tail captures
+                // rows BEFORE they are removed.
+                let returning = parse_returning(&mut p, &table)?;
                 p.end()?;
                 let store = self.table_store(&table)?;
                 let pk_positions: Vec<usize> = table.primary_key.columns.iter()
@@ -3821,6 +3877,8 @@ impl SqlEngine {
                 };
                 let mut deleted_bytes: u64 = 0;
                 let mut affected: u64 = 0;
+                // ADR 0221 — capture deleted rows for RETURNING.
+                let mut captured: Vec<Vec<Value>> = Vec::new();
                 for (pk, row) in targets {
                     let row_bytes = crate::query_budget::row_bytes(&row);
                     if let Some(b) = budget.as_deref() {
@@ -3829,13 +3887,14 @@ impl SqlEngine {
                     foreign_key_restrict(self, &table, &pk)?;
                     store.delete(&pk)?;
                     deleted_bytes = deleted_bytes.saturating_add(row_bytes);
+                    captured.push(row);
                     affected += 1;
                 }
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(affected)?;
                     if affected > 0 { b.charge_bytes(deleted_bytes)?; }
                 }
-                Ok(SqlResultSet::Command { affected })
+                finish_dml_result_with_table(&table, captured, returning.as_deref())
             }
             // ADR 0113 — TRUNCATE TABLE removes every row from
             // ONE table without touching catalog schema.
