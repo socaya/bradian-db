@@ -787,10 +787,14 @@ impl<'a> HistorySqlSession<'a> {
                         self.control.check()?;
                         // ADR 0143 — deadline check before scan.
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
-                        let requested = if p.consume_symbol('*') { None } else {
-                            let mut names = vec![p.word()?];
-                            while p.consume_symbol(',') { names.push(p.word()?); }
-                            Some(names)
+                        // ADR 0188 — JSON path projections in SELECT.
+                        let caller_wildcard = p.consume_symbol('*');
+                        let requested_projections = if caller_wildcard { None } else {
+                            let mut out = vec![crate::sql::parse_projection(&mut p)?];
+                            while p.consume_symbol(',') {
+                                out.push(crate::sql::parse_projection(&mut p)?);
+                            }
+                            Some(out)
                         };
                         p.expect("from")?;
                         let table = self.engine.resolve(&p.name()?)?;
@@ -808,28 +812,29 @@ impl<'a> HistorySqlSession<'a> {
                             Some(lsn) => self.engine.domain.schema_as_of(table.id, lsn)?.0,
                             None => table,
                         };
-                        let caller_wildcard = requested.is_none();
-                        let mut columns = requested.unwrap_or_else(||
-                            table.columns.iter().map(|c|c.name.clone()).collect());
+                        let mut projections = requested_projections.unwrap_or_else(||
+                            table.columns.iter()
+                                .map(|c| crate::sql::Projection::Column(c.name.clone()))
+                                .collect());
                         // ADR 0155 — column-level policy filtering.
                         if let Some(p_) = self.policy.as_ref() {
                             if p_.column_level.is_configured() {
                                 if caller_wildcard {
-                                    columns.retain(|c| p_.column_level.allows_read(c));
+                                    projections.retain(|pj| p_.column_level.allows_read(pj.source_column()));
                                 } else {
-                                    for c in &columns {
-                                        if !p_.column_level.allows_read(c) {
+                                    for pj in &projections {
+                                        if !p_.column_level.allows_read(pj.source_column()) {
                                             return Err(SqlError::Policy(
                                                 crate::access_policy::PolicyError::ColumnDenied {
-                                                    column: c.clone(),
+                                                    column: pj.source_column().into(),
                                                 }));
                                         }
                                     }
                                 }
                             }
                         }
-                        let positions = columns.iter()
-                            .map(|name| locate(&table, name))
+                        let positions: Vec<usize> = projections.iter()
+                            .map(|pj| locate(&table, pj.source_column()))
                             .collect::<SqlResult<Vec<_>>>()?;
                         let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
                         let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
@@ -874,10 +879,15 @@ impl<'a> HistorySqlSession<'a> {
                         } else { rows };
                         let rows = window.apply(rows, &table)?;
                         control.check()?;
-                        Ok(SqlResultSet::Rows {
-                            columns,
-                            rows: crate::typed_table::project_rows_with_control(rows, &positions, &control)?,
-                        })
+                        let base = crate::typed_table::project_rows_with_control(rows, &positions, &control)?;
+                        // ADR 0188 — apply JSON path per cell.
+                        let rows: Vec<Vec<_>> = base.into_iter().map(|row|
+                            row.into_iter().zip(&projections).map(|(value, pj)|
+                                crate::sql::apply_projection(pj, value)
+                            ).collect::<SqlResult<Vec<_>>>()
+                        ).collect::<SqlResult<Vec<Vec<_>>>>()?;
+                        let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
+                        Ok(SqlResultSet::Rows { columns, rows })
                     }
                     "update" => {
                         // ADR 0147 — deadline check before mutation.

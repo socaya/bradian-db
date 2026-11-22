@@ -168,11 +168,16 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 word.push(chars.next().unwrap());
             }
             out.push(Token::Word(word));
-        } else if ch == '-' && chars.clone().nth(1) == Some('>') && !expressions {
+        } else if ch == '-' && chars.clone().nth(1) == Some('>') {
             // ADR 0186 — `->` or `->>` JSON path operator.
             // Lexed before the number-prefix branch so the
             // existing "minus must prefix a numeric literal"
-            // check still fires for a lone `-`.
+            // check still fires for a lone `-`.  ADR 0188 —
+            // also emitted in expression mode (HistorySqlEngine
+            // uses `Parser::new_expressions`); the expression
+            // grammar doesn't bind Arrow so it would surface
+            // as a parse error rather than silently lexing as
+            // a minus-then-gt pair.
             chars.next();
             chars.next();
             if chars.peek() == Some(&'>') {
