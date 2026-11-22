@@ -1460,9 +1460,12 @@ pub(crate) struct JsonPredicate {
 #[derive(Clone, Debug)]
 pub(crate) enum SelectWhere {
     KeyPredicate(Vec<Value>),
-    /// ADR 0190 + ADR 0204 — one-or-more JSON-path predicates
-    /// ANDed together. Every predicate must match the row.
-    JsonPathPredicates(Vec<JsonPredicate>),
+    /// ADR 0190 + ADR 0204 + ADR 0205 — JSON-path WHERE in
+    /// disjunctive normal form: the outer `Vec` is OR-joined;
+    /// each inner `Vec` is an AND-group. A row matches when
+    /// at least one AND-group holds. Single-predicate and
+    /// AND-only queries remain a single outer element.
+    JsonPathPredicates(Vec<Vec<JsonPredicate>>),
 }
 
 /// ADR 0190 — parse the full WHERE clause for a SELECT. The
@@ -1483,7 +1486,9 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
         Some(Token::Arrow) | Some(Token::ArrowText)
         | Some(Token::Hash) | Some(Token::HashText));
     if is_json_path {
-        let mut predicates = Vec::new();
+        // ADR 0205 — DNF: groups are AND-groups, joined by OR.
+        let mut groups: Vec<Vec<JsonPredicate>> = Vec::new();
+        let mut current: Vec<JsonPredicate> = Vec::new();
         let mut col = column_name;
         loop {
             let projection = parse_projection_tail(p, col)?;
@@ -1495,22 +1500,27 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
                 Projection::JsonPath { as_text, .. } =>
                     coerce_where_literal(&literal, *as_text)?,
             };
-            predicates.push(JsonPredicate { projection, op, literal: value });
-            // ADR 0204 — AND-chained JSON-path predicates. Each
-            // AND must be followed by another JSON-path form; a
-            // trailing PK equality would mix semantics and is
-            // rejected here.
-            if !p.consume_word("and") { break; }
+            current.push(JsonPredicate { projection, op, literal: value });
+            // Either continue the current AND-group, start a
+            // new OR-group, or stop.
+            let next = if p.consume_word("and") { 'a' }
+                else if p.consume_word("or") { 'o' }
+                else { 'e' };
+            if next == 'e' { break; }
             col = p.word()?;
             let next_json = matches!(p.peek(),
                 Some(Token::Arrow) | Some(Token::ArrowText)
                 | Some(Token::Hash) | Some(Token::HashText));
             if !next_json {
                 return Err(SqlError::Unsupported(
-                    "AND after a JSON-path predicate must be another JSON-path predicate".into()));
+                    "AND/OR after a JSON-path predicate must be another JSON-path predicate".into()));
+            }
+            if next == 'o' {
+                groups.push(std::mem::take(&mut current));
             }
         }
-        Ok(SelectWhere::JsonPathPredicates(predicates))
+        groups.push(current);
+        Ok(SelectWhere::JsonPathPredicates(groups))
     } else {
         // Rewind and dispatch to the existing PK grammar.
         p.restore_pos(saved);
@@ -1586,30 +1596,43 @@ fn coerce_where_literal(lit: &Literal, as_text: bool) -> SqlResult<Value> {
 pub(crate) fn apply_where_filter(
     rows: Vec<Vec<Value>>,
     table: &Table,
-    predicates: &[JsonPredicate],
+    groups: &[Vec<JsonPredicate>],
 ) -> SqlResult<Vec<Vec<Value>>> {
-    let positions: Vec<usize> = predicates.iter()
-        .map(|pred| locate(table, pred.projection.source_column()))
-        .collect::<SqlResult<_>>()?;
+    // ADR 0205 — DNF evaluation: outer OR, inner AND. Resolve
+    // column positions once per group.
+    let positions: Vec<Vec<usize>> = groups.iter().map(|group|
+        group.iter()
+            .map(|pred| locate(table, pred.projection.source_column()))
+            .collect::<SqlResult<Vec<_>>>()
+    ).collect::<SqlResult<Vec<_>>>()?;
+    let eval_group =
+        |row: &[Value], group: &[JsonPredicate], positions: &[usize]| -> SqlResult<bool> {
+            for (pred, position) in group.iter().zip(positions) {
+                let extracted = apply_projection(&pred.projection, row[*position].clone())?;
+                if matches!(extracted, Value::Null) || matches!(pred.literal, Value::Null) {
+                    return Ok(false);
+                }
+                let ord = compare_values_for_check(&extracted, &pred.literal);
+                let satisfied = match pred.op {
+                    crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                    crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                    crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                    crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                    crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                    crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                };
+                if !satisfied { return Ok(false); }
+            }
+            Ok(true)
+        };
     let mut kept = Vec::with_capacity(rows.len());
     'row: for row in rows {
-        for (pred, position) in predicates.iter().zip(&positions) {
-            let extracted = apply_projection(&pred.projection, row[*position].clone())?;
-            if matches!(extracted, Value::Null) || matches!(pred.literal, Value::Null) {
+        for (group, group_positions) in groups.iter().zip(&positions) {
+            if eval_group(&row, group, group_positions)? {
+                kept.push(row);
                 continue 'row;
             }
-            let ord = compare_values_for_check(&extracted, &pred.literal);
-            let satisfied = match pred.op {
-                crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
-                crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
-                crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
-                crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
-                crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
-                crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
-            };
-            if !satisfied { continue 'row; }
         }
-        kept.push(row);
     }
     Ok(kept)
 }
