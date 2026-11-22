@@ -46,7 +46,7 @@ pub(crate) fn mixed_assignments(p: &mut Parser) -> SqlResult<Vec<HistoryAssignme
             p.symbol('=')?;
             let literal = p.literal()?;
             let (column, path, as_text) = match projection {
-                crate::sql::Projection::JsonPath { column, path, as_text } =>
+                crate::sql::Projection::JsonPath { column, path, as_text, .. } =>
                     (column, path, as_text),
                 crate::sql::Projection::Column(_) => unreachable!("arrow guard"),
             };

@@ -115,6 +115,13 @@ enum Token {
     /// ADR 0186 — JSON path operator `->>` (returns the
     /// textual form of the sub-value).
     ArrowText,
+    /// ADR 0194 — PostgreSQL-style container-path operator
+    /// `#>`.  RHS is a text literal `'{a,b,c}'` listing path
+    /// segments. Returns the JSON sub-value.
+    Hash,
+    /// ADR 0194 — container-path operator `#>>`. Same RHS
+    /// shape as `#>` but returns the sub-value as text.
+    HashText,
 }
 
 fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
@@ -168,6 +175,16 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 word.push(chars.next().unwrap());
             }
             out.push(Token::Word(word));
+        } else if ch == '#' && chars.clone().nth(1) == Some('>') {
+            // ADR 0194 — `#>` or `#>>` container-path operator.
+            chars.next();
+            chars.next();
+            if chars.peek() == Some(&'>') {
+                chars.next();
+                out.push(Token::HashText);
+            } else {
+                out.push(Token::Hash);
+            }
         } else if ch == '-' && chars.clone().nth(1) == Some('>') {
             // ADR 0186 — `->` or `->>` JSON path operator.
             // Lexed before the number-prefix branch so the
@@ -265,13 +282,15 @@ impl Parser {
     /// `peek` and wants to move the cursor forward.
     pub(crate) fn advance(&mut self) { self.pos += 1; }
 
-    /// ADR 0193 — predicate for module-external callers
-    /// (`sql_expression`) that need to tell apart an arithmetic
-    /// `col = expr` SET element from a JSON-path mutation
-    /// `col -> ... = lit` without reaching into the private
-    /// `Token` enum.
+    /// ADR 0193 / ADR 0194 — predicate for module-external
+    /// callers (`sql_expression`) that need to tell apart an
+    /// arithmetic `col = expr` SET element from a JSON-path
+    /// mutation (`col -> ... = lit` or `col #> '{…}' = lit`)
+    /// without reaching into the private `Token` enum.
     pub(crate) fn next_is_json_arrow(&self) -> bool {
-        matches!(self.peek(), Some(Token::Arrow) | Some(Token::ArrowText))
+        matches!(self.peek(),
+            Some(Token::Arrow) | Some(Token::ArrowText)
+            | Some(Token::Hash) | Some(Token::HashText))
     }
 
     /// ADR 0190 — save / restore the cursor for lookahead.
@@ -480,13 +499,14 @@ impl Parser {
         loop {
             let column = self.word()?;
             let next_is_arrow = matches!(self.peek(),
-                Some(Token::Arrow) | Some(Token::ArrowText));
+                Some(Token::Arrow) | Some(Token::ArrowText)
+                | Some(Token::Hash) | Some(Token::HashText));
             let assignment = if next_is_arrow {
                 let projection = parse_projection_tail(self, column)?;
                 self.symbol('=')?;
                 let literal = self.literal()?;
                 let (col, path, as_text) = match projection {
-                    Projection::JsonPath { column, path, as_text } =>
+                    Projection::JsonPath { column, path, as_text, .. } =>
                         (column, path, as_text),
                     Projection::Column(_) => unreachable!("arrow guard"),
                 };
@@ -765,7 +785,17 @@ impl JsonSegment {
 #[derive(Clone, Debug)]
 pub(crate) enum Projection {
     Column(String),
-    JsonPath { column: String, path: Vec<JsonSegment>, as_text: bool },
+    JsonPath {
+        column: String,
+        path: Vec<JsonSegment>,
+        as_text: bool,
+        /// ADR 0194 — rendered as `col #> '{…}'` instead of
+        /// the arrow chain. The runtime semantics are
+        /// identical; the flag only affects label display and
+        /// keeps error messages honest about which syntax the
+        /// caller used.
+        container_syntax: bool,
+    },
 }
 
 impl Projection {
@@ -779,9 +809,23 @@ impl Projection {
     pub(crate) fn label(&self) -> String {
         match self {
             Projection::Column(c) => c.clone(),
-            Projection::JsonPath { column, path, as_text } => {
+            Projection::JsonPath { column, path, as_text, container_syntax } => {
                 let mut out = column.clone();
-                if let Some((last, mids)) = path.split_last() {
+                if *container_syntax {
+                    out.push_str(if *as_text { "#>>" } else { "#>" });
+                    out.push_str("'{");
+                    for (i, seg) in path.iter().enumerate() {
+                        if i > 0 { out.push(','); }
+                        match seg {
+                            JsonSegment::Key(k) => out.push_str(k),
+                            JsonSegment::Index(n) => {
+                                use std::fmt::Write;
+                                let _ = write!(out, "{n}");
+                            }
+                        }
+                    }
+                    out.push_str("}'");
+                } else if let Some((last, mids)) = path.split_last() {
                     for seg in mids {
                         out.push_str("->");
                         seg.render(&mut out);
@@ -813,6 +857,24 @@ pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
 pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult<Projection> {
     let mut path: Vec<JsonSegment> = Vec::new();
     let mut as_text = false;
+    // ADR 0194 — first-segment branch may be a #> / #>>
+    // container-path operator. These do not chain: one
+    // #> / #>> must own the whole path for that column.
+    match p.peek() {
+        Some(Token::Hash) | Some(Token::HashText) => {
+            let final_text = matches!(p.peek(), Some(Token::HashText));
+            p.advance();
+            path = parse_container_path(p)?;
+            if path.is_empty() {
+                return Err(SqlError::Syntax(
+                    "container-path operator requires a non-empty '{…}' body".into()));
+            }
+            return Ok(Projection::JsonPath {
+                column, path, as_text: final_text, container_syntax: true,
+            });
+        }
+        _ => {}
+    }
     loop {
         let final_text = match p.peek() {
             Some(Token::ArrowText) => { p.advance(); true }
@@ -843,7 +905,46 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
     if path.is_empty() {
         return Ok(Projection::Column(column));
     }
-    Ok(Projection::JsonPath { column, path, as_text })
+    Ok(Projection::JsonPath { column, path, as_text, container_syntax: false })
+}
+
+/// ADR 0194 — parse the RHS of `#>` / `#>>` as a single
+/// TEXT literal with the shape `'{seg,seg,...}'` where each
+/// segment is a bareword (object key) or a non-negative
+/// integer (array index). Whitespace around commas and
+/// braces is ignored. An empty `{}` is rejected.
+fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
+    let text = match p.peek().cloned() {
+        Some(Token::Text(s)) => { p.advance(); s }
+        _ => return Err(SqlError::Syntax(
+            "container-path operator requires a single-quoted '{…}' text literal".into())),
+    };
+    let trimmed = text.trim();
+    let inner = trimmed
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| SqlError::Syntax(
+            format!("container-path literal must be wrapped in '{{…}}'; got {text:?}")))?;
+    let mut out = Vec::new();
+    if inner.trim().is_empty() {
+        return Ok(out);
+    }
+    for raw in inner.split(',') {
+        let seg = raw.trim();
+        if seg.is_empty() {
+            return Err(SqlError::Syntax(
+                "container-path segments must be non-empty".into()));
+        }
+        // Integer segment: digits only.
+        if seg.bytes().all(|b| b.is_ascii_digit()) {
+            let idx: usize = seg.parse().map_err(|_| SqlError::Syntax(
+                format!("container-path index {seg:?} is not a valid usize")))?;
+            out.push(JsonSegment::Index(idx));
+        } else {
+            out.push(JsonSegment::Key(seg.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// ADR 0190 — SELECT WHERE clause shape: either the existing
@@ -870,7 +971,9 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
     p.expect("where")?;
     let saved = p.save_pos();
     let column_name = p.word()?;
-    let is_json_path = matches!(p.peek(), Some(Token::Arrow) | Some(Token::ArrowText));
+    let is_json_path = matches!(p.peek(),
+        Some(Token::Arrow) | Some(Token::ArrowText)
+        | Some(Token::Hash) | Some(Token::HashText));
     if is_json_path {
         let projection = parse_projection_tail(p, column_name)?;
         // Locate the base column to validate it exists.
@@ -977,7 +1080,7 @@ pub(crate) fn apply_where_filter(
 pub(crate) fn apply_projection(pj: &Projection, cell: Value) -> SqlResult<Value> {
     match pj {
         Projection::Column(_) => Ok(cell),
-        Projection::JsonPath { column, path, as_text } => {
+        Projection::JsonPath { column, path, as_text, .. } => {
             let source = match &cell {
                 Value::Null => return Ok(Value::Null),
                 Value::Json(s) | Value::String(s) => s.as_str(),
