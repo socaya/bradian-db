@@ -265,6 +265,10 @@ impl Parser {
     /// `peek` and wants to move the cursor forward.
     pub(crate) fn advance(&mut self) { self.pos += 1; }
 
+    /// ADR 0190 — save / restore the cursor for lookahead.
+    pub(crate) fn save_pos(&self) -> usize { self.pos }
+    pub(crate) fn restore_pos(&mut self, pos: usize) { self.pos = pos; }
+
     pub(crate) fn word(&mut self) -> SqlResult<String> {
         match self.tokens.get(self.pos).cloned() {
             Some(Token::Word(word)) => {
@@ -609,6 +613,14 @@ impl Projection {
 /// extraction terminates the path).
 pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
     let column = p.word()?;
+    parse_projection_tail(p, column)
+}
+
+/// ADR 0190 — parse the arrow chain after an already-consumed
+/// column identifier. Used by both `parse_projection` and the
+/// WHERE-side JSON path predicate parser so the chain grammar
+/// has exactly one implementation.
+pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult<Projection> {
     let mut path = Vec::new();
     let mut as_text = false;
     loop {
@@ -618,9 +630,6 @@ pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
             _ => break,
         };
         if as_text {
-            // A prior segment already consumed `->>` — no
-            // further segments allowed (would require re-
-            // parsing TEXT as JSON).
             return Err(SqlError::Unsupported(
                 "`->>` JSON path terminator cannot be followed by more segments".into()));
         }
@@ -636,6 +645,130 @@ pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
         return Ok(Projection::Column(column));
     }
     Ok(Projection::JsonPath { column, path, as_text })
+}
+
+/// ADR 0190 — SELECT WHERE clause shape: either the existing
+/// PK equality list (fastest — `tx.get` / `store.get` via PK)
+/// or a JSON-path equality predicate that requires a full
+/// scan + per-row filter.
+#[derive(Clone, Debug)]
+pub(crate) enum SelectWhere {
+    KeyPredicate(Vec<Value>),
+    JsonPathEquality { projection: Projection, literal: Value },
+}
+
+/// ADR 0190 — parse the full WHERE clause for a SELECT. The
+/// branch is chosen at the first column: a bare column
+/// followed by `=` dispatches to the existing PK-equality
+/// path; a column followed by `->` / `->>` dispatches to the
+/// JSON-path predicate path. Any other token is a parse error.
+///
+/// For PK predicates this preserves the existing
+/// `key_predicate` grammar (full PK equality binding). For
+/// JSON paths it accepts one `col path-chain = literal` pair
+/// — no AND, no mixing with PK predicates in this scope.
+pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<SelectWhere> {
+    p.expect("where")?;
+    let saved = p.save_pos();
+    let column_name = p.word()?;
+    let is_json_path = matches!(p.peek(), Some(Token::Arrow) | Some(Token::ArrowText));
+    if is_json_path {
+        let projection = parse_projection_tail(p, column_name)?;
+        // Locate the base column to validate it exists.
+        locate(table, projection.source_column())?;
+        p.symbol('=')?;
+        let literal = p.literal()?;
+        // Coerce literal to a Value. `->>` compares against
+        // TEXT; `->` compares against JSON (serialized form).
+        let value = match &projection {
+            Projection::Column(_) => unreachable!("json path has non-empty chain"),
+            Projection::JsonPath { as_text, .. } => coerce_where_literal(&literal, *as_text)?,
+        };
+        Ok(SelectWhere::JsonPathEquality { projection, literal: value })
+    } else {
+        // Rewind and dispatch to the existing PK grammar.
+        p.restore_pos(saved);
+        // key_predicate expects the cursor just AFTER WHERE.
+        // We've already consumed WHERE above; reconstruct the
+        // old signature by rewinding one token for the WHERE
+        // keyword as well.
+        // Simpler: re-implement the PK walk here using the
+        // same loop as `Parser::predicate`.
+        let mut tests = Vec::<(String, Literal)>::new();
+        loop {
+            let column = p.word()?;
+            p.symbol('=')?;
+            tests.push((column, p.literal()?));
+            if !p.consume_word("and") { break; }
+        }
+        if tests.len() != table.primary_key.columns.len() {
+            return Err(SqlError::Unsupported("WHERE must match every primary-key component".into()));
+        }
+        let mut key = BTreeMap::<String, Value>::new();
+        for (name, literal) in tests {
+            if !table.primary_key.columns.contains(&name) || key.contains_key(&name) {
+                return Err(SqlError::Unsupported("WHERE must be equality on distinct primary-key columns".into()));
+            }
+            let column = &table.columns[locate(table, &name)?];
+            key.insert(name, coerce(&literal, column)?);
+        }
+        let ordered: Vec<Value> = table.primary_key.columns.iter()
+            .map(|name| key.remove(name).expect("validated"))
+            .collect();
+        Ok(SelectWhere::KeyPredicate(ordered))
+    }
+}
+
+/// ADR 0190 — coerce the RHS of a JSON path equality. For
+/// `->>` the comparison is against TEXT; the literal must be
+/// a quoted string. For `->` the comparison is against JSON;
+/// the literal is serialized as JSON for a bytewise equality
+/// against the stored sub-value.
+fn coerce_where_literal(lit: &Literal, as_text: bool) -> SqlResult<Value> {
+    match (lit, as_text) {
+        (Literal::Null, _) => Ok(Value::Null),
+        (Literal::Text(s), true) => Ok(Value::String(s.clone())),
+        (Literal::Text(s), false) => {
+            // Parse the literal as JSON (strings are quoted).
+            // For ergonomics we also accept a bare word literal
+            // on the user's side, but at this point the lexer
+            // has already resolved it to `Literal::Text`, so we
+            // just wrap it as a JSON string value.
+            Ok(Value::Json(serde_json::to_string(s)
+                .map_err(|e| SqlError::Type(format!("json render: {e}")))?))
+        }
+        (Literal::Number(s), as_text) => {
+            if as_text {
+                Ok(Value::String(s.clone()))
+            } else {
+                // Numeric literal becomes its JSON serialization.
+                Ok(Value::Json(s.clone()))
+            }
+        }
+        (Literal::Bool(b), true) => Ok(Value::String(if *b { "true".into() } else { "false".into() })),
+        (Literal::Bool(b), false) => Ok(Value::Json(if *b { "true".into() } else { "false".into() })),
+        (Literal::Default, _) => Err(SqlError::Syntax(
+            "DEFAULT is not a WHERE-side literal".into())),
+    }
+}
+
+/// ADR 0190 — filter a row slice against a JSON-path equality
+/// predicate. Returns rows whose projected value equals the
+/// supplied literal. NULL on either side never matches
+/// (SQL three-valued logic — equality with NULL is UNKNOWN).
+pub(crate) fn apply_where_filter(
+    rows: Vec<Vec<Value>>, table: &Table, projection: &Projection, literal: &Value,
+) -> SqlResult<Vec<Vec<Value>>> {
+    let position = locate(table, projection.source_column())?;
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        let extracted = apply_projection(projection, row[position].clone())?;
+        if matches!(extracted, Value::Null) || matches!(literal, Value::Null) {
+            continue;
+        }
+        if extracted == *literal { kept.push(row); }
+    }
+    Ok(kept)
 }
 
 /// ADR 0186 + ADR 0189 — extract a chained JSON path from a
@@ -1685,11 +1818,20 @@ impl SqlEngine {
                 let indices: Vec<usize> = projections.iter()
                     .map(|pj| locate(&table, pj.source_column()))
                     .collect::<SqlResult<Vec<_>>>()?;
-                let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
+                // ADR 0190 — WHERE accepts PK equality or
+                // JSON-path equality (full-scan post-filter).
+                let where_clause = if p.next_is_word("where") {
+                    Some(parse_select_where(&mut p, &table)?)
+                } else { None };
                 p.end()?;
                 let store = self.table_store(&table)?;
-                let all = if let Some(key) = key { store.get(&key)?.into_iter().collect::<Vec<_>>() }
-                    else { store.scan_with_control(control)? };
+                let all = match &where_clause {
+                    Some(SelectWhere::KeyPredicate(key)) =>
+                        store.get(key)?.into_iter().collect::<Vec<_>>(),
+                    Some(SelectWhere::JsonPathEquality { .. }) =>
+                        store.scan_with_control(control)?,
+                    None => store.scan_with_control(control)?,
+                };
                 // ADR 0144 — charge rows then re-check deadline.
                 // ADR 0148 — charge the materialized bytes.
                 if let Some(b) = budget.as_mut() {
@@ -1711,6 +1853,12 @@ impl SqlEngine {
                     }
                     kept
                 } else { all };
+                // ADR 0190 — post-scan filter for JSON-path WHERE.
+                let all = match &where_clause {
+                    Some(SelectWhere::JsonPathEquality { projection, literal }) =>
+                        apply_where_filter(all, &table, projection, literal)?,
+                    _ => all,
+                };
                 let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
                 // ADR 0186 — apply JSON path extraction per cell
                 // after the base projection. Bare columns pass

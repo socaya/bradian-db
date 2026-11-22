@@ -836,24 +836,33 @@ impl<'a> HistorySqlSession<'a> {
                         let positions: Vec<usize> = projections.iter()
                             .map(|pj| locate(&table, pj.source_column()))
                             .collect::<SqlResult<Vec<_>>>()?;
-                        let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
+                        // ADR 0190 — WHERE accepts PK equality
+                        // or JSON-path equality. AS OF + JSON
+                        // path requires scanning at the LSN;
+                        // supported below.
+                        let where_clause = if p.next_is_word("where") {
+                            Some(crate::sql::parse_select_where(&mut p, &table)?)
+                        } else { None };
                         let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
                         p.end()?;
                         let control = match window.input_row_limit() {
                             Some(limit) => self.control.cap_rows(limit),
                             None => self.control.clone(),
                         };
-                        let rows = if let Some(key) = key {
-                            match as_of {
-                                Some(lsn) => self.engine.domain.get_as_of(table.id, &key, lsn)?
+                        let rows = match &where_clause {
+                            Some(crate::sql::SelectWhere::KeyPredicate(key)) => match as_of {
+                                Some(lsn) => self.engine.domain.get_as_of(table.id, key, lsn)?
                                     .into_iter().collect(),
-                                None => tx.get(table.id, &key)?.into_iter().collect(),
-                            }
-                        } else {
-                            match as_of {
+                                None => tx.get(table.id, key)?.into_iter().collect(),
+                            },
+                            Some(crate::sql::SelectWhere::JsonPathEquality { .. }) => match as_of {
                                 Some(lsn) => self.engine.domain.scan_as_of_with_control(table.id, lsn, &control)?,
                                 None => tx.scan_with_control(table.id, &control)?,
-                            }
+                            },
+                            None => match as_of {
+                                Some(lsn) => self.engine.domain.scan_as_of_with_control(table.id, lsn, &control)?,
+                                None => tx.scan_with_control(table.id, &control)?,
+                            },
                         };
                         control.check()?;
                         // ADR 0143 — charge rows.
@@ -877,6 +886,12 @@ impl<'a> HistorySqlSession<'a> {
                             }
                             kept
                         } else { rows };
+                        // ADR 0190 — post-scan JSON-path filter.
+                        let rows = match &where_clause {
+                            Some(crate::sql::SelectWhere::JsonPathEquality { projection, literal }) =>
+                                crate::sql::apply_where_filter(rows, &table, projection, literal)?,
+                            _ => rows,
+                        };
                         let rows = window.apply(rows, &table)?;
                         control.check()?;
                         let base = crate::typed_table::project_rows_with_control(rows, &positions, &control)?;

@@ -444,11 +444,18 @@ impl<'a> MvccSqlSession<'a> {
                         let positions: Vec<usize> = projections.iter()
                             .map(|pj| locate(&table, pj.source_column()))
                             .collect::<SqlResult<Vec<_>>>()?;
-                        let rows: Vec<Vec<_>> = if p.next_is_word("where") {
-                            let key = key_predicate(&mut p, &table)?;
-                            tx.get(table.id, &key)?.into_iter().collect()
-                        } else {
-                            tx.scan(table.id)?
+                        // ADR 0190 — WHERE accepts PK equality
+                        // or JSON-path equality (full scan +
+                        // post-filter).
+                        let where_clause = if p.next_is_word("where") {
+                            Some(crate::sql::parse_select_where(&mut p, &table)?)
+                        } else { None };
+                        let rows: Vec<Vec<_>> = match &where_clause {
+                            Some(crate::sql::SelectWhere::KeyPredicate(key)) =>
+                                tx.get(table.id, key)?.into_iter().collect(),
+                            Some(crate::sql::SelectWhere::JsonPathEquality { .. }) =>
+                                tx.scan(table.id)?,
+                            None => tx.scan(table.id)?,
                         };
                         p.end()?;
                         // ADR 0146 — charge rows after scan.
@@ -472,6 +479,12 @@ impl<'a> MvccSqlSession<'a> {
                             }
                             kept
                         } else { rows };
+                        // ADR 0190 — post-scan JSON-path filter.
+                        let rows = match &where_clause {
+                            Some(crate::sql::SelectWhere::JsonPathEquality { projection, literal }) =>
+                                crate::sql::apply_where_filter(rows, &table, projection, literal)?,
+                            _ => rows,
+                        };
                         let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
                         Ok(SqlResultSet::Rows {
                             columns,
