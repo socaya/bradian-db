@@ -423,6 +423,8 @@ impl<'a> DomainSqlSession<'a> {
                         let where_clause = if p.next_is_word("where") {
                             Some(crate::sql::parse_select_where(&mut p, &table)?)
                         } else { None };
+                        // ADR 0212 — ORDER BY / LIMIT / OFFSET.
+                        let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
                         let rows: Vec<Vec<_>> = match &where_clause {
                             Some(crate::sql::SelectWhere::KeyPredicate(key)) =>
                                 tx.get(table.id, key)?.into_iter().collect(),
@@ -458,6 +460,8 @@ impl<'a> DomainSqlSession<'a> {
                                 crate::sql::apply_where_filter(rows, &table, preds)?,
                             _ => rows,
                         };
+                        // ADR 0212 — apply ordering + window.
+                        let rows = window.apply(rows, &table)?;
                         let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
                         Ok(SqlResultSet::Rows {
                             columns,

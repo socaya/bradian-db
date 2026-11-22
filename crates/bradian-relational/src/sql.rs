@@ -2981,14 +2981,21 @@ impl SqlEngine {
                 let where_clause = if p.next_is_word("where") {
                     Some(parse_select_where(&mut p, &table)?)
                 } else { None };
+                // ADR 0212 — ORDER BY / LIMIT / OFFSET on the
+                // base engine, reusing the historical window.
+                let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
                 p.end()?;
+                let scan_control = match window.input_row_limit() {
+                    Some(limit) => control.cap_rows(limit),
+                    None => control.clone(),
+                };
                 let store = self.table_store(&table)?;
                 let all = match &where_clause {
                     Some(SelectWhere::KeyPredicate(key)) =>
                         store.get(key)?.into_iter().collect::<Vec<_>>(),
                     Some(SelectWhere::JsonPathPredicates(_)) =>
-                        store.scan_with_control(control)?,
-                    None => store.scan_with_control(control)?,
+                        store.scan_with_control(&scan_control)?,
+                    None => store.scan_with_control(&scan_control)?,
                 };
                 // ADR 0144 — charge rows then re-check deadline.
                 // ADR 0148 — charge the materialized bytes.
@@ -3017,6 +3024,10 @@ impl SqlEngine {
                         apply_where_filter(all, &table, preds)?,
                     _ => all,
                 };
+                // ADR 0212 — apply ORDER BY / LIMIT / OFFSET
+                // before projection so sort keys can reference
+                // columns that are not in the projection list.
+                let all = window.apply(all, &table)?;
                 let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
                 // ADR 0186 — apply JSON path extraction per cell
                 // after the base projection. Bare columns pass
