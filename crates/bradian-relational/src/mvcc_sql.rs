@@ -410,50 +410,81 @@ impl<'a> MvccSqlSession<'a> {
                         // ADR 0146 — deadline check before scan.
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         // ADR 0188 — JSON path projections.
-                        // ADR 0213 + ADR 0214 — scalar aggregate head.
-                        let aggregate = crate::sql::consume_aggregate(&mut p)?;
-                        let caller_wildcard = aggregate.is_none() && p.consume_symbol('*');
-                        let requested_projections = if aggregate.is_some() || caller_wildcard { None } else {
-                            let mut out = vec![crate::sql::parse_projection(&mut p)?];
+                        // ADR 0213/0214/0217 — projection list may mix.
+                        let caller_wildcard = p.consume_symbol('*');
+                        let requested_items: Option<Vec<crate::sql::SelectItem>> = if caller_wildcard { None } else {
+                            let mut out = vec![crate::sql::parse_select_item(&mut p)?];
                             while p.consume_symbol(',') {
-                                out.push(crate::sql::parse_projection(&mut p)?);
+                                out.push(crate::sql::parse_select_item(&mut p)?);
                             }
                             Some(out)
                         };
                         p.expect("from")?;
                         let table = self.engine.resolve(&p.name()?)?;
-                        let mut projections = requested_projections.unwrap_or_else(||
+                        let mut select_items: Vec<crate::sql::SelectItem> = requested_items.unwrap_or_else(||
                             table.columns.iter()
-                                .map(|c| crate::sql::Projection::Column(c.name.clone()))
+                                .map(|c| crate::sql::SelectItem::Column(crate::sql::Projection::Column(c.name.clone())))
                                 .collect());
+                        let any_aggregate = select_items.iter().any(|it| it.is_aggregate());
+                        let scalar_aggregate: Option<crate::sql::AggSpec> =
+                            if any_aggregate && select_items.len() == 1 {
+                                match &select_items[0] {
+                                    crate::sql::SelectItem::Agg(spec) => Some(spec.clone()),
+                                    _ => None,
+                                }
+                            } else { None };
                         // ADR 0155 — column-level policy filtering.
                         if let Some(p_) = self.policy.as_ref() {
                             if p_.column_level.is_configured() {
                                 if caller_wildcard {
-                                    projections.retain(|pj| p_.column_level.allows_read(pj.source_column()));
+                                    select_items.retain(|item| match item {
+                                        crate::sql::SelectItem::Column(pj) => p_.column_level.allows_read(pj.source_column()),
+                                        crate::sql::SelectItem::Agg(_) => true,
+                                    });
                                 } else {
-                                    for pj in &projections {
-                                        if !p_.column_level.allows_read(pj.source_column()) {
-                                            return Err(SqlError::Policy(
-                                                crate::access_policy::PolicyError::ColumnDenied {
-                                                    column: pj.source_column().into(),
-                                                }));
+                                    for item in &select_items {
+                                        if let crate::sql::SelectItem::Column(pj) = item {
+                                            if !p_.column_level.allows_read(pj.source_column()) {
+                                                return Err(SqlError::Policy(
+                                                    crate::access_policy::PolicyError::ColumnDenied {
+                                                        column: pj.source_column().into(),
+                                                    }));
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        let positions: Vec<usize> = projections.iter()
-                            .map(|pj| locate(&table, pj.source_column()))
-                            .collect::<SqlResult<Vec<_>>>()?;
-                        // ADR 0190 — WHERE accepts PK equality
-                        // or JSON-path equality (full scan +
-                        // post-filter).
                         let where_clause = if p.next_is_word("where") {
                             Some(crate::sql::parse_select_where(&mut p, &table)?)
                         } else { None };
+                        // ADR 0217 — GROUP BY between WHERE and ORDER BY.
+                        let group_keys = crate::sql::parse_group_by(&mut p, &table)?;
+                        if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
+                            if group_keys.is_empty() {
+                                return Err(SqlError::Unsupported(
+                                    "mixing aggregate and bare projections requires GROUP BY".into()));
+                            }
+                            for item in &select_items {
+                                if let crate::sql::SelectItem::Column(crate::sql::Projection::Column(name)) = item {
+                                    if !group_keys.iter().any(|k| k == name) {
+                                        return Err(SqlError::Unsupported(format!(
+                                            "projection {name} must appear in GROUP BY")));
+                                    }
+                                } else if let crate::sql::SelectItem::Column(crate::sql::Projection::JsonPath { .. }) = item {
+                                    return Err(SqlError::Unsupported(
+                                        "GROUP BY with JSON-path projection is not supported".into()));
+                                }
+                            }
+                        }
                         // ADR 0212 — ORDER BY / LIMIT / OFFSET.
                         let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
+                        let plain_projections: Vec<crate::sql::Projection> = select_items.iter().filter_map(|item|
+                            if let crate::sql::SelectItem::Column(pj) = item { Some(pj.clone()) } else { None }
+                        ).collect();
+                        let positions: Vec<usize> = plain_projections.iter()
+                            .map(|pj| locate(&table, pj.source_column()))
+                            .collect::<SqlResult<Vec<_>>>()?;
                         let rows: Vec<Vec<_>> = match &where_clause {
                             Some(crate::sql::SelectWhere::KeyPredicate(key)) =>
                                 tx.get(table.id, key)?.into_iter().collect(),
@@ -489,21 +520,25 @@ impl<'a> MvccSqlSession<'a> {
                                 crate::sql::apply_where_filter(rows, &table, preds)?,
                             _ => rows,
                         };
-                        // ADR 0213 + ADR 0214 — scalar aggregate.
-                        if let Some(spec) = aggregate {
+                        // Scalar aggregate.
+                        if let Some(spec) = scalar_aggregate {
                             let value = crate::sql::evaluate_aggregate(&spec, &table, &rows)?;
                             return Ok(SqlResultSet::Rows {
                                 columns: vec![spec.result_column().into()],
                                 rows: vec![vec![value]],
                             });
                         }
+                        // ADR 0217 — grouped evaluation.
+                        if !group_keys.is_empty() {
+                            return crate::sql::evaluate_grouped(&table, rows, &group_keys, &select_items);
+                        }
                         // ADR 0212 — apply ordering + window.
                         let rows = window.apply(rows, &table)?;
-                        let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
+                        let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
                         Ok(SqlResultSet::Rows {
                             columns,
                             rows: rows.into_iter().map(|row: Vec<_>|
-                                positions.iter().zip(&projections).map(|(pos, pj)|
+                                positions.iter().zip(&plain_projections).map(|(pos, pj)|
                                     crate::sql::apply_projection(pj, row[*pos].clone())
                                 ).collect::<SqlResult<Vec<_>>>()
                             ).collect::<SqlResult<Vec<Vec<_>>>>()?,

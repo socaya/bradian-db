@@ -1257,6 +1257,129 @@ impl AggSpec {
     }
 }
 
+/// ADR 0217 — one element of a SELECT list. A plain column
+/// projection (ADR 0186+), or a scalar aggregate.
+#[derive(Clone, Debug)]
+pub(crate) enum SelectItem {
+    Column(Projection),
+    Agg(AggSpec),
+}
+
+impl SelectItem {
+    pub(crate) fn is_aggregate(&self) -> bool { matches!(self, SelectItem::Agg(_)) }
+    pub(crate) fn label(&self) -> String {
+        match self {
+            SelectItem::Column(pj) => pj.label(),
+            SelectItem::Agg(spec) => spec.result_column().to_string(),
+        }
+    }
+}
+
+/// Parse one SELECT item: either an aggregate head or an
+/// ordinary projection. Aggregates may appear anywhere in the
+/// list; GROUP BY enforcement runs at planning time.
+pub(crate) fn parse_select_item(p: &mut Parser) -> SqlResult<SelectItem> {
+    if let Some(spec) = consume_aggregate(p)? { return Ok(SelectItem::Agg(spec)); }
+    Ok(SelectItem::Column(parse_projection(p)?))
+}
+
+/// ADR 0217 — parse `GROUP BY col [, col]...` after the WHERE
+/// clause. Returns an empty vec when GROUP BY is absent. Each
+/// group key must resolve to a plain table column (no
+/// expressions, no JSON paths, no aliases). Bounded to 16
+/// keys to match `select_window`'s sort-key budget.
+pub(crate) fn parse_group_by(p: &mut Parser, table: &Table) -> SqlResult<Vec<String>> {
+    if !p.consume_word("group") { return Ok(Vec::new()); }
+    p.expect("by")?;
+    let mut keys = Vec::new();
+    loop {
+        let name = p.word()?;
+        locate(table, &name)?;
+        if keys.len() == 16 {
+            return Err(SqlError::Unsupported("GROUP BY exceeds 16 columns".into()));
+        }
+        if keys.iter().any(|k: &String| k == &name) {
+            return Err(SqlError::Syntax("duplicate GROUP BY column".into()));
+        }
+        keys.push(name);
+        if !p.consume_symbol(',') { break; }
+    }
+    Ok(keys)
+}
+
+/// ADR 0217 — evaluate a grouped SELECT. Rows are bucketed by
+/// the composite group-key tuple using `compare_values_for_check`
+/// so cross-type equivalents collapse to the same bucket (same
+/// rule as `COUNT(DISTINCT col)` from ADR 0216). Buckets are
+/// emitted in ascending group-key order. Bounded to 10 000
+/// output groups to match the scan admission cap.
+pub(crate) fn evaluate_grouped(
+    table: &Table,
+    rows: Vec<Vec<Value>>,
+    group_keys: &[String],
+    items: &[SelectItem],
+) -> SqlResult<SqlResultSet> {
+    const MAX_GROUPS: usize = 10_000;
+    let key_positions: Vec<usize> = group_keys.iter()
+        .map(|name| locate(table, name)).collect::<SqlResult<Vec<_>>>()?;
+    // (key, Vec<row>) buckets.
+    let mut buckets: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
+    for row in rows {
+        let key: Vec<Value> = key_positions.iter().map(|p| row[*p].clone()).collect();
+        let position = buckets.iter().position(|(bk, _)|
+            bk.iter().zip(&key).all(|(a, b)|
+                compare_values_for_check(a, b) == std::cmp::Ordering::Equal));
+        match position {
+            Some(i) => buckets[i].1.push(row),
+            None => {
+                if buckets.len() == MAX_GROUPS {
+                    return Err(SqlError::Unsupported(
+                        "GROUP BY produced more than 10 000 distinct groups".into()));
+                }
+                buckets.push((key, vec![row]));
+            }
+        }
+    }
+    // Deterministic emission order: sort by key tuple using
+    // the same comparator the scalar WHERE / ORDER BY path
+    // uses. NULL sorts last.
+    buckets.sort_by(|a, b| {
+        for (x, y) in a.0.iter().zip(&b.0) {
+            match (x, y) {
+                (Value::Null, Value::Null) => continue,
+                (Value::Null, _) => return std::cmp::Ordering::Greater,
+                (_, Value::Null) => return std::cmp::Ordering::Less,
+                (lhs, rhs) => {
+                    let ord = compare_values_for_check(lhs, rhs);
+                    if ord != std::cmp::Ordering::Equal { return ord; }
+                }
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    let columns: Vec<String> = items.iter().map(|item| item.label()).collect();
+    let mut output_rows: Vec<Vec<Value>> = Vec::with_capacity(buckets.len());
+    for (key, bucket_rows) in &buckets {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                SelectItem::Column(Projection::Column(name)) => {
+                    let idx = group_keys.iter().position(|k| k == name)
+                        .expect("bare column validated as group key");
+                    out.push(key[idx].clone());
+                }
+                SelectItem::Column(_) => return Err(SqlError::Unsupported(
+                    "GROUP BY projection must be a bare column; JSON paths are deferred".into())),
+                SelectItem::Agg(spec) => {
+                    out.push(evaluate_aggregate(spec, table, bucket_rows)?);
+                }
+            }
+        }
+        output_rows.push(out);
+    }
+    Ok(SqlResultSet::Rows { columns, rows: output_rows })
+}
+
 /// Recognize `COUNT(*)`, `MIN(col)`, `MAX(col)`, or `SUM(col)`
 /// at the head of a SELECT. Returns `Some(spec)` after
 /// consuming the tokens; returns `None` without advancing the
@@ -3181,58 +3304,102 @@ impl SqlEngine {
                 control.check()?;
                 // ADR 0144 — deadline check before scan.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
-                // ADR 0213 + ADR 0214 — scalar aggregate at the
-                // head of SELECT. Owns the whole projection list;
-                // GROUP BY and multi-aggregate shapes deliberately
-                // deferred.
-                let aggregate = consume_aggregate(&mut p)?;
-                let caller_wildcard = aggregate.is_none() && p.consume_symbol('*');
-                // ADR 0186 — projection list accepts bare `col`
-                // plus `col -> 'key'` / `col ->> 'key'` JSON
-                // path extractions.
-                let projections = if aggregate.is_some() || caller_wildcard { Vec::new() } else {
-                    let mut out = vec![parse_projection(&mut p)?];
-                    while p.consume_symbol(',') { out.push(parse_projection(&mut p)?); }
+                // ADR 0213/0214/0217 — projection list accepts
+                // bare columns, JSON paths, and scalar aggregates.
+                // Scalar-only aggregate shapes short-circuit later;
+                // GROUP BY engages the grouped evaluator.
+                let caller_wildcard = p.consume_symbol('*');
+                let select_items: Vec<SelectItem> = if caller_wildcard { Vec::new() } else {
+                    let mut out = vec![parse_select_item(&mut p)?];
+                    while p.consume_symbol(',') { out.push(parse_select_item(&mut p)?); }
                     out
                 };
                 p.expect("from")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
-                let mut projections = if projections.is_empty() {
-                    table.columns.iter().map(|c| Projection::Column(c.name.clone())).collect::<Vec<_>>()
-                } else { projections };
-                if projections.is_empty() {
+                // ADR 0217 — expand `SELECT *` into bare columns.
+                let mut select_items: Vec<SelectItem> = if select_items.is_empty() {
+                    table.columns.iter()
+                        .map(|c| SelectItem::Column(Projection::Column(c.name.clone())))
+                        .collect()
+                } else { select_items };
+                if select_items.is_empty() {
                     return Err(SqlError::Syntax("SELECT requires columns".into()));
                 }
-                // ADR 0155 — column-level policy filtering.
+                // Back-compat for existing rows path: strip into
+                // projections when no aggregate appears.
+                let any_aggregate = select_items.iter().any(|it| it.is_aggregate());
+                let scalar_aggregate: Option<AggSpec> =
+                    if any_aggregate && select_items.len() == 1 {
+                        match &select_items[0] {
+                            SelectItem::Agg(spec) => Some(spec.clone()),
+                            _ => None,
+                        }
+                    } else { None };
+                // ADR 0155 — column-level policy filtering on
+                // bare-column items only. Aggregate projections
+                // bypass the column-level filter because they
+                // compute scalar outputs, not raw cells.
                 if let Some(p_) = policy {
                     if p_.column_level.is_configured() {
                         if caller_wildcard {
-                            projections.retain(|pj| p_.column_level.allows_read(pj.source_column()));
+                            select_items.retain(|item| match item {
+                                SelectItem::Column(pj) => p_.column_level.allows_read(pj.source_column()),
+                                SelectItem::Agg(_) => true,
+                            });
                         } else {
-                            for pj in &projections {
-                                if !p_.column_level.allows_read(pj.source_column()) {
-                                    return Err(SqlError::Policy(
-                                        crate::access_policy::PolicyError::ColumnDenied {
-                                            column: pj.source_column().into(),
-                                        }));
+                            for item in &select_items {
+                                if let SelectItem::Column(pj) = item {
+                                    if !p_.column_level.allows_read(pj.source_column()) {
+                                        return Err(SqlError::Policy(
+                                            crate::access_policy::PolicyError::ColumnDenied {
+                                                column: pj.source_column().into(),
+                                            }));
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                let indices: Vec<usize> = projections.iter()
-                    .map(|pj| locate(&table, pj.source_column()))
-                    .collect::<SqlResult<Vec<_>>>()?;
                 // ADR 0190 — WHERE accepts PK equality or
                 // JSON-path equality (full-scan post-filter).
                 let where_clause = if p.next_is_word("where") {
                     Some(parse_select_where(&mut p, &table)?)
                 } else { None };
+                // ADR 0217 — GROUP BY, parsed between WHERE and
+                // ORDER BY / LIMIT / OFFSET.
+                let group_keys = parse_group_by(&mut p, &table)?;
+                // ADR 0217 — require every bare projection to be
+                // a listed group key when grouping is active.
+                if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
+                    if group_keys.is_empty() {
+                        return Err(SqlError::Unsupported(
+                            "mixing aggregate and bare projections requires GROUP BY".into()));
+                    }
+                    for item in &select_items {
+                        if let SelectItem::Column(Projection::Column(name)) = item {
+                            if !group_keys.iter().any(|k| k == name) {
+                                return Err(SqlError::Unsupported(format!(
+                                    "projection {name} must appear in GROUP BY")));
+                            }
+                        } else if let SelectItem::Column(Projection::JsonPath { .. }) = item {
+                            return Err(SqlError::Unsupported(
+                                "GROUP BY with JSON-path projection is not supported".into()));
+                        }
+                    }
+                }
                 // ADR 0212 — ORDER BY / LIMIT / OFFSET on the
                 // base engine, reusing the historical window.
                 let window = crate::select_window::SelectWindow::parse(&mut p, &table)?;
                 p.end()?;
+                // ADR 0217 — materialize legacy `projections` /
+                // `indices` only for the plain-row path.
+                let plain_projections: Vec<Projection> = select_items.iter().filter_map(|item|
+                    if let SelectItem::Column(pj) = item { Some(pj.clone()) } else { None }
+                ).collect();
+                let indices: Vec<usize> = plain_projections.iter()
+                    .map(|pj| locate(&table, pj.source_column()))
+                    .collect::<SqlResult<Vec<_>>>()?;
                 let scan_control = match window.input_row_limit() {
                     Some(limit) => control.cap_rows(limit),
                     None => control.clone(),
@@ -3272,16 +3439,22 @@ impl SqlEngine {
                         apply_where_filter(all, &table, preds)?,
                     _ => all,
                 };
-                // ADR 0213 + ADR 0214 — scalar aggregate collapses
+                // ADR 0213/0214/0215/0216 — scalar aggregate
+                // (single agg projection, no GROUP BY) collapses
                 // the filtered scan into a single-row result.
-                // ORDER BY / LIMIT / OFFSET are discarded: scalar
-                // aggregates have no per-row ordering.
-                if let Some(spec) = aggregate {
+                if let Some(spec) = scalar_aggregate {
                     let value = evaluate_aggregate(&spec, &table, &all)?;
                     return Ok(SqlResultSet::Rows {
                         columns: vec![spec.result_column().into()],
                         rows: vec![vec![value]],
                     });
+                }
+                // ADR 0217 — grouped evaluation: bucket by group
+                // key, evaluate per-bucket. ORDER BY / LIMIT /
+                // OFFSET parse but are discarded (results are
+                // emitted sorted by group key).
+                if !group_keys.is_empty() {
+                    return evaluate_grouped(&table, all, &group_keys, &select_items);
                 }
                 // ADR 0212 — apply ORDER BY / LIMIT / OFFSET
                 // before projection so sort keys can reference
@@ -3292,10 +3465,10 @@ impl SqlEngine {
                 // after the base projection. Bare columns pass
                 // through unchanged.
                 let rows: Vec<Vec<Value>> = base_rows.into_iter().map(|row|
-                    row.into_iter().zip(&projections).map(|(value, pj)| apply_projection(pj, value))
+                    row.into_iter().zip(&plain_projections).map(|(value, pj)| apply_projection(pj, value))
                         .collect::<SqlResult<Vec<Value>>>()
                 ).collect::<SqlResult<Vec<Vec<Value>>>>()?;
-                let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
+                let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
                 Ok(SqlResultSet::Rows { columns, rows })
             }
             "update" => {
