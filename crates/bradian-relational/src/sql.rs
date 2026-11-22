@@ -1223,6 +1223,23 @@ impl Projection {
     }
 }
 
+/// ADR 0213 — recognize `COUNT ( * )` at the head of a SELECT.
+/// Returns true after consuming all three tokens; returns false
+/// without advancing the parser if the next token is not `COUNT`.
+/// A `COUNT` not followed by `( * )` is a parse error (reserved
+/// shape, preserves room for `COUNT(col)` / `COUNT(DISTINCT …)`
+/// later).
+pub(crate) fn consume_count_star(p: &mut Parser) -> SqlResult<bool> {
+    if !p.consume_word("count") { return Ok(false); }
+    p.symbol('(')?;
+    if !p.consume_symbol('*') {
+        return Err(SqlError::Unsupported(
+            "only COUNT(*) is supported today; COUNT(col) / DISTINCT reserved".into()));
+    }
+    p.symbol(')')?;
+    Ok(true)
+}
+
 /// ADR 0186 + ADR 0189 — parse a projection: identifier,
 /// optionally followed by one or more `-> 'key'` / `->> 'key'`
 /// segments. Intermediate segments must be `->`; a `->>`
@@ -2938,11 +2955,16 @@ impl SqlEngine {
                 control.check()?;
                 // ADR 0144 — deadline check before scan.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
-                let caller_wildcard = p.consume_symbol('*');
+                // ADR 0213 — `SELECT COUNT(*) FROM …` short-circuits
+                // the projection list. It owns the whole SELECT
+                // output; mixing with bare columns requires GROUP
+                // BY and is deliberately deferred.
+                let count_star = consume_count_star(&mut p)?;
+                let caller_wildcard = !count_star && p.consume_symbol('*');
                 // ADR 0186 — projection list accepts bare `col`
                 // plus `col -> 'key'` / `col ->> 'key'` JSON
                 // path extractions.
-                let projections = if caller_wildcard { Vec::new() } else {
+                let projections = if count_star || caller_wildcard { Vec::new() } else {
                     let mut out = vec![parse_projection(&mut p)?];
                     while p.consume_symbol(',') { out.push(parse_projection(&mut p)?); }
                     out
@@ -3024,6 +3046,16 @@ impl SqlEngine {
                         apply_where_filter(all, &table, preds)?,
                     _ => all,
                 };
+                // ADR 0213 — COUNT(*) collapses the filtered scan
+                // into a single-row result. ORDER BY / LIMIT /
+                // OFFSET are discarded: counting is scalar.
+                if count_star {
+                    let total = all.len() as i64;
+                    return Ok(SqlResultSet::Rows {
+                        columns: vec!["count".into()],
+                        rows: vec![vec![Value::Int64(total)]],
+                    });
+                }
                 // ADR 0212 — apply ORDER BY / LIMIT / OFFSET
                 // before projection so sort keys can reference
                 // columns that are not in the projection list.

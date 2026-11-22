@@ -410,8 +410,10 @@ impl<'a> MvccSqlSession<'a> {
                         // ADR 0146 — deadline check before scan.
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         // ADR 0188 — JSON path projections.
-                        let caller_wildcard = p.consume_symbol('*');
-                        let requested_projections = if caller_wildcard { None } else {
+                        // ADR 0213 — SELECT COUNT(*) short-circuit.
+                        let count_star = crate::sql::consume_count_star(&mut p)?;
+                        let caller_wildcard = !count_star && p.consume_symbol('*');
+                        let requested_projections = if count_star || caller_wildcard { None } else {
                             let mut out = vec![crate::sql::parse_projection(&mut p)?];
                             while p.consume_symbol(',') {
                                 out.push(crate::sql::parse_projection(&mut p)?);
@@ -487,6 +489,13 @@ impl<'a> MvccSqlSession<'a> {
                                 crate::sql::apply_where_filter(rows, &table, preds)?,
                             _ => rows,
                         };
+                        // ADR 0213 — COUNT(*) collapses to one row.
+                        if count_star {
+                            return Ok(SqlResultSet::Rows {
+                                columns: vec!["count".into()],
+                                rows: vec![vec![crate::typed_table::Value::Int64(rows.len() as i64)]],
+                            });
+                        }
                         // ADR 0212 — apply ordering + window.
                         let rows = window.apply(rows, &table)?;
                         let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
