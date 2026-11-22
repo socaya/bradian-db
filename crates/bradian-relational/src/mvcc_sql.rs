@@ -367,44 +367,63 @@ impl<'a> MvccSqlSession<'a> {
                         let table = self.engine.resolve(&p.name()?)?;
                         let names = p.list(|parser| parser.word())?;
                         p.expect("values")?;
-                        let values = p.list(|parser| parser.literal())?;
-                        p.end()?;
-                        if names.len() != values.len() || names.len() != table.columns.len() {
-                            return Err(SqlError::Unsupported("INSERT must list every table column exactly once".into()));
+                        // ADR 0220 — accept one or more tuples.
+                        let mut tuples: Vec<Vec<crate::sql::Literal>> = Vec::new();
+                        loop {
+                            tuples.push(p.list(|parser| parser.literal())?);
+                            if !p.consume_symbol(',') { break; }
                         }
-                        let mut fields = BTreeMap::new();
-                        for (name, value) in names.into_iter().zip(values) {
-                            locate(&table, &name)?;
-                            if fields.insert(name.clone(), value).is_some() {
-                                return Err(SqlError::Syntax(format!("duplicate column {name}")));
+                        p.end()?;
+                        if names.len() != table.columns.len() {
+                            return Err(SqlError::Unsupported(
+                                "INSERT must list every table column exactly once".into()));
+                        }
+                        for lits in &tuples {
+                            if lits.len() != names.len() {
+                                return Err(SqlError::Unsupported(
+                                    "every INSERT VALUES tuple must match the column list".into()));
                             }
                         }
-                        let row = table.columns.iter().map(|column| {
-                            let lit = fields.remove(&column.name)
-                                .ok_or_else(|| SqlError::Resolution("missing column".into()))?;
-                            coerce(&lit, column)
-                        }).collect::<SqlResult<Vec<_>>>()?;
-                        // ADR 0182 — per-column CHECK.
-                        crate::sql::check_row(&table, &row)?;
-                        // ADR 0187 — FK parent-exists through
-                        // the active MVCC-SQL transaction.
-                        crate::sql::fk_check_child_row_tx(
-                            &self.engine.catalog, &table, &row, tx)?;
-                        // ADR 0179 — UNIQUE enforcement at
-                        // MVCC-SQL INSERT mirrors the pattern
-                        // across the other three engines.
-                        if !table.unique_keys.is_empty() {
-                            let existing = tx.scan(table.id)?;
-                            crate::unique_check::UniqueConstraintChecker::new(&table)
-                                .check(&row, existing)?;
+                        let mut rows: Vec<Vec<crate::typed_table::Value>> = Vec::with_capacity(tuples.len());
+                        for lits in tuples {
+                            let mut fields = BTreeMap::new();
+                            for (name, value) in names.iter().cloned().zip(lits) {
+                                locate(&table, &name)?;
+                                if fields.insert(name.clone(), value).is_some() {
+                                    return Err(SqlError::Syntax(format!("duplicate column {name}")));
+                                }
+                            }
+                            let row = table.columns.iter().map(|column| {
+                                let lit = fields.remove(&column.name)
+                                    .ok_or_else(|| SqlError::Resolution("missing column".into()))?;
+                                coerce(&lit, column)
+                            }).collect::<SqlResult<Vec<_>>>()?;
+                            rows.push(row);
                         }
-                        tx.insert(table.id, &row)?;
-                        // ADR 0147 rows + ADR 0149 bytes.
+                        let mut unique_pool: Vec<Vec<_>> = if !table.unique_keys.is_empty() {
+                            tx.scan(table.id)?
+                        } else { Vec::new() };
+                        let mut inserted: u64 = 0;
+                        let mut inserted_bytes: u64 = 0;
+                        for row in rows {
+                            crate::sql::check_row(&table, &row)?;
+                            crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
+                            if !table.unique_keys.is_empty() {
+                                crate::unique_check::UniqueConstraintChecker::new(&table)
+                                    .check(&row, unique_pool.iter().cloned())?;
+                            }
+                            inserted_bytes += crate::query_budget::row_bytes(&row);
+                            tx.insert(table.id, &row)?;
+                            inserted += 1;
+                            if !table.unique_keys.is_empty() {
+                                unique_pool.push(row);
+                            }
+                        }
                         if let Some(b) = self.budget.as_mut() {
-                            b.charge_rows(1)?;
-                            b.charge_bytes(crate::query_budget::row_bytes(&row))?;
+                            b.charge_rows(inserted)?;
+                            b.charge_bytes(inserted_bytes)?;
                         }
-                        Ok(SqlResultSet::Command { affected: 1 })
+                        Ok(SqlResultSet::Command { affected: inserted })
                     }
                     "select" => {
                         // ADR 0146 — deadline check before scan.

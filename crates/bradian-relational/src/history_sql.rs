@@ -737,51 +737,65 @@ impl<'a> HistorySqlSession<'a> {
                         let table = self.engine.resolve(&p.name()?)?;
                         let names = p.list(|parser| parser.word())?;
                         p.expect("values")?;
-                        let values = p.list(|parser| parser.insert_literal())?;
+                        // ADR 0220 — accept one or more tuples.
+                        let mut tuples: Vec<Vec<Literal>> = Vec::new();
+                        loop {
+                            tuples.push(p.list(|parser| parser.insert_literal())?);
+                            if !p.consume_symbol(',') { break; }
+                        }
                         p.end()?;
-                        if names.len() != values.len() {
-                            return Err(SqlError::Syntax("INSERT column and value counts differ".into()));
-                        }
-                        let mut fields = BTreeMap::new();
-                        for (name, value) in names.into_iter().zip(values) {
-                            locate(&table, &name)?;
-                            if fields.insert(name.clone(), value).is_some() {
-                                return Err(SqlError::Syntax(format!("duplicate column {name}")));
+                        for lits in &tuples {
+                            if lits.len() != names.len() {
+                                return Err(SqlError::Syntax(
+                                    "INSERT column and value counts differ".into()));
                             }
                         }
-                        let row = table.columns.iter().map(|column| {
-                            match fields.remove(&column.name) {
-                                Some(lit) if !matches!(lit, Literal::Default) => coerce(&lit, column),
-                                _ => match table.column_defaults.get(&column.name) {
-                                    Some(value) => Ok(value.clone()),
-                                    None if column.nullable => Ok(crate::typed_table::Value::Null),
-                                    None => Err(SqlError::Type(format!("missing NOT NULL column {}", column.name))),
-                                },
+                        let mut rows: Vec<Vec<crate::typed_table::Value>> = Vec::with_capacity(tuples.len());
+                        for lits in tuples {
+                            let mut fields = BTreeMap::new();
+                            for (name, value) in names.iter().cloned().zip(lits) {
+                                locate(&table, &name)?;
+                                if fields.insert(name.clone(), value).is_some() {
+                                    return Err(SqlError::Syntax(format!("duplicate column {name}")));
+                                }
                             }
-                        }).collect::<SqlResult<Vec<_>>>()?;
-                        // ADR 0182 — per-column CHECK.
-                        crate::sql::check_row(&table, &row)?;
-                        // ADR 0187 — FK parent-exists through
-                        // the active historical transaction.
-                        crate::sql::fk_check_child_row_tx(
-                            &self.engine.catalog, &table, &row, tx)?;
-                        // ADR 0179 — UNIQUE enforcement at historical
-                        // INSERT mirrors ADR 0176/0178. `tx.scan`
-                        // reads current (post-retention-floor) rows
-                        // under the active transaction; historical
-                        // AS OF reads are not affected.
-                        if !table.unique_keys.is_empty() {
-                            let existing = tx.scan(table.id)?;
-                            crate::unique_check::UniqueConstraintChecker::new(&table)
-                                .check(&row, existing)?;
+                            let row = table.columns.iter().map(|column| {
+                                match fields.remove(&column.name) {
+                                    Some(lit) if !matches!(lit, Literal::Default) => coerce(&lit, column),
+                                    _ => match table.column_defaults.get(&column.name) {
+                                        Some(value) => Ok(value.clone()),
+                                        None if column.nullable => Ok(crate::typed_table::Value::Null),
+                                        None => Err(SqlError::Type(format!(
+                                            "missing NOT NULL column {}", column.name))),
+                                    },
+                                }
+                            }).collect::<SqlResult<Vec<_>>>()?;
+                            rows.push(row);
                         }
-                        tx.insert(table.id, &row)?;
-                        // ADR 0147 rows + ADR 0149 bytes.
+                        let mut unique_pool: Vec<Vec<_>> = if !table.unique_keys.is_empty() {
+                            tx.scan(table.id)?
+                        } else { Vec::new() };
+                        let mut inserted: u64 = 0;
+                        let mut inserted_bytes: u64 = 0;
+                        for row in rows {
+                            crate::sql::check_row(&table, &row)?;
+                            crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
+                            if !table.unique_keys.is_empty() {
+                                crate::unique_check::UniqueConstraintChecker::new(&table)
+                                    .check(&row, unique_pool.iter().cloned())?;
+                            }
+                            inserted_bytes += crate::query_budget::row_bytes(&row);
+                            tx.insert(table.id, &row)?;
+                            inserted += 1;
+                            if !table.unique_keys.is_empty() {
+                                unique_pool.push(row);
+                            }
+                        }
                         if let Some(b) = self.budget.as_mut() {
-                            b.charge_rows(1)?;
-                            b.charge_bytes(crate::query_budget::row_bytes(&row))?;
+                            b.charge_rows(inserted)?;
+                            b.charge_bytes(inserted_bytes)?;
                         }
-                        Ok(SqlResultSet::Command { affected: 1 })
+                        Ok(SqlResultSet::Command { affected: inserted })
                     }
                     "select" => {
                         self.control.check()?;

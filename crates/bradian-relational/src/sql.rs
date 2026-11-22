@@ -3384,55 +3384,83 @@ impl SqlEngine {
                 let table = self.resolve(&name)?;
                 let names = p.list(|parser| parser.word())?;
                 p.expect("values")?;
-                let literals = p.list(|parser| parser.literal())?;
+                // ADR 0220 — accept one or more comma-separated
+                // `(lit, lit, …)` tuples. Each tuple must match
+                // the column list.
+                let mut tuples: Vec<Vec<Literal>> = Vec::new();
+                loop {
+                    tuples.push(p.list(|parser| parser.literal())?);
+                    if !p.consume_symbol(',') { break; }
+                }
                 p.end()?;
-                if names.len() != literals.len() || names.len() != table.columns.len() {
-                    return Err(SqlError::Unsupported("INSERT must list all table columns once".into()));
+                if names.len() != table.columns.len() {
+                    return Err(SqlError::Unsupported(
+                        "INSERT must list all table columns once".into()));
                 }
-                let mut fields = BTreeMap::new();
-                for (field, lit) in names.into_iter().zip(literals) {
-                    if fields.insert(field.clone(), lit).is_some() {
-                        return Err(SqlError::Syntax(format!("repeated INSERT column {field}")));
+                for lits in &tuples {
+                    if lits.len() != names.len() {
+                        return Err(SqlError::Unsupported(
+                            "every INSERT VALUES tuple must match the column list".into()));
                     }
-                    locate(&table, &field)?;
                 }
-                let values = table.columns.iter().map(|column| {
-                    let literal = fields.remove(&column.name)
-                        .ok_or_else(|| SqlError::Resolution(format!("missing column {}", column.name)))?;
-                    coerce(&literal, column)
-                }).collect::<SqlResult<Vec<_>>>()?;
-                // ADR 0151 — preflight the budget BEFORE touching
-                // storage. The base SqlEngine has no transaction
-                // wrapping, so a post-mutation charge would leave
-                // the row committed on budget breach.
-                let row_bytes = crate::query_budget::row_bytes(&values);
-                if let Some(b) = budget.as_deref() { b.preview_charge(1, row_bytes)?; }
+                // Build and coerce every candidate row before
+                // touching storage so a bad literal in tuple #17
+                // does not leave rows #1..#16 committed.
+                let mut rows: Vec<Vec<Value>> = Vec::with_capacity(tuples.len());
+                for lits in tuples {
+                    let mut fields = BTreeMap::new();
+                    for (field, lit) in names.iter().cloned().zip(lits) {
+                        if fields.insert(field.clone(), lit).is_some() {
+                            return Err(SqlError::Syntax(
+                                format!("repeated INSERT column {field}")));
+                        }
+                        locate(&table, &field)?;
+                    }
+                    let values = table.columns.iter().map(|column| {
+                        let literal = fields.remove(&column.name)
+                            .ok_or_else(|| SqlError::Resolution(format!(
+                                "missing column {}", column.name)))?;
+                        coerce(&literal, column)
+                    }).collect::<SqlResult<Vec<_>>>()?;
+                    rows.push(values);
+                }
+                // ADR 0151 — preflight the whole batch before
+                // touching storage.
+                let batch_bytes: u64 = rows.iter()
+                    .map(|r| crate::query_budget::row_bytes(r))
+                    .sum();
+                if let Some(b) = budget.as_deref() {
+                    b.preview_charge(rows.len() as u64, batch_bytes)?;
+                }
                 let store = self.table_store(&table)?;
-                // ADR 0182 — evaluate per-column CHECK predicates
-                // against the candidate row. No-op when
-                // table.column_checks is empty.
-                check_row(&table, &values)?;
-                // ADR 0184 — FOREIGN KEY parent-exists check
-                // for every FK on this table. No-op when
-                // table.foreign_keys is empty.
-                foreign_key_check(self, &table, &values)?;
-                // ADR 0176 — enforce table-level UNIQUE before
-                // insert. Scans all existing rows; honest O(N)
-                // cost per INSERT until a disk-backed secondary
-                // index (ADR 0096 follow-up) lands. No-op when
-                // table.unique_keys is empty.
-                if !table.unique_keys.is_empty() {
-                    let existing = store.scan()?;
-                    crate::unique_check::UniqueConstraintChecker::new(&table)
-                        .check(&values, existing)?;
+                // ADR 0184 — pre-materialize the current store
+                // for UNIQUE checks so later rows see earlier
+                // ones in the same batch.
+                let mut unique_pool: Vec<Vec<Value>> = if !table.unique_keys.is_empty() {
+                    store.scan()?
+                } else { Vec::new() };
+                let mut inserted: u64 = 0;
+                let mut inserted_bytes: u64 = 0;
+                for values in rows {
+                    check_row(&table, &values)?;
+                    foreign_key_check(self, &table, &values)?;
+                    if !table.unique_keys.is_empty() {
+                        crate::unique_check::UniqueConstraintChecker::new(&table)
+                            .check(&values, unique_pool.iter().cloned())?;
+                    }
+                    let row_bytes = crate::query_budget::row_bytes(&values);
+                    store.insert(&values)?;
+                    inserted += 1;
+                    inserted_bytes += row_bytes;
+                    if !table.unique_keys.is_empty() {
+                        unique_pool.push(values);
+                    }
                 }
-                store.insert(&values)?;
-                // Commit the charge — guaranteed not to breach.
                 if let Some(b) = budget.as_mut() {
-                    b.charge_rows(1)?;
-                    b.charge_bytes(row_bytes)?;
+                    b.charge_rows(inserted)?;
+                    b.charge_bytes(inserted_bytes)?;
                 }
-                Ok(SqlResultSet::Command { affected: 1 })
+                Ok(SqlResultSet::Command { affected: inserted })
             }
             "select" => {
                 control.check()?;
