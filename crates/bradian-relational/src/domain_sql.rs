@@ -426,7 +426,7 @@ impl<'a> DomainSqlSession<'a> {
                         let rows: Vec<Vec<_>> = match &where_clause {
                             Some(crate::sql::SelectWhere::KeyPredicate(key)) =>
                                 tx.get(table.id, key)?.into_iter().collect(),
-                            Some(crate::sql::SelectWhere::JsonPathEquality { .. }) =>
+                            Some(crate::sql::SelectWhere::JsonPathPredicate { .. }) =>
                                 tx.scan(table.id)?,
                             None => tx.scan(table.id)?,
                         };
@@ -454,8 +454,8 @@ impl<'a> DomainSqlSession<'a> {
                         } else { rows };
                         // ADR 0190 — post-scan JSON-path filter.
                         let rows = match &where_clause {
-                            Some(crate::sql::SelectWhere::JsonPathEquality { projection, literal }) =>
-                                crate::sql::apply_where_filter(rows, &table, projection, literal)?,
+                            Some(crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal }) =>
+                                crate::sql::apply_where_filter(rows, &table, projection, *op, literal)?,
                             _ => rows,
                         };
                         let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();

@@ -947,14 +947,18 @@ fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
     Ok(out)
 }
 
-/// ADR 0190 — SELECT WHERE clause shape: either the existing
-/// PK equality list (fastest — `tx.get` / `store.get` via PK)
-/// or a JSON-path equality predicate that requires a full
-/// scan + per-row filter.
+/// ADR 0190 / ADR 0195 — SELECT WHERE clause shape. PK
+/// equality uses the fast-lookup path; a JSON-path predicate
+/// (equality or any ordering comparison) runs a full scan
+/// with a per-row filter.
 #[derive(Clone, Debug)]
 pub(crate) enum SelectWhere {
     KeyPredicate(Vec<Value>),
-    JsonPathEquality { projection: Projection, literal: Value },
+    JsonPathPredicate {
+        projection: Projection,
+        op: crate::model::CheckOp,
+        literal: Value,
+    },
 }
 
 /// ADR 0190 — parse the full WHERE clause for a SELECT. The
@@ -978,15 +982,15 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
         let projection = parse_projection_tail(p, column_name)?;
         // Locate the base column to validate it exists.
         locate(table, projection.source_column())?;
-        p.symbol('=')?;
+        // ADR 0195 — accept `=`, `<>`, `<`, `<=`, `>`, `>=`.
+        // Reuses the CHECK operator parser (ADR 0182).
+        let op = p.word_or_symbol_pair_for_check()?;
         let literal = p.literal()?;
-        // Coerce literal to a Value. `->>` compares against
-        // TEXT; `->` compares against JSON (serialized form).
         let value = match &projection {
             Projection::Column(_) => unreachable!("json path has non-empty chain"),
             Projection::JsonPath { as_text, .. } => coerce_where_literal(&literal, *as_text)?,
         };
-        Ok(SelectWhere::JsonPathEquality { projection, literal: value })
+        Ok(SelectWhere::JsonPathPredicate { projection, op, literal: value })
     } else {
         // Rewind and dispatch to the existing PK grammar.
         p.restore_pos(saved);
@@ -1054,12 +1058,17 @@ fn coerce_where_literal(lit: &Literal, as_text: bool) -> SqlResult<Value> {
     }
 }
 
-/// ADR 0190 — filter a row slice against a JSON-path equality
-/// predicate. Returns rows whose projected value equals the
-/// supplied literal. NULL on either side never matches
-/// (SQL three-valued logic — equality with NULL is UNKNOWN).
+/// ADR 0190 + ADR 0195 — filter a row slice against a
+/// JSON-path comparison predicate. Returns rows whose
+/// projected value satisfies `op` against `literal`. NULL on
+/// either side never matches (SQL three-valued logic — a
+/// comparison with NULL is UNKNOWN, treated as not-true).
 pub(crate) fn apply_where_filter(
-    rows: Vec<Vec<Value>>, table: &Table, projection: &Projection, literal: &Value,
+    rows: Vec<Vec<Value>>,
+    table: &Table,
+    projection: &Projection,
+    op: crate::model::CheckOp,
+    literal: &Value,
 ) -> SqlResult<Vec<Vec<Value>>> {
     let position = locate(table, projection.source_column())?;
     let mut kept = Vec::with_capacity(rows.len());
@@ -1068,7 +1077,16 @@ pub(crate) fn apply_where_filter(
         if matches!(extracted, Value::Null) || matches!(literal, Value::Null) {
             continue;
         }
-        if extracted == *literal { kept.push(row); }
+        let ord = compare_values_for_check(&extracted, literal);
+        let satisfied = match op {
+            crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+            crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+            crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+            crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+            crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+            crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+        };
+        if satisfied { kept.push(row); }
     }
     Ok(kept)
 }
@@ -2133,7 +2151,7 @@ impl SqlEngine {
                 let all = match &where_clause {
                     Some(SelectWhere::KeyPredicate(key)) =>
                         store.get(key)?.into_iter().collect::<Vec<_>>(),
-                    Some(SelectWhere::JsonPathEquality { .. }) =>
+                    Some(SelectWhere::JsonPathPredicate { .. }) =>
                         store.scan_with_control(control)?,
                     None => store.scan_with_control(control)?,
                 };
@@ -2160,8 +2178,8 @@ impl SqlEngine {
                 } else { all };
                 // ADR 0190 — post-scan filter for JSON-path WHERE.
                 let all = match &where_clause {
-                    Some(SelectWhere::JsonPathEquality { projection, literal }) =>
-                        apply_where_filter(all, &table, projection, literal)?,
+                    Some(SelectWhere::JsonPathPredicate { projection, op, literal }) =>
+                        apply_where_filter(all, &table, projection, *op, literal)?,
                     _ => all,
                 };
                 let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;

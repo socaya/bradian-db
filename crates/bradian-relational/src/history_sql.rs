@@ -855,7 +855,7 @@ impl<'a> HistorySqlSession<'a> {
                                     .into_iter().collect(),
                                 None => tx.get(table.id, key)?.into_iter().collect(),
                             },
-                            Some(crate::sql::SelectWhere::JsonPathEquality { .. }) => match as_of {
+                            Some(crate::sql::SelectWhere::JsonPathPredicate { .. }) => match as_of {
                                 Some(lsn) => self.engine.domain.scan_as_of_with_control(table.id, lsn, &control)?,
                                 None => tx.scan_with_control(table.id, &control)?,
                             },
@@ -888,8 +888,8 @@ impl<'a> HistorySqlSession<'a> {
                         } else { rows };
                         // ADR 0190 — post-scan JSON-path filter.
                         let rows = match &where_clause {
-                            Some(crate::sql::SelectWhere::JsonPathEquality { projection, literal }) =>
-                                crate::sql::apply_where_filter(rows, &table, projection, literal)?,
+                            Some(crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal }) =>
+                                crate::sql::apply_where_filter(rows, &table, projection, *op, literal)?,
                             _ => rows,
                         };
                         let rows = window.apply(rows, &table)?;
