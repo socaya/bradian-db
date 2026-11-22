@@ -1257,6 +1257,43 @@ impl AggSpec {
     }
 }
 
+/// ADR 0219 — dedup a slice of row tuples using the same
+/// cross-type equality (`compare_values_for_check`) that GROUP
+/// BY and COUNT(DISTINCT) use. Preserves first-seen order for
+/// callers that then sort deterministically.
+pub(crate) fn dedup_rows(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let duplicate = out.iter().any(|existing|
+            existing.len() == row.len()
+            && existing.iter().zip(row.iter()).all(|(a, b)|
+                compare_values_for_check(a, b) == std::cmp::Ordering::Equal));
+        if !duplicate { out.push(row); }
+    }
+    out
+}
+
+/// ADR 0219 — sort the deduped DISTINCT output in ascending
+/// row-tuple order so callers get deterministic results without
+/// writing ORDER BY. NULL sorts last at each position, matching
+/// the GROUP BY convention from ADR 0217.
+pub(crate) fn sort_distinct_output(rows: &mut [Vec<Value>]) {
+    rows.sort_by(|a, b| {
+        for (lhs, rhs) in a.iter().zip(b.iter()) {
+            match (lhs, rhs) {
+                (Value::Null, Value::Null) => continue,
+                (Value::Null, _) => return std::cmp::Ordering::Greater,
+                (_, Value::Null) => return std::cmp::Ordering::Less,
+                (l, r) => {
+                    let ord = compare_values_for_check(l, r);
+                    if ord != std::cmp::Ordering::Equal { return ord; }
+                }
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
 /// ADR 0217 — one element of a SELECT list. A plain column
 /// projection (ADR 0186+), or a scalar aggregate.
 #[derive(Clone, Debug)]
@@ -2743,6 +2780,14 @@ pub(crate) fn check_row(table: &Table, row: &[Value]) -> SqlResult<()> {
 
 fn compare_values_for_check(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
+        // ADR 0219 — DISTINCT / GROUP BY / COUNT(DISTINCT)
+        // treat two NULLs as equal but NULL and any concrete
+        // value as distinct. Scalar WHERE / IN / BETWEEN
+        // short-circuit NULL above this layer, so promoting
+        // NULL to a dedicated branch does not disturb them.
+        (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+        (Value::Null, _) => std::cmp::Ordering::Less,
+        (_, Value::Null) => std::cmp::Ordering::Greater,
         (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
@@ -3393,6 +3438,13 @@ impl SqlEngine {
                 control.check()?;
                 // ADR 0144 — deadline check before scan.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
+                // ADR 0219 — SELECT DISTINCT dedups the projected
+                // output tuple. Rejects composition with aggregates,
+                // GROUP BY / HAVING, or ORDER BY / LIMIT / OFFSET
+                // for the MVP (each of those is a separate slice
+                // waiting on a result-shape model that survives the
+                // dedup + ordering pipeline interaction).
+                let distinct = p.consume_word("distinct");
                 // ADR 0213/0214/0217 — projection list accepts
                 // bare columns, JSON paths, and scalar aggregates.
                 // Scalar-only aggregate shapes short-circuit later;
@@ -3459,6 +3511,12 @@ impl SqlEngine {
                 // ORDER BY / LIMIT / OFFSET.
                 let group_keys = parse_group_by(&mut p, &table)?;
                 let having = parse_having(&mut p, &table, &group_keys)?;
+                // ADR 0219 — DISTINCT is orthogonal to the
+                // grouping / aggregation pipeline.
+                if distinct && (any_aggregate || !group_keys.is_empty()) {
+                    return Err(SqlError::Unsupported(
+                        "DISTINCT cannot be combined with aggregates or GROUP BY".into()));
+                }
                 // ADR 0217 — require every bare projection to be
                 // a listed group key when grouping is active.
                 if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
@@ -3558,6 +3616,14 @@ impl SqlEngine {
                     row.into_iter().zip(&plain_projections).map(|(value, pj)| apply_projection(pj, value))
                         .collect::<SqlResult<Vec<Value>>>()
                 ).collect::<SqlResult<Vec<Vec<Value>>>>()?;
+                // ADR 0219 — DISTINCT dedups output tuples using
+                // the cross-type equality rule, then sorts for
+                // deterministic emission.
+                let rows = if distinct {
+                    let mut out = dedup_rows(rows);
+                    sort_distinct_output(&mut out);
+                    out
+                } else { rows };
                 let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
                 Ok(SqlResultSet::Rows { columns, rows })
             }

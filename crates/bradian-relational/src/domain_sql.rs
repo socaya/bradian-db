@@ -383,6 +383,8 @@ impl<'a> DomainSqlSession<'a> {
                         // `col` and `col -> 'key'` / `col ->> 'key'`
                         // JSON path extractions, mirroring ADR 0186
                         // for SqlEngine.
+                        // ADR 0219 — SELECT DISTINCT dedups output.
+                        let distinct = p.consume_word("distinct");
                         // ADR 0213/0214/0217 — projection list may
                         // mix bare columns and aggregates.
                         let caller_wildcard = p.consume_symbol('*');
@@ -438,6 +440,11 @@ impl<'a> DomainSqlSession<'a> {
                         // ADR 0217 — GROUP BY between WHERE and ORDER BY.
                         let group_keys = crate::sql::parse_group_by(&mut p, &table)?;
                         let having = crate::sql::parse_having(&mut p, &table, &group_keys)?;
+                        // ADR 0219 — orthogonal to grouping.
+                        if distinct && (any_aggregate || !group_keys.is_empty()) {
+                            return Err(SqlError::Unsupported(
+                                "DISTINCT cannot be combined with aggregates or GROUP BY".into()));
+                        }
                         if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
                             if group_keys.is_empty() {
                                 return Err(SqlError::Unsupported(
@@ -513,14 +520,18 @@ impl<'a> DomainSqlSession<'a> {
                         // ADR 0212 — apply ordering + window.
                         let rows = window.apply(rows, &table)?;
                         let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
-                        Ok(SqlResultSet::Rows {
-                            columns,
-                            rows: rows.into_iter().map(|row: Vec<_>|
-                                positions.iter().zip(&plain_projections).map(|(pos, pj)|
-                                    crate::sql::apply_projection(pj, row[*pos].clone())
-                                ).collect::<SqlResult<Vec<_>>>()
-                            ).collect::<SqlResult<Vec<Vec<_>>>>()?,
-                        })
+                        let projected: Vec<Vec<_>> = rows.into_iter().map(|row: Vec<_>|
+                            positions.iter().zip(&plain_projections).map(|(pos, pj)|
+                                crate::sql::apply_projection(pj, row[*pos].clone())
+                            ).collect::<SqlResult<Vec<_>>>()
+                        ).collect::<SqlResult<Vec<Vec<_>>>>()?;
+                        // ADR 0219 — dedup + sort output.
+                        let projected = if distinct {
+                            let mut out = crate::sql::dedup_rows(projected);
+                            crate::sql::sort_distinct_output(&mut out);
+                            out
+                        } else { projected };
+                        Ok(SqlResultSet::Rows { columns, rows: projected })
                     }
                     "update" => {
                         // ADR 0147 — deadline check before mutation.

@@ -788,6 +788,8 @@ impl<'a> HistorySqlSession<'a> {
                         // ADR 0143 — deadline check before scan.
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         // ADR 0188 — JSON path projections in SELECT.
+                        // ADR 0219 — SELECT DISTINCT dedups output.
+                        let distinct = p.consume_word("distinct");
                         // ADR 0213/0214/0217 — projection list may mix.
                         let caller_wildcard = p.consume_symbol('*');
                         let requested_items: Option<Vec<crate::sql::SelectItem>> = if caller_wildcard { None } else {
@@ -849,6 +851,10 @@ impl<'a> HistorySqlSession<'a> {
                         // ADR 0217 — GROUP BY between WHERE and ORDER BY.
                         let group_keys = crate::sql::parse_group_by(&mut p, &table)?;
                         let having = crate::sql::parse_having(&mut p, &table, &group_keys)?;
+                        if distinct && (any_aggregate || !group_keys.is_empty()) {
+                            return Err(SqlError::Unsupported(
+                                "DISTINCT cannot be combined with aggregates or GROUP BY".into()));
+                        }
                         if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
                             if group_keys.is_empty() {
                                 return Err(SqlError::Unsupported(
@@ -942,6 +948,12 @@ impl<'a> HistorySqlSession<'a> {
                                 crate::sql::apply_projection(pj, value)
                             ).collect::<SqlResult<Vec<_>>>()
                         ).collect::<SqlResult<Vec<Vec<_>>>>()?;
+                        // ADR 0219 — dedup + sort output.
+                        let rows = if distinct {
+                            let mut out = crate::sql::dedup_rows(rows);
+                            crate::sql::sort_distinct_output(&mut out);
+                            out
+                        } else { rows };
                         let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
                         Ok(SqlResultSet::Rows { columns, rows })
                     }
