@@ -1283,6 +1283,54 @@ pub(crate) fn parse_select_item(p: &mut Parser) -> SqlResult<SelectItem> {
     Ok(SelectItem::Column(parse_projection(p)?))
 }
 
+/// ADR 0218 — HAVING clause: a single comparison over a group
+/// key or a scalar aggregate. No AND / OR for the MVP.
+#[derive(Clone, Debug)]
+pub(crate) struct HavingClause {
+    pub(crate) term: HavingTerm,
+    pub(crate) op: crate::model::CheckOp,
+    pub(crate) literal: Literal,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum HavingTerm {
+    GroupKey(String),
+    Aggregate(AggSpec),
+}
+
+/// ADR 0218 — parse `HAVING term op literal` after GROUP BY.
+/// Returns `None` when HAVING is absent. `term` is either an
+/// aggregate call (COUNT(*), SUM(col), …) or a bare column
+/// that must appear in `group_keys`.
+pub(crate) fn parse_having(
+    p: &mut Parser, table: &Table, group_keys: &[String],
+) -> SqlResult<Option<HavingClause>> {
+    if !p.consume_word("having") { return Ok(None); }
+    if group_keys.is_empty() {
+        return Err(SqlError::Unsupported(
+            "HAVING requires a GROUP BY clause".into()));
+    }
+    let term = if let Some(spec) = consume_aggregate(p)? {
+        if let AggSpec::Min(c) | AggSpec::Max(c) | AggSpec::Sum(c) | AggSpec::Avg(c)
+            | AggSpec::CountCol(c) | AggSpec::CountDistinct(c) = &spec
+        {
+            locate(table, c)?;
+        }
+        HavingTerm::Aggregate(spec)
+    } else {
+        let name = p.word()?;
+        if !group_keys.iter().any(|k| k == &name) {
+            return Err(SqlError::Unsupported(
+                "HAVING column must appear in GROUP BY or be an aggregate".into()));
+        }
+        locate(table, &name)?;
+        HavingTerm::GroupKey(name)
+    };
+    let op = p.word_or_symbol_pair_for_check()?;
+    let literal = p.literal()?;
+    Ok(Some(HavingClause { term, op, literal }))
+}
+
 /// ADR 0217 — parse `GROUP BY col [, col]...` after the WHERE
 /// clause. Returns an empty vec when GROUP BY is absent. Each
 /// group key must resolve to a plain table column (no
@@ -1318,6 +1366,7 @@ pub(crate) fn evaluate_grouped(
     rows: Vec<Vec<Value>>,
     group_keys: &[String],
     items: &[SelectItem],
+    having: Option<&HavingClause>,
 ) -> SqlResult<SqlResultSet> {
     const MAX_GROUPS: usize = 10_000;
     let key_positions: Vec<usize> = group_keys.iter()
@@ -1360,6 +1409,46 @@ pub(crate) fn evaluate_grouped(
     let columns: Vec<String> = items.iter().map(|item| item.label()).collect();
     let mut output_rows: Vec<Vec<Value>> = Vec::with_capacity(buckets.len());
     for (key, bucket_rows) in &buckets {
+        // ADR 0218 — HAVING filter runs per bucket before the
+        // output row is materialized.
+        if let Some(h) = having {
+            let left = match &h.term {
+                HavingTerm::GroupKey(name) => {
+                    let idx = group_keys.iter().position(|k| k == name)
+                        .expect("HAVING key validated");
+                    key[idx].clone()
+                }
+                HavingTerm::Aggregate(spec) =>
+                    evaluate_aggregate(spec, table, bucket_rows)?,
+            };
+            // Coerce the literal against the bucket value's
+            // declared representation: numeric literals pass
+            // through as-is for cross-type `compare_values_for_check`.
+            let right = match (&left, &h.literal) {
+                (_, Literal::Null) => Value::Null,
+                (_, Literal::Text(s)) => Value::String(s.clone()),
+                (_, Literal::Number(s)) =>
+                    if let Ok(n) = s.parse::<i64>() { Value::Int64(n) }
+                    else { return Err(SqlError::Type(
+                        "HAVING numeric literal is not a valid Int64".into())); },
+                (_, Literal::Bool(b)) => Value::Boolean(*b),
+                (_, Literal::Default) => return Err(SqlError::Syntax(
+                    "DEFAULT is not a HAVING literal".into())),
+            };
+            if matches!(left, Value::Null) || matches!(right, Value::Null) {
+                continue;
+            }
+            let ord = compare_values_for_check(&left, &right);
+            let keep = match h.op {
+                crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+            };
+            if !keep { continue; }
+        }
         let mut out = Vec::with_capacity(items.len());
         for item in items {
             match item {
@@ -3369,6 +3458,7 @@ impl SqlEngine {
                 // ADR 0217 — GROUP BY, parsed between WHERE and
                 // ORDER BY / LIMIT / OFFSET.
                 let group_keys = parse_group_by(&mut p, &table)?;
+                let having = parse_having(&mut p, &table, &group_keys)?;
                 // ADR 0217 — require every bare projection to be
                 // a listed group key when grouping is active.
                 if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
@@ -3454,7 +3544,7 @@ impl SqlEngine {
                 // OFFSET parse but are discarded (results are
                 // emitted sorted by group key).
                 if !group_keys.is_empty() {
-                    return evaluate_grouped(&table, all, &group_keys, &select_items);
+                    return evaluate_grouped(&table, all, &group_keys, &select_items, having.as_ref());
                 }
                 // ADR 0212 — apply ORDER BY / LIMIT / OFFSET
                 // before projection so sort keys can reference

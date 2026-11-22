@@ -437,6 +437,7 @@ impl<'a> DomainSqlSession<'a> {
                         } else { None };
                         // ADR 0217 — GROUP BY between WHERE and ORDER BY.
                         let group_keys = crate::sql::parse_group_by(&mut p, &table)?;
+                        let having = crate::sql::parse_having(&mut p, &table, &group_keys)?;
                         if !group_keys.is_empty() || (any_aggregate && scalar_aggregate.is_none()) {
                             if group_keys.is_empty() {
                                 return Err(SqlError::Unsupported(
@@ -507,7 +508,7 @@ impl<'a> DomainSqlSession<'a> {
                         }
                         // ADR 0217 — grouped evaluation.
                         if !group_keys.is_empty() {
-                            return crate::sql::evaluate_grouped(&table, rows, &group_keys, &select_items);
+                            return crate::sql::evaluate_grouped(&table, rows, &group_keys, &select_items, having.as_ref());
                         }
                         // ADR 0212 — apply ordering + window.
                         let rows = window.apply(rows, &table)?;
