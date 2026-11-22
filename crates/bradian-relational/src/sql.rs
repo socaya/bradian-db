@@ -1223,21 +1223,140 @@ impl Projection {
     }
 }
 
-/// ADR 0213 — recognize `COUNT ( * )` at the head of a SELECT.
-/// Returns true after consuming all three tokens; returns false
-/// without advancing the parser if the next token is not `COUNT`.
-/// A `COUNT` not followed by `( * )` is a parse error (reserved
-/// shape, preserves room for `COUNT(col)` / `COUNT(DISTINCT …)`
-/// later).
-pub(crate) fn consume_count_star(p: &mut Parser) -> SqlResult<bool> {
-    if !p.consume_word("count") { return Ok(false); }
-    p.symbol('(')?;
-    if !p.consume_symbol('*') {
-        return Err(SqlError::Unsupported(
-            "only COUNT(*) is supported today; COUNT(col) / DISTINCT reserved".into()));
+/// ADR 0213 + ADR 0214 — scalar aggregate at the head of a
+/// SELECT. `COUNT(*)` counts filtered rows; `MIN(col)`,
+/// `MAX(col)`, `SUM(col)` iterate the filtered scan and
+/// accumulate. Each aggregate owns the whole projection list.
+#[derive(Clone, Debug)]
+pub(crate) enum AggSpec {
+    CountStar,
+    Min(String),
+    Max(String),
+    Sum(String),
+}
+
+impl AggSpec {
+    pub(crate) fn result_column(&self) -> &'static str {
+        match self {
+            AggSpec::CountStar => "count",
+            AggSpec::Min(_) => "min",
+            AggSpec::Max(_) => "max",
+            AggSpec::Sum(_) => "sum",
+        }
     }
-    p.symbol(')')?;
-    Ok(true)
+}
+
+/// Recognize `COUNT(*)`, `MIN(col)`, `MAX(col)`, or `SUM(col)`
+/// at the head of a SELECT. Returns `Some(spec)` after
+/// consuming the tokens; returns `None` without advancing the
+/// parser if the next token is not an aggregate keyword.
+pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
+    let agg = if p.consume_word("count") {
+        p.symbol('(')?;
+        if !p.consume_symbol('*') {
+            return Err(SqlError::Unsupported(
+                "only COUNT(*) is supported today; COUNT(col) / DISTINCT reserved".into()));
+        }
+        p.symbol(')')?;
+        AggSpec::CountStar
+    } else if p.consume_word("min") {
+        p.symbol('(')?;
+        let column = p.word()?;
+        p.symbol(')')?;
+        AggSpec::Min(column)
+    } else if p.consume_word("max") {
+        p.symbol('(')?;
+        let column = p.word()?;
+        p.symbol(')')?;
+        AggSpec::Max(column)
+    } else if p.consume_word("sum") {
+        p.symbol('(')?;
+        let column = p.word()?;
+        p.symbol(')')?;
+        AggSpec::Sum(column)
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(agg))
+}
+
+/// ADR 0214 — evaluate a non-COUNT aggregate against filtered
+/// rows. Returns a single-row result or NULL when every
+/// non-missing value is NULL. Non-numeric SUM targets are
+/// rejected with `SqlError::Type`.
+pub(crate) fn evaluate_aggregate(
+    spec: &AggSpec, table: &Table, rows: &[Vec<Value>],
+) -> SqlResult<Value> {
+    match spec {
+        AggSpec::CountStar => Ok(Value::Int64(rows.len() as i64)),
+        AggSpec::Min(column) => {
+            let position = locate(table, column)?;
+            let mut best: Option<Value> = None;
+            for row in rows {
+                let v = &row[position];
+                if matches!(v, Value::Null) { continue; }
+                best = Some(match best {
+                    None => v.clone(),
+                    Some(cur) =>
+                        if compare_values_for_check(v, &cur) == std::cmp::Ordering::Less
+                            { v.clone() } else { cur },
+                });
+            }
+            Ok(best.unwrap_or(Value::Null))
+        }
+        AggSpec::Max(column) => {
+            let position = locate(table, column)?;
+            let mut best: Option<Value> = None;
+            for row in rows {
+                let v = &row[position];
+                if matches!(v, Value::Null) { continue; }
+                best = Some(match best {
+                    None => v.clone(),
+                    Some(cur) =>
+                        if compare_values_for_check(v, &cur) == std::cmp::Ordering::Greater
+                            { v.clone() } else { cur },
+                });
+            }
+            Ok(best.unwrap_or(Value::Null))
+        }
+        AggSpec::Sum(column) => {
+            let position = locate(table, column)?;
+            let col = &table.columns[position];
+            match col.data_type {
+                DataType::Int32 | DataType::Int64 | DataType::Decimal { .. } => {}
+                _ => return Err(SqlError::Type(format!(
+                    "SUM requires a numeric column; {column} is not numeric"))),
+            };
+            let mut sum: Option<i128> = None;
+            for row in rows {
+                let add = match row[position] {
+                    Value::Null => continue,
+                    Value::Int32(n) => i128::from(n),
+                    Value::Int64(n) => i128::from(n),
+                    Value::Decimal(n) => n,
+                    _ => return Err(SqlError::Type(
+                        "SUM encountered a non-numeric value".into())),
+                };
+                sum = Some(match sum {
+                    None => add,
+                    Some(cur) => cur.checked_add(add)
+                        .ok_or_else(|| SqlError::Type(
+                            "SUM overflow".into()))?,
+                });
+            }
+            Ok(match (sum, &col.data_type) {
+                (None, _) => Value::Null,
+                // ADR 0214 — SUM of integers widens to Int64;
+                // decimals preserve the column's native scale.
+                (Some(v), DataType::Int32) => Value::Int64(v.try_into().map_err(|_|
+                    SqlError::Type("SUM Int32 overflow".into()))?),
+                (Some(v), DataType::Int64) => Value::Int64(v.try_into().map_err(|_|
+                    SqlError::Type("SUM Int64 overflow".into()))?),
+                (Some(v), DataType::Decimal { .. }) => Value::Decimal(v),
+                _ => unreachable!("type check above excludes other variants"),
+            })
+        }
+    }
 }
 
 /// ADR 0186 + ADR 0189 — parse a projection: identifier,
@@ -2955,16 +3074,16 @@ impl SqlEngine {
                 control.check()?;
                 // ADR 0144 — deadline check before scan.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
-                // ADR 0213 — `SELECT COUNT(*) FROM …` short-circuits
-                // the projection list. It owns the whole SELECT
-                // output; mixing with bare columns requires GROUP
-                // BY and is deliberately deferred.
-                let count_star = consume_count_star(&mut p)?;
-                let caller_wildcard = !count_star && p.consume_symbol('*');
+                // ADR 0213 + ADR 0214 — scalar aggregate at the
+                // head of SELECT. Owns the whole projection list;
+                // GROUP BY and multi-aggregate shapes deliberately
+                // deferred.
+                let aggregate = consume_aggregate(&mut p)?;
+                let caller_wildcard = aggregate.is_none() && p.consume_symbol('*');
                 // ADR 0186 — projection list accepts bare `col`
                 // plus `col -> 'key'` / `col ->> 'key'` JSON
                 // path extractions.
-                let projections = if count_star || caller_wildcard { Vec::new() } else {
+                let projections = if aggregate.is_some() || caller_wildcard { Vec::new() } else {
                     let mut out = vec![parse_projection(&mut p)?];
                     while p.consume_symbol(',') { out.push(parse_projection(&mut p)?); }
                     out
@@ -3046,14 +3165,15 @@ impl SqlEngine {
                         apply_where_filter(all, &table, preds)?,
                     _ => all,
                 };
-                // ADR 0213 — COUNT(*) collapses the filtered scan
-                // into a single-row result. ORDER BY / LIMIT /
-                // OFFSET are discarded: counting is scalar.
-                if count_star {
-                    let total = all.len() as i64;
+                // ADR 0213 + ADR 0214 — scalar aggregate collapses
+                // the filtered scan into a single-row result.
+                // ORDER BY / LIMIT / OFFSET are discarded: scalar
+                // aggregates have no per-row ordering.
+                if let Some(spec) = aggregate {
+                    let value = evaluate_aggregate(&spec, &table, &all)?;
                     return Ok(SqlResultSet::Rows {
-                        columns: vec!["count".into()],
-                        rows: vec![vec![Value::Int64(total)]],
+                        columns: vec![spec.result_column().into()],
+                        rows: vec![vec![value]],
                     });
                 }
                 // ADR 0212 — apply ORDER BY / LIMIT / OFFSET
