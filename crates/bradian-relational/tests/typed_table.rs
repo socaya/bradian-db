@@ -115,14 +115,29 @@ fn wrong_types_nulls_decimal_bounds_and_width_are_rejected() {
 }
 
 #[test]
-fn secondary_constraints_are_not_silently_ignored() {
+fn secondary_unique_schema_is_accepted_and_pinned() {
+    // ADR 0176 / 0101 — TableStore stays schema-neutral; UNIQUE
+    // enforcement runs at the SQL-engine INSERT path via
+    // `UniqueConstraintChecker`. Open must therefore admit a
+    // table with UNIQUE keys declared and pin the exact schema
+    // on reopen. Regression guard for the old blanket rejection.
     let dir = tempdir().unwrap();
     let mut table = schema();
     table.unique_keys.push(UniqueKey {
         name: "unique_invoice_label".into(),
         columns: vec!["label".into()],
     });
-    assert!(matches!(TableStore::open(dir.path(), table), Err(TableError::Schema(_))));
+    let pinned = table.clone();
+    {
+        let store = TableStore::open(dir.path(), table).expect("open accepts UNIQUE schema");
+        store.insert(&invoice(1, "January")).unwrap();
+    }
+    // Reopen with the same schema succeeds.
+    TableStore::open(dir.path(), pinned.clone()).expect("reopen accepts matching schema");
+    // Reopen with a different UNIQUE set is rejected by schema pin.
+    let mut mutated = pinned;
+    mutated.unique_keys[0].columns.push("amount".into());
+    assert!(matches!(TableStore::open(dir.path(), mutated), Err(TableError::Schema(_))));
 }
 
 #[test]
