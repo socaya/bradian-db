@@ -1459,6 +1459,11 @@ pub(crate) enum JsonMatcher {
     In { literals: Vec<Value> },
     /// ADR 0206 — negated membership.
     NotIn { literals: Vec<Value> },
+    /// ADR 0207 — explicit NULL test. True when the extracted
+    /// value is `Value::Null`.
+    IsNull,
+    /// ADR 0207 — explicit NOT NULL test.
+    IsNotNull,
 }
 
 #[derive(Clone, Debug)]
@@ -1512,6 +1517,15 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             };
             let matcher = if p.consume_word("in") {
                 JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
+            } else if p.consume_word("is") {
+                // ADR 0207 — IS NULL / IS NOT NULL. `NOT` here
+                // belongs to the IS test; it does not flip to IN.
+                let negated = p.consume_word("not");
+                if !p.consume_word("null") {
+                    return Err(SqlError::Unsupported(
+                        "IS [NOT] NULL is the only IS-form supported for JSON paths".into()));
+                }
+                if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
             } else if p.consume_word("not") {
                 if !p.consume_word("in") {
                     return Err(SqlError::Unsupported(
@@ -1653,6 +1667,20 @@ pub(crate) fn apply_where_filter(
         |row: &[Value], group: &[JsonPredicate], positions: &[usize]| -> SqlResult<bool> {
             for (pred, position) in group.iter().zip(positions) {
                 let extracted = apply_projection(&pred.projection, row[*position].clone())?;
+                // ADR 0207 — IS [NOT] NULL evaluates NULL
+                // directly; every other matcher short-circuits
+                // on NULL-extracted under three-valued logic.
+                match &pred.matcher {
+                    JsonMatcher::IsNull => {
+                        if !matches!(extracted, Value::Null) { return Ok(false); }
+                        continue;
+                    }
+                    JsonMatcher::IsNotNull => {
+                        if matches!(extracted, Value::Null) { return Ok(false); }
+                        continue;
+                    }
+                    _ => {}
+                }
                 if matches!(extracted, Value::Null) {
                     return Ok(false);
                 }
@@ -1679,6 +1707,8 @@ pub(crate) fn apply_where_filter(
                         !matches!(lit, Value::Null)
                             && compare_values_for_check(&extracted, lit)
                                 != std::cmp::Ordering::Equal),
+                    JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
+                        unreachable!("handled above the NULL guard"),
                 };
                 if !satisfied { return Ok(false); }
             }
