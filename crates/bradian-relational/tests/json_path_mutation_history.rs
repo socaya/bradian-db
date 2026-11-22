@@ -119,3 +119,91 @@ fn history_arrow_arrow_writes_json_string() {
     }).unwrap();
     assert_eq!(body_of(&db, 1)["k"], "nine");
 }
+
+/// ADR 0201 — INSERT splice on `HistorySqlEngine` UPDATE.
+fn seed_history_with_array() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("src");
+    let history = dir.path().join("hist");
+    {
+        let ddl = SqlEngine::open(&source).unwrap();
+        for sql in [
+            "CREATE DATABASE t",
+            "CREATE SCHEMA t.public",
+            "CREATE TABLE t.public.docs (id BIGINT NOT NULL, body JSON NOT NULL, PRIMARY KEY(id))",
+        ] { ddl.execute(sql).unwrap(); }
+    }
+    {
+        let dom = DomainSqlEngine::open(&source).unwrap();
+        dom.register_catalog_table("t.public.docs").unwrap();
+        dom.with_session(|s| {
+            s.execute("BEGIN")?;
+            s.execute(r#"INSERT INTO t.public.docs(id, body) VALUES(1, '{"tags":["red","green","blue"]}')"#)?;
+            s.execute("COMMIT")?;
+            Ok(())
+        }).unwrap();
+    }
+    migrate_shared_to_history(&source, &history).unwrap();
+    (dir, history)
+}
+
+#[test]
+fn history_insert_middle_shifts_right() {
+    let (_dir, history) = seed_history_with_array();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE t.public.docs SET body -> 'tags' -> 1 INSERT 'yellow' WHERE id=1")?;
+        s.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(body_of(&db, 1)["tags"], serde_json::json!(["red", "yellow", "green", "blue"]));
+}
+
+#[test]
+fn history_insert_at_length_appends() {
+    let (_dir, history) = seed_history_with_array();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE t.public.docs SET body -> 'tags' -> 3 INSERT 'yellow' WHERE id=1")?;
+        s.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(body_of(&db, 1)["tags"], serde_json::json!(["red", "green", "blue", "yellow"]));
+}
+
+/// ADR 0203 — CONCAT on historical engine.
+#[test]
+fn history_concat_appends_array_literal() {
+    let (_dir, history) = seed_history_with_array();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    db.with_session(|s| {
+        s.execute("BEGIN")?;
+        s.execute("UPDATE t.public.docs SET body -> 'tags' CONCAT '[\"yellow\",\"black\"]' WHERE id=1")?;
+        s.execute("COMMIT")?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(
+        body_of(&db, 1)["tags"],
+        serde_json::json!(["red","green","blue","yellow","black"]),
+    );
+}
+
+#[test]
+fn history_insert_past_length_rejected() {
+    let (_dir, history) = seed_history_with_array();
+    let db = HistorySqlEngine::open(&history).unwrap();
+    let outcome = std::sync::Arc::new(std::sync::Mutex::new(Ok(())));
+    let captured = outcome.clone();
+    let _ = db.with_session(|s| {
+        s.execute("BEGIN")?;
+        match s.execute("UPDATE t.public.docs SET body -> 'tags' -> 99 INSERT 'nope' WHERE id=1") {
+            Err(e) => *captured.lock().unwrap() = Err(e),
+            Ok(_) => *captured.lock().unwrap() = Ok(()),
+        }
+        s.execute("ROLLBACK")?;
+        Ok(())
+    });
+    assert!(outcome.lock().unwrap().is_err());
+}

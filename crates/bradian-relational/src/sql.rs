@@ -516,9 +516,17 @@ impl Parser {
                 };
                 // ADR 0200 — `REMOVE` keyword after a JSON path
                 // deletes the terminal element instead of
-                // assigning.
+                // assigning. ADR 0201 — `INSERT` keyword
+                // splices the literal into an array at the
+                // terminal index.
                 if self.consume_word("remove") {
                     SetAssignment::JsonRemove { column: col, path }
+                } else if self.consume_word("insert") {
+                    let literal = self.literal()?;
+                    SetAssignment::JsonInsert { column: col, path, as_text, value: literal }
+                } else if self.consume_word("concat") {
+                    let literal = self.literal()?;
+                    SetAssignment::JsonConcat { column: col, path, value: literal }
                 } else {
                     self.symbol('=')?;
                     let literal = self.literal()?;
@@ -657,6 +665,28 @@ pub(crate) enum SetAssignment {
         column: String,
         path: Vec<JsonSegment>,
     },
+    /// ADR 0201 — splice: insert `value` at the terminal
+    /// array index, shifting subsequent elements right.
+    /// `as_text` writes the leaf as a JSON string. Only
+    /// positive `Index(n)` with `0 <= n <= arr.len()` is
+    /// accepted (`n == len` appends, matching ADR 0198).
+    /// `IndexFromEnd`, `Slice`, and object-key terminal
+    /// segments are rejected.
+    JsonInsert {
+        column: String,
+        path: Vec<JsonSegment>,
+        as_text: bool,
+        value: Literal,
+    },
+    /// ADR 0203 — append every element of a JSON-array
+    /// literal onto the terminal array at `path`. `value` must
+    /// parse as a JSON array; the terminal of `path` must
+    /// resolve to an array in the stored row.
+    JsonConcat {
+        column: String,
+        path: Vec<JsonSegment>,
+        value: Literal,
+    },
 }
 
 /// ADR 0192 — apply a JSON path mutation to the supplied JSON
@@ -691,6 +721,160 @@ pub(crate) fn apply_json_path_mutation(
     descend_and_assign(&mut root, path, new_leaf)?;
     Ok(Value::Json(serde_json::to_string(&root)
         .map_err(|e| SqlError::Type(format!("JSON mutation serialize: {e}")))?))
+}
+
+/// ADR 0201 — insert `value` into an array at the terminal
+/// array-index segment of `path`, shifting subsequent
+/// elements right. `0 <= n <= len` (where `n == len` appends,
+/// consistent with ADR 0198). Non-array parents and non-Index
+/// terminal segments yield an error.
+pub(crate) fn apply_json_path_insert(
+    column: &str,
+    cell: &Value,
+    path: &[JsonSegment],
+    as_text: bool,
+    value: &Literal,
+) -> SqlResult<Value> {
+    if path.is_empty() {
+        return Err(SqlError::Unsupported(
+            "INSERT requires a JSON path with at least one segment".into()));
+    }
+    let source = match cell {
+        Value::Null => return Err(SqlError::Type(format!(
+            "JSON insert on NULL column {column}: source must be an array"))),
+        Value::Json(s) | Value::String(s) => s.clone(),
+        other => return Err(SqlError::Type(format!(
+            "JSON insert requires a JSON cell; column {column} holds {other:?}"))),
+    };
+    let mut root: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|e| SqlError::Type(format!("JSON insert source does not parse: {e}")))?;
+    let new_leaf = literal_to_json(value, as_text)?;
+    descend_and_insert(&mut root, path, new_leaf)?;
+    Ok(Value::Json(serde_json::to_string(&root)
+        .map_err(|e| SqlError::Type(format!("JSON insert serialize: {e}")))?))
+}
+
+fn descend_and_insert(
+    current: &mut serde_json::Value,
+    path: &[JsonSegment],
+    new_leaf: serde_json::Value,
+) -> SqlResult<()> {
+    let (seg, rest) = path.split_first().expect("non-empty path");
+    if rest.is_empty() {
+        match seg {
+            JsonSegment::Index(i) => {
+                let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON insert: terminal index requires an array".into()))?;
+                if *i > arr.len() {
+                    return Err(SqlError::Type(format!(
+                        "JSON insert: index {i} out of range (len {})", arr.len())));
+                }
+                arr.insert(*i, new_leaf);
+                Ok(())
+            }
+            _ => Err(SqlError::Unsupported(
+                "JSON INSERT terminal segment must be a non-negative integer index".into())),
+        }
+    } else {
+        match seg {
+            JsonSegment::Key(k) => {
+                let obj = current.as_object_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON insert: intermediate key requires an object".into()))?;
+                let next = obj.entry(k.as_str().to_string())
+                    .or_insert(serde_json::Value::Null);
+                descend_and_insert(next, rest, new_leaf)
+            }
+            JsonSegment::Index(_) | JsonSegment::IndexFromEnd(_) => {
+                let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON insert: intermediate index requires an array".into()))?;
+                let len = arr.len();
+                let idx = seg.resolve_for_array(len)
+                    .ok_or_else(|| SqlError::Type(format!(
+                        "JSON insert: intermediate index {seg:?} out of bounds (len {len})")))?;
+                descend_and_insert(&mut arr[idx], rest, new_leaf)
+            }
+            JsonSegment::Slice { .. } => Err(SqlError::Unsupported(
+                "JSON slice segments cannot appear on an INSERT path".into())),
+        }
+    }
+}
+
+/// ADR 0203 — append every element of a JSON-array literal onto
+/// the array reached by `path`. The literal must itself parse
+/// as a JSON array; the terminal of `path` must point at an
+/// array in the stored cell. An empty path means the column
+/// itself is the array. A `Slice` segment anywhere is rejected.
+pub(crate) fn apply_json_path_concat(
+    column: &str,
+    cell: &Value,
+    path: &[JsonSegment],
+    value: &Literal,
+) -> SqlResult<Value> {
+    let addition_raw = match value {
+        Literal::Text(s) | Literal::Number(s) => s.clone(),
+        _ => return Err(SqlError::Type(
+            "JSON CONCAT requires a JSON-array literal (single-quoted text)".into())),
+    };
+    let addition: serde_json::Value = serde_json::from_str(&addition_raw)
+        .map_err(|e| SqlError::Type(format!("JSON CONCAT RHS does not parse: {e}")))?;
+    let addition = match addition {
+        serde_json::Value::Array(items) => items,
+        _ => return Err(SqlError::Type(
+            "JSON CONCAT RHS must be a JSON array".into())),
+    };
+    let source = match cell {
+        Value::Null => return Err(SqlError::Type(format!(
+            "JSON concat on NULL column {column}: source must be an array"))),
+        Value::Json(s) | Value::String(s) => s.clone(),
+        other => return Err(SqlError::Type(format!(
+            "JSON concat requires a JSON cell; column {column} holds {other:?}"))),
+    };
+    let mut root: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|e| SqlError::Type(format!("JSON concat source does not parse: {e}")))?;
+    descend_and_concat(&mut root, path, addition)?;
+    Ok(Value::Json(serde_json::to_string(&root)
+        .map_err(|e| SqlError::Type(format!("JSON concat serialize: {e}")))?))
+}
+
+fn descend_and_concat(
+    current: &mut serde_json::Value,
+    path: &[JsonSegment],
+    addition: Vec<serde_json::Value>,
+) -> SqlResult<()> {
+    if path.is_empty() {
+        let arr = current.as_array_mut()
+            .ok_or_else(|| SqlError::Type(
+                "JSON concat: target must be an array".into()))?;
+        arr.extend(addition);
+        return Ok(());
+    }
+    let (seg, rest) = path.split_first().expect("non-empty path");
+    match seg {
+        JsonSegment::Key(k) => {
+            let obj = current.as_object_mut()
+                .ok_or_else(|| SqlError::Type(
+                    "JSON concat: intermediate key requires an object".into()))?;
+            let next = obj.get_mut(k.as_str())
+                .ok_or_else(|| SqlError::Type(format!(
+                    "JSON concat: key {k:?} not found")))?;
+            descend_and_concat(next, rest, addition)
+        }
+        JsonSegment::Index(_) | JsonSegment::IndexFromEnd(_) => {
+            let arr = current.as_array_mut()
+                .ok_or_else(|| SqlError::Type(
+                    "JSON concat: intermediate index requires an array".into()))?;
+            let len = arr.len();
+            let idx = seg.resolve_for_array(len)
+                .ok_or_else(|| SqlError::Type(format!(
+                    "JSON concat: intermediate index out of bounds (len {len})")))?;
+            descend_and_concat(&mut arr[idx], rest, addition)
+        }
+        JsonSegment::Slice { .. } => Err(SqlError::Unsupported(
+            "JSON slice segments cannot appear on a CONCAT path".into())),
+    }
 }
 
 /// ADR 0200 — delete the terminal element reached by `path`
@@ -888,13 +1072,14 @@ pub(crate) enum JsonSegment {
     Key(String),
     Index(usize),
     IndexFromEnd(usize),
-    /// ADR 0197 — Python-style end-exclusive slice. `start`
-    /// and `end` are both required and non-negative in this
-    /// scope.  `start > end` is rejected at parse. Reading a
-    /// slice returns a sub-array (as JSON); non-array values
+    /// ADR 0197 + ADR 0202 — Python-style end-exclusive slice.
+    /// `None` on `start` means from the beginning; `None` on
+    /// `end` means to the array length. `start > end` (when
+    /// both present) is rejected at parse. Reading a slice
+    /// returns a sub-array (as JSON); non-array values
     /// resolve to `None` → `Value::Null`. Slice mutation is
     /// not supported.
-    Slice { start: usize, end: usize },
+    Slice { start: Option<usize>, end: Option<usize> },
 }
 
 impl JsonSegment {
@@ -926,11 +1111,13 @@ impl JsonSegment {
         let JsonSegment::Slice { start, end } = self else { return None; };
         let arr = value.as_array()?;
         let len = arr.len();
-        let end_clamped = (*end).min(len);
-        if *start >= end_clamped {
+        // ADR 0202 — None bounds mean "from the start" / "to the end".
+        let lo = start.unwrap_or(0).min(len);
+        let hi = end.unwrap_or(len).min(len);
+        if lo >= hi {
             return Some(serde_json::Value::Array(Vec::new()));
         }
-        Some(serde_json::Value::Array(arr[*start..end_clamped].to_vec()))
+        Some(serde_json::Value::Array(arr[lo..hi].to_vec()))
     }
 
     /// ADR 0196 — resolve a negative index against a concrete
@@ -961,7 +1148,9 @@ impl JsonSegment {
             }
             JsonSegment::Slice { start, end } => {
                 use std::fmt::Write;
-                let _ = write!(out, "{start}:{end}");
+                if let Some(s) = start { let _ = write!(out, "{s}"); }
+                out.push(':');
+                if let Some(e) = end { let _ = write!(out, "{e}"); }
             }
         }
     }
@@ -1012,7 +1201,9 @@ impl Projection {
                             JsonSegment::Index(n) => { let _ = write!(out, "{n}"); }
                             JsonSegment::IndexFromEnd(n) => { let _ = write!(out, "-{n}"); }
                             JsonSegment::Slice { start, end } => {
-                                let _ = write!(out, "{start}:{end}");
+                                if let Some(s) = start { let _ = write!(out, "{s}"); }
+                                out.push(':');
+                                if let Some(e) = end { let _ = write!(out, "{e}"); }
                             }
                         }
                     }
@@ -1085,29 +1276,30 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
         // `IndexFromEnd` segment.
         let segment = match p.peek().cloned() {
             Some(Token::Text(s)) => { p.advance(); JsonSegment::Key(s) }
+            // ADR 0202 — leading `:` opens a slice with an
+            // omitted start; `:` alone means the whole array.
+            Some(Token::Symbol(':')) => {
+                p.advance();
+                let end = parse_optional_slice_bound(p)?;
+                JsonSegment::Slice { start: None, end }
+            }
             Some(Token::Number(s)) if !s.contains('.') && !s.starts_with('-') => {
                 p.advance();
-                // ADR 0197 — slice form `start:end`.
+                // ADR 0197 + ADR 0202 — slice form `start:end`,
+                // open-ended on either side.
                 if matches!(p.peek(), Some(Token::Symbol(':'))) {
                     p.advance();
-                    let end_s = match p.peek().cloned() {
-                        Some(Token::Number(e)) if !e.contains('.') && !e.starts_with('-') => {
-                            p.advance(); e
-                        }
-                        _ => return Err(SqlError::Syntax(
-                            "JSON slice `start:end` requires a non-negative integer end".into())),
-                    };
                     let start: usize = s.parse()
                         .map_err(|_| SqlError::Syntax(
                             format!("JSON slice start {s} is not a valid usize")))?;
-                    let end: usize = end_s.parse()
-                        .map_err(|_| SqlError::Syntax(
-                            format!("JSON slice end {end_s} is not a valid usize")))?;
-                    if start > end {
-                        return Err(SqlError::Syntax(format!(
-                            "JSON slice start {start} must be <= end {end}")));
+                    let end = parse_optional_slice_bound(p)?;
+                    if let Some(e) = end {
+                        if start > e {
+                            return Err(SqlError::Syntax(format!(
+                                "JSON slice start {start} must be <= end {e}")));
+                        }
                     }
-                    JsonSegment::Slice { start, end }
+                    JsonSegment::Slice { start: Some(start), end }
                 } else {
                     let idx: usize = s.parse()
                         .map_err(|_| SqlError::Syntax(
@@ -1158,6 +1350,24 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
     Ok(Projection::JsonPath { column, path, as_text, container_syntax: false })
 }
 
+/// ADR 0202 — parse the optional end of a slice. The token
+/// after the `:` is either a non-negative integer or the
+/// start of the next segment / an arrow / a close paren /
+/// a comma. If it is not a number we leave the token in
+/// place and return `None`.
+fn parse_optional_slice_bound(p: &mut Parser) -> SqlResult<Option<usize>> {
+    match p.peek().cloned() {
+        Some(Token::Number(e)) if !e.contains('.') && !e.starts_with('-') => {
+            p.advance();
+            let v: usize = e.parse()
+                .map_err(|_| SqlError::Syntax(
+                    format!("JSON slice bound {e} is not a valid usize")))?;
+            Ok(Some(v))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// ADR 0194 — parse the RHS of `#>` / `#>>` as a single
 /// TEXT literal with the shape `'{seg,seg,...}'` where each
 /// segment is a bareword (object key) or a non-negative
@@ -1185,26 +1395,31 @@ fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
             return Err(SqlError::Syntax(
                 "container-path segments must be non-empty".into()));
         }
-        // ADR 0197 — slice segment `start:end` (non-negative).
+        // ADR 0197 + ADR 0202 — slice segment `start:end`,
+        // open-ended on either side.
         if let Some((start_s, end_s)) = seg.split_once(':') {
             let start_s = start_s.trim();
             let end_s = end_s.trim();
-            if start_s.bytes().all(|b| b.is_ascii_digit()) && !start_s.is_empty()
-                && end_s.bytes().all(|b| b.is_ascii_digit()) && !end_s.is_empty()
-            {
-                let start: usize = start_s.parse().map_err(|_| SqlError::Syntax(
-                    format!("container-path slice start {start_s:?} is not a valid usize")))?;
-                let end: usize = end_s.parse().map_err(|_| SqlError::Syntax(
-                    format!("container-path slice end {end_s:?} is not a valid usize")))?;
-                if start > end {
-                    return Err(SqlError::Syntax(format!(
-                        "container-path slice start {start} must be <= end {end}")));
+            let parse_bound = |s: &str, kind: &str| -> SqlResult<Option<usize>> {
+                if s.is_empty() { Ok(None) }
+                else if s.bytes().all(|b| b.is_ascii_digit()) {
+                    s.parse::<usize>().map(Some).map_err(|_| SqlError::Syntax(
+                        format!("container-path slice {kind} {s:?} is not a valid usize")))
+                } else {
+                    Err(SqlError::Syntax(format!(
+                        "container-path slice {kind} must be a non-negative integer or empty; got {s:?}")))
                 }
-                out.push(JsonSegment::Slice { start, end });
-                continue;
+            };
+            let start = parse_bound(start_s, "start")?;
+            let end = parse_bound(end_s, "end")?;
+            if let (Some(s), Some(e)) = (start, end) {
+                if s > e {
+                    return Err(SqlError::Syntax(format!(
+                        "container-path slice start {s} must be <= end {e}")));
+                }
             }
-            return Err(SqlError::Syntax(
-                format!("container-path slice must be `start:end` with non-negative integers; got {seg:?}")));
+            out.push(JsonSegment::Slice { start, end });
+            continue;
         }
         // ADR 0196 — negative integer segment resolves to
         // IndexFromEnd. `-0` is invalid.
@@ -1236,13 +1451,18 @@ fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
 /// (equality or any ordering comparison) runs a full scan
 /// with a per-row filter.
 #[derive(Clone, Debug)]
+pub(crate) struct JsonPredicate {
+    pub(crate) projection: Projection,
+    pub(crate) op: crate::model::CheckOp,
+    pub(crate) literal: Value,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum SelectWhere {
     KeyPredicate(Vec<Value>),
-    JsonPathPredicate {
-        projection: Projection,
-        op: crate::model::CheckOp,
-        literal: Value,
-    },
+    /// ADR 0190 + ADR 0204 — one-or-more JSON-path predicates
+    /// ANDed together. Every predicate must match the row.
+    JsonPathPredicates(Vec<JsonPredicate>),
 }
 
 /// ADR 0190 — parse the full WHERE clause for a SELECT. The
@@ -1263,18 +1483,34 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
         Some(Token::Arrow) | Some(Token::ArrowText)
         | Some(Token::Hash) | Some(Token::HashText));
     if is_json_path {
-        let projection = parse_projection_tail(p, column_name)?;
-        // Locate the base column to validate it exists.
-        locate(table, projection.source_column())?;
-        // ADR 0195 — accept `=`, `<>`, `<`, `<=`, `>`, `>=`.
-        // Reuses the CHECK operator parser (ADR 0182).
-        let op = p.word_or_symbol_pair_for_check()?;
-        let literal = p.literal()?;
-        let value = match &projection {
-            Projection::Column(_) => unreachable!("json path has non-empty chain"),
-            Projection::JsonPath { as_text, .. } => coerce_where_literal(&literal, *as_text)?,
-        };
-        Ok(SelectWhere::JsonPathPredicate { projection, op, literal: value })
+        let mut predicates = Vec::new();
+        let mut col = column_name;
+        loop {
+            let projection = parse_projection_tail(p, col)?;
+            locate(table, projection.source_column())?;
+            let op = p.word_or_symbol_pair_for_check()?;
+            let literal = p.literal()?;
+            let value = match &projection {
+                Projection::Column(_) => unreachable!("json path has non-empty chain"),
+                Projection::JsonPath { as_text, .. } =>
+                    coerce_where_literal(&literal, *as_text)?,
+            };
+            predicates.push(JsonPredicate { projection, op, literal: value });
+            // ADR 0204 — AND-chained JSON-path predicates. Each
+            // AND must be followed by another JSON-path form; a
+            // trailing PK equality would mix semantics and is
+            // rejected here.
+            if !p.consume_word("and") { break; }
+            col = p.word()?;
+            let next_json = matches!(p.peek(),
+                Some(Token::Arrow) | Some(Token::ArrowText)
+                | Some(Token::Hash) | Some(Token::HashText));
+            if !next_json {
+                return Err(SqlError::Unsupported(
+                    "AND after a JSON-path predicate must be another JSON-path predicate".into()));
+            }
+        }
+        Ok(SelectWhere::JsonPathPredicates(predicates))
     } else {
         // Rewind and dispatch to the existing PK grammar.
         p.restore_pos(saved);
@@ -1350,27 +1586,30 @@ fn coerce_where_literal(lit: &Literal, as_text: bool) -> SqlResult<Value> {
 pub(crate) fn apply_where_filter(
     rows: Vec<Vec<Value>>,
     table: &Table,
-    projection: &Projection,
-    op: crate::model::CheckOp,
-    literal: &Value,
+    predicates: &[JsonPredicate],
 ) -> SqlResult<Vec<Vec<Value>>> {
-    let position = locate(table, projection.source_column())?;
+    let positions: Vec<usize> = predicates.iter()
+        .map(|pred| locate(table, pred.projection.source_column()))
+        .collect::<SqlResult<_>>()?;
     let mut kept = Vec::with_capacity(rows.len());
-    for row in rows {
-        let extracted = apply_projection(projection, row[position].clone())?;
-        if matches!(extracted, Value::Null) || matches!(literal, Value::Null) {
-            continue;
+    'row: for row in rows {
+        for (pred, position) in predicates.iter().zip(&positions) {
+            let extracted = apply_projection(&pred.projection, row[*position].clone())?;
+            if matches!(extracted, Value::Null) || matches!(pred.literal, Value::Null) {
+                continue 'row;
+            }
+            let ord = compare_values_for_check(&extracted, &pred.literal);
+            let satisfied = match pred.op {
+                crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+            };
+            if !satisfied { continue 'row; }
         }
-        let ord = compare_values_for_check(&extracted, literal);
-        let satisfied = match op {
-            crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
-            crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
-            crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
-            crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
-            crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
-            crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
-        };
-        if satisfied { kept.push(row); }
+        kept.push(row);
     }
     Ok(kept)
 }
@@ -2441,7 +2680,7 @@ impl SqlEngine {
                 let all = match &where_clause {
                     Some(SelectWhere::KeyPredicate(key)) =>
                         store.get(key)?.into_iter().collect::<Vec<_>>(),
-                    Some(SelectWhere::JsonPathPredicate { .. }) =>
+                    Some(SelectWhere::JsonPathPredicates(_)) =>
                         store.scan_with_control(control)?,
                     None => store.scan_with_control(control)?,
                 };
@@ -2468,8 +2707,8 @@ impl SqlEngine {
                 } else { all };
                 // ADR 0190 — post-scan filter for JSON-path WHERE.
                 let all = match &where_clause {
-                    Some(SelectWhere::JsonPathPredicate { projection, op, literal }) =>
-                        apply_where_filter(all, &table, projection, *op, literal)?,
+                    Some(SelectWhere::JsonPathPredicates(preds)) =>
+                        apply_where_filter(all, &table, preds)?,
                     _ => all,
                 };
                 let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
@@ -2497,6 +2736,8 @@ impl SqlEngine {
                 let mut column_assignments: BTreeMap<usize, Value> = BTreeMap::new();
                 let mut json_assignments: Vec<(usize, Vec<JsonSegment>, bool, Literal)> = Vec::new();
                 let mut json_removes: Vec<(usize, Vec<JsonSegment>)> = Vec::new();
+                let mut json_inserts: Vec<(usize, Vec<JsonSegment>, bool, Literal)> = Vec::new();
+                let mut json_concats: Vec<(usize, Vec<JsonSegment>, Literal)> = Vec::new();
                 for change in changes {
                     match change {
                         SetAssignment::Column { column, value } => {
@@ -2522,6 +2763,20 @@ impl SqlEngine {
                             let position = locate(&table, &column)?;
                             json_removes.push((position, path));
                         }
+                        SetAssignment::JsonInsert { column, path, as_text, value } => {
+                            if table.primary_key.columns.contains(&column) {
+                                return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
+                            }
+                            let position = locate(&table, &column)?;
+                            json_inserts.push((position, path, as_text, value));
+                        }
+                        SetAssignment::JsonConcat { column, path, value } => {
+                            if table.primary_key.columns.contains(&column) {
+                                return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
+                            }
+                            let position = locate(&table, &column)?;
+                            json_concats.push((position, path, value));
+                        }
                     }
                 }
                 // ADR 0147 — deadline check before mutation.
@@ -2538,9 +2793,8 @@ impl SqlEngine {
                         Some(row) => vec![(pk.clone(), row)],
                         None => Vec::new(),
                     },
-                    SelectWhere::JsonPathPredicate { projection, op, literal } => {
-                        let filtered = apply_where_filter(
-                            store.scan()?, &table, projection, *op, literal)?;
+                    SelectWhere::JsonPathPredicates(preds) => {
+                        let filtered = apply_where_filter(store.scan()?, &table, preds)?;
                         filtered.into_iter().map(|row| {
                             let pk: Vec<Value> = pk_positions.iter()
                                 .map(|p| row[*p].clone()).collect();
@@ -2559,13 +2813,26 @@ impl SqlEngine {
                         row[*pos] = apply_json_path_mutation(
                             &col_name, &row[*pos], path, *as_text, literal)?;
                     }
-                    // ADR 0200 — JSON removes after mutations,
-                    // so `SET col -> 'k' = v, col -> 'k' REMOVE`
-                    // (contrived) ends with the key removed.
+                    // ADR 0200 — JSON removes after mutations.
                     for (pos, path) in &json_removes {
                         let col_name = table.columns[*pos].name.clone();
                         row[*pos] = apply_json_path_remove(
                             &col_name, &row[*pos], path)?;
+                    }
+                    // ADR 0201 — splice inserts last, so a
+                    // preceding REMOVE at the same index doesn't
+                    // step on the INSERT.
+                    for (pos, path, as_text, literal) in &json_inserts {
+                        let col_name = table.columns[*pos].name.clone();
+                        row[*pos] = apply_json_path_insert(
+                            &col_name, &row[*pos], path, *as_text, literal)?;
+                    }
+                    // ADR 0203 — CONCAT after splice so appended
+                    // elements land on the already-spliced array.
+                    for (pos, path, literal) in &json_concats {
+                        let col_name = table.columns[*pos].name.clone();
+                        row[*pos] = apply_json_path_concat(
+                            &col_name, &row[*pos], path, literal)?;
                     }
                     check_row(&table, &row)?;
                     foreign_key_check(self, &table, &row)?;
@@ -2610,9 +2877,8 @@ impl SqlEngine {
                         Some(row) => vec![(pk.clone(), row)],
                         None => Vec::new(),
                     },
-                    SelectWhere::JsonPathPredicate { projection, op, literal } => {
-                        let filtered = apply_where_filter(
-                            store.scan()?, &table, projection, *op, literal)?;
+                    SelectWhere::JsonPathPredicates(preds) => {
+                        let filtered = apply_where_filter(store.scan()?, &table, preds)?;
                         filtered.into_iter().map(|row| {
                             let pk: Vec<Value> = pk_positions.iter()
                                 .map(|p| row[*p].clone()).collect();

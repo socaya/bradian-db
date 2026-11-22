@@ -37,6 +37,19 @@ pub(crate) enum HistoryAssignment {
         column: String,
         path: Vec<crate::sql::JsonSegment>,
     },
+    /// ADR 0201 — JSON array INSERT (splice).
+    JsonInsert {
+        column: String,
+        path: Vec<crate::sql::JsonSegment>,
+        as_text: bool,
+        value: Literal,
+    },
+    /// ADR 0203 — JSON array CONCAT (append-many).
+    JsonConcat {
+        column: String,
+        path: Vec<crate::sql::JsonSegment>,
+        value: Literal,
+    },
 }
 
 /// ADR 0193 — SET list that accepts a mix of the expression
@@ -53,11 +66,21 @@ pub(crate) fn mixed_assignments(p: &mut Parser) -> SqlResult<Vec<HistoryAssignme
                     (column, path, as_text),
                 crate::sql::Projection::Column(_) => unreachable!("arrow guard"),
             };
-            // ADR 0200 — `REMOVE` keyword after a JSON path
-            // deletes the terminal element instead of
-            // assigning.
+            // ADR 0200 / 0201 — `REMOVE` deletes the terminal
+            // element; `INSERT` splices a literal into an
+            // array at the terminal index.
             if p.consume_word("remove") {
                 fields.push(HistoryAssignment::JsonRemove { column, path });
+            } else if p.consume_word("insert") {
+                let literal = p.literal()?;
+                fields.push(HistoryAssignment::JsonInsert {
+                    column, path, as_text, value: literal,
+                });
+            } else if p.consume_word("concat") {
+                let literal = p.literal()?;
+                fields.push(HistoryAssignment::JsonConcat {
+                    column, path, value: literal,
+                });
             } else {
                 p.symbol('=')?;
                 let literal = p.literal()?;

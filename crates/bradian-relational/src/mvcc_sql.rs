@@ -453,7 +453,7 @@ impl<'a> MvccSqlSession<'a> {
                         let rows: Vec<Vec<_>> = match &where_clause {
                             Some(crate::sql::SelectWhere::KeyPredicate(key)) =>
                                 tx.get(table.id, key)?.into_iter().collect(),
-                            Some(crate::sql::SelectWhere::JsonPathPredicate { .. }) =>
+                            Some(crate::sql::SelectWhere::JsonPathPredicates(_)) =>
                                 tx.scan(table.id)?,
                             None => tx.scan(table.id)?,
                         };
@@ -481,8 +481,8 @@ impl<'a> MvccSqlSession<'a> {
                         } else { rows };
                         // ADR 0190 — post-scan JSON-path filter.
                         let rows = match &where_clause {
-                            Some(crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal }) =>
-                                crate::sql::apply_where_filter(rows, &table, projection, *op, literal)?,
+                            Some(crate::sql::SelectWhere::JsonPathPredicates(preds)) =>
+                                crate::sql::apply_where_filter(rows, &table, preds)?,
                             _ => rows,
                         };
                         let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
@@ -509,6 +509,8 @@ impl<'a> MvccSqlSession<'a> {
                         let mut replacements = BTreeMap::new();
                         let mut json_assignments: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
                         let mut json_removes: Vec<(usize, Vec<crate::sql::JsonSegment>)> = Vec::new();
+                        let mut json_inserts: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
+                        let mut json_concats: Vec<(usize, Vec<crate::sql::JsonSegment>, crate::sql::Literal)> = Vec::new();
                         for change in updates {
                             match change {
                                 crate::sql::SetAssignment::Column { column, value } => {
@@ -534,6 +536,20 @@ impl<'a> MvccSqlSession<'a> {
                                     let position = locate(&table, &column)?;
                                     json_removes.push((position, path));
                                 }
+                                crate::sql::SetAssignment::JsonInsert { column, path, as_text, value } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    json_inserts.push((position, path, as_text, value));
+                                }
+                                crate::sql::SetAssignment::JsonConcat { column, path, value } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    json_concats.push((position, path, value));
+                                }
                             }
                         }
                         let pk_positions: Vec<usize> = table.primary_key.columns.iter()
@@ -544,9 +560,9 @@ impl<'a> MvccSqlSession<'a> {
                                 Some(row) => vec![(pk.clone(), row)],
                                 None => Vec::new(),
                             },
-                            crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal } => {
+                            crate::sql::SelectWhere::JsonPathPredicates(preds) => {
                                 let filtered = crate::sql::apply_where_filter(
-                                    tx.scan(table.id)?, &table, projection, *op, literal)?;
+                                    tx.scan(table.id)?, &table, preds)?;
                                 filtered.into_iter().map(|row| {
                                     let pk: Vec<_> = pk_positions.iter()
                                         .map(|p| row[*p].clone()).collect();
@@ -568,6 +584,18 @@ impl<'a> MvccSqlSession<'a> {
                                 let col_name = table.columns[*pos].name.clone();
                                 row[*pos] = crate::sql::apply_json_path_remove(
                                     &col_name, &row[*pos], path)?;
+                            }
+                            // ADR 0201 — JSON array inserts.
+                            for (pos, path, as_text, literal) in &json_inserts {
+                                let col_name = table.columns[*pos].name.clone();
+                                row[*pos] = crate::sql::apply_json_path_insert(
+                                    &col_name, &row[*pos], path, *as_text, literal)?;
+                            }
+                            // ADR 0203 — JSON array CONCAT.
+                            for (pos, path, literal) in &json_concats {
+                                let col_name = table.columns[*pos].name.clone();
+                                row[*pos] = crate::sql::apply_json_path_concat(
+                                    &col_name, &row[*pos], path, literal)?;
                             }
                             crate::sql::check_row(&table, &row)?;
                             crate::sql::fk_check_child_row_tx(
@@ -606,9 +634,9 @@ impl<'a> MvccSqlSession<'a> {
                                 Some(row) => vec![(pk.clone(), row)],
                                 None => Vec::new(),
                             },
-                            crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal } => {
+                            crate::sql::SelectWhere::JsonPathPredicates(preds) => {
                                 let filtered = crate::sql::apply_where_filter(
-                                    tx.scan(table.id)?, &table, projection, *op, literal)?;
+                                    tx.scan(table.id)?, &table, preds)?;
                                 filtered.into_iter().map(|row| {
                                     let pk: Vec<_> = pk_positions.iter()
                                         .map(|p| row[*p].clone()).collect();

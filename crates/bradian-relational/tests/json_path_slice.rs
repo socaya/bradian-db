@@ -121,19 +121,25 @@ fn slice_start_greater_than_end_rejected_at_parse() {
 }
 
 #[test]
-fn slice_missing_end_rejected() {
+fn slice_open_end_runs_to_array_length() {
+    // ADR 0202 — `-> 2:` means "from index 2 to the end".
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
-    let err = db.execute("SELECT body -> 'tags' -> 2: FROM t.public.docs WHERE id=1").unwrap_err();
-    assert!(matches!(err, SqlError::Syntax(_)));
+    assert_eq!(
+        json_rows(&db, "SELECT body -> 'tags' -> 2: FROM t.public.docs WHERE id=1"),
+        serde_json::json!(["blue","yellow","black"]),
+    );
 }
 
 #[test]
-fn slice_container_bad_form_rejected() {
+fn slice_container_open_end_runs_to_array_length() {
+    // ADR 0202 — container form with an omitted end.
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
-    let err = db.execute("SELECT body #> '{tags,1:}' FROM t.public.docs WHERE id=1").unwrap_err();
-    assert!(matches!(err, SqlError::Syntax(_)));
+    assert_eq!(
+        json_rows(&db, "SELECT body #> '{tags,1:}' FROM t.public.docs WHERE id=1"),
+        serde_json::json!(["green","blue","yellow","black"]),
+    );
 }
 
 #[test]
