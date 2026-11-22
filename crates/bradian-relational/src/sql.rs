@@ -225,7 +225,13 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 }
             }
             out.push(Token::Number(number));
-        } else if "(),.=;*<>".contains(ch) || (expressions && "+-/".contains(ch)) {
+        } else if "(),.=;*<>:".contains(ch) || (expressions && "+-/".contains(ch)) {
+            // ADR 0197 — `:` admitted for JSON slice indices
+            // (`col -> 0:3`).  It is otherwise never consumed
+            // by SQL grammar at this parser level; named-
+            // parameter `:name` substitution runs at the
+            // driver layer before the SQL reaches the lexer
+            // (ADR 0183), so this does not disturb that path.
             // ADR 0182 — `<` and `>` admitted so the CHECK
             // grammar can parse comparison operators. The
             // existing grammar paths reject these symbols
@@ -706,6 +712,8 @@ fn descend_and_assign(
                         "JSON mutation: array index {seg:?} out of bounds (len {len})")))?;
                 descend_and_assign(&mut arr[idx], rest, new_leaf)
             }
+            JsonSegment::Slice { .. } => Err(SqlError::Unsupported(
+                "JSON slice segments cannot appear on an UPDATE SET left-hand side".into())),
         }
     }
 }
@@ -754,6 +762,13 @@ pub(crate) enum JsonSegment {
     Key(String),
     Index(usize),
     IndexFromEnd(usize),
+    /// ADR 0197 — Python-style end-exclusive slice. `start`
+    /// and `end` are both required and non-negative in this
+    /// scope.  `start > end` is rejected at parse. Reading a
+    /// slice returns a sub-array (as JSON); non-array values
+    /// resolve to `None` → `Value::Null`. Slice mutation is
+    /// not supported.
+    Slice { start: usize, end: usize },
 }
 
 impl JsonSegment {
@@ -767,11 +782,34 @@ impl JsonSegment {
                 if *n == 0 || *n > len { return None; }
                 arr.get(len - *n)
             }
+            JsonSegment::Slice { .. } => {
+                // Slice reads produce an **owned** sub-array;
+                // `apply` returns a reference and so cannot
+                // represent it here.  `apply_slice` handles
+                // this case in `apply_projection`.
+                None
+            }
         }
     }
 
+    /// ADR 0197 — slice extraction. Returns `Some(array)` when
+    /// `value` is an array; `None` otherwise (resolves to NULL
+    /// in `apply_projection`). The returned array is a fresh
+    /// clone of the sub-slice.
+    fn apply_slice(&self, value: &serde_json::Value) -> Option<serde_json::Value> {
+        let JsonSegment::Slice { start, end } = self else { return None; };
+        let arr = value.as_array()?;
+        let len = arr.len();
+        let end_clamped = (*end).min(len);
+        if *start >= end_clamped {
+            return Some(serde_json::Value::Array(Vec::new()));
+        }
+        Some(serde_json::Value::Array(arr[*start..end_clamped].to_vec()))
+    }
+
     /// ADR 0196 — resolve a negative index against a concrete
-    /// array for mutation. Returns `None` for out-of-bounds.
+    /// array for mutation. Returns `None` for out-of-bounds
+    /// and for `Slice` / `Key` segments (not mutatable).
     pub(crate) fn resolve_for_array(&self, len: usize) -> Option<usize> {
         match self {
             JsonSegment::Index(i) if *i < len => Some(*i),
@@ -794,6 +832,10 @@ impl JsonSegment {
             JsonSegment::IndexFromEnd(n) => {
                 use std::fmt::Write;
                 let _ = write!(out, "-{n}");
+            }
+            JsonSegment::Slice { start, end } => {
+                use std::fmt::Write;
+                let _ = write!(out, "{start}:{end}");
             }
         }
     }
@@ -843,6 +885,9 @@ impl Projection {
                             JsonSegment::Key(k) => out.push_str(k),
                             JsonSegment::Index(n) => { let _ = write!(out, "{n}"); }
                             JsonSegment::IndexFromEnd(n) => { let _ = write!(out, "-{n}"); }
+                            JsonSegment::Slice { start, end } => {
+                                let _ = write!(out, "{start}:{end}");
+                            }
                         }
                     }
                     out.push_str("}'");
@@ -916,10 +961,33 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
             Some(Token::Text(s)) => { p.advance(); JsonSegment::Key(s) }
             Some(Token::Number(s)) if !s.contains('.') && !s.starts_with('-') => {
                 p.advance();
-                let idx: usize = s.parse()
-                    .map_err(|_| SqlError::Syntax(
-                        format!("JSON path array index {s} is not a valid usize")))?;
-                JsonSegment::Index(idx)
+                // ADR 0197 — slice form `start:end`.
+                if matches!(p.peek(), Some(Token::Symbol(':'))) {
+                    p.advance();
+                    let end_s = match p.peek().cloned() {
+                        Some(Token::Number(e)) if !e.contains('.') && !e.starts_with('-') => {
+                            p.advance(); e
+                        }
+                        _ => return Err(SqlError::Syntax(
+                            "JSON slice `start:end` requires a non-negative integer end".into())),
+                    };
+                    let start: usize = s.parse()
+                        .map_err(|_| SqlError::Syntax(
+                            format!("JSON slice start {s} is not a valid usize")))?;
+                    let end: usize = end_s.parse()
+                        .map_err(|_| SqlError::Syntax(
+                            format!("JSON slice end {end_s} is not a valid usize")))?;
+                    if start > end {
+                        return Err(SqlError::Syntax(format!(
+                            "JSON slice start {start} must be <= end {end}")));
+                    }
+                    JsonSegment::Slice { start, end }
+                } else {
+                    let idx: usize = s.parse()
+                        .map_err(|_| SqlError::Syntax(
+                            format!("JSON path array index {s} is not a valid usize")))?;
+                    JsonSegment::Index(idx)
+                }
             }
             Some(Token::Number(s)) if !s.contains('.') && s.starts_with('-') => {
                 p.advance();
@@ -990,6 +1058,27 @@ fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
         if seg.is_empty() {
             return Err(SqlError::Syntax(
                 "container-path segments must be non-empty".into()));
+        }
+        // ADR 0197 — slice segment `start:end` (non-negative).
+        if let Some((start_s, end_s)) = seg.split_once(':') {
+            let start_s = start_s.trim();
+            let end_s = end_s.trim();
+            if start_s.bytes().all(|b| b.is_ascii_digit()) && !start_s.is_empty()
+                && end_s.bytes().all(|b| b.is_ascii_digit()) && !end_s.is_empty()
+            {
+                let start: usize = start_s.parse().map_err(|_| SqlError::Syntax(
+                    format!("container-path slice start {start_s:?} is not a valid usize")))?;
+                let end: usize = end_s.parse().map_err(|_| SqlError::Syntax(
+                    format!("container-path slice end {end_s:?} is not a valid usize")))?;
+                if start > end {
+                    return Err(SqlError::Syntax(format!(
+                        "container-path slice start {start} must be <= end {end}")));
+                }
+                out.push(JsonSegment::Slice { start, end });
+                continue;
+            }
+            return Err(SqlError::Syntax(
+                format!("container-path slice must be `start:end` with non-negative integers; got {seg:?}")));
         }
         // ADR 0196 — negative integer segment resolves to
         // IndexFromEnd. `-0` is invalid.
@@ -1177,9 +1266,15 @@ pub(crate) fn apply_projection(pj: &Projection, cell: Value) -> SqlResult<Value>
             let mut current: serde_json::Value = serde_json::from_str(source)
                 .map_err(|e| SqlError::Type(format!("JSON path source does not parse: {e}")))?;
             for seg in path {
-                current = match seg.apply(&current) {
-                    Some(next) => next.clone(),
-                    None => return Ok(Value::Null),
+                current = match seg {
+                    JsonSegment::Slice { .. } => match seg.apply_slice(&current) {
+                        Some(next) => next,
+                        None => return Ok(Value::Null),
+                    },
+                    _ => match seg.apply(&current) {
+                        Some(next) => next.clone(),
+                        None => return Ok(Value::Null),
+                    },
                 };
                 if matches!(current, serde_json::Value::Null) {
                     return Ok(Value::Null);
