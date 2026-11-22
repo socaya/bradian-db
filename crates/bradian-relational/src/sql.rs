@@ -702,6 +702,25 @@ fn descend_and_assign(
                 }
                 descend_and_assign(next, rest, new_leaf)
             }
+            JsonSegment::Index(i) if rest.is_empty() => {
+                // ADR 0198 — terminal `Index(len)` appends.
+                // `Index(> len)` still rejects to preserve the
+                // "no sparse arrays" invariant.
+                let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON mutation: cannot apply array index to non-array".into()))?;
+                let len = arr.len();
+                if *i == len {
+                    arr.push(new_leaf);
+                    Ok(())
+                } else if *i < len {
+                    arr[*i] = new_leaf;
+                    Ok(())
+                } else {
+                    Err(SqlError::Type(format!(
+                        "JSON mutation: array index {i} out of bounds (len {len})")))
+                }
+            }
             JsonSegment::Index(_) | JsonSegment::IndexFromEnd(_) => {
                 let arr = current.as_array_mut()
                     .ok_or_else(|| SqlError::Type(
