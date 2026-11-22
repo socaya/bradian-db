@@ -696,15 +696,15 @@ fn descend_and_assign(
                 }
                 descend_and_assign(next, rest, new_leaf)
             }
-            JsonSegment::Index(i) => {
+            JsonSegment::Index(_) | JsonSegment::IndexFromEnd(_) => {
                 let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON mutation: cannot apply array index to non-array".into()))?;
+                let len = arr.len();
+                let idx = seg.resolve_for_array(len)
                     .ok_or_else(|| SqlError::Type(format!(
-                        "JSON mutation: cannot apply array index to non-array (step index={i})")))?;
-                if *i >= arr.len() {
-                    return Err(SqlError::Type(format!(
-                        "JSON mutation: array index {i} out of bounds (len {})", arr.len())));
-                }
-                descend_and_assign(&mut arr[*i], rest, new_leaf)
+                        "JSON mutation: array index {seg:?} out of bounds (len {len})")))?;
+                descend_and_assign(&mut arr[idx], rest, new_leaf)
             }
         }
     }
@@ -745,13 +745,15 @@ fn literal_to_json(lit: &Literal, as_text: bool) -> SqlResult<serde_json::Value>
     }
 }
 
-/// ADR 0191 — one segment of a JSON path chain. A key
-/// addresses an object member; an index addresses an array
-/// element.
+/// ADR 0191 + ADR 0196 — one segment of a JSON path chain.
+/// A key addresses an object member; an index addresses an
+/// array element from the front; `IndexFromEnd(n)` addresses
+/// `arr.len() - n` (so `n = 1` is the last element).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum JsonSegment {
     Key(String),
     Index(usize),
+    IndexFromEnd(usize),
 }
 
 impl JsonSegment {
@@ -759,6 +761,22 @@ impl JsonSegment {
         match self {
             JsonSegment::Key(k) => value.get(k.as_str()),
             JsonSegment::Index(i) => value.get(*i),
+            JsonSegment::IndexFromEnd(n) => {
+                let arr = value.as_array()?;
+                let len = arr.len();
+                if *n == 0 || *n > len { return None; }
+                arr.get(len - *n)
+            }
+        }
+    }
+
+    /// ADR 0196 — resolve a negative index against a concrete
+    /// array for mutation. Returns `None` for out-of-bounds.
+    pub(crate) fn resolve_for_array(&self, len: usize) -> Option<usize> {
+        match self {
+            JsonSegment::Index(i) if *i < len => Some(*i),
+            JsonSegment::IndexFromEnd(n) if *n > 0 && *n <= len => Some(len - *n),
+            _ => None,
         }
     }
 
@@ -772,6 +790,10 @@ impl JsonSegment {
             JsonSegment::Index(i) => {
                 use std::fmt::Write;
                 let _ = write!(out, "{i}");
+            }
+            JsonSegment::IndexFromEnd(n) => {
+                use std::fmt::Write;
+                let _ = write!(out, "-{n}");
             }
         }
     }
@@ -816,12 +838,11 @@ impl Projection {
                     out.push_str("'{");
                     for (i, seg) in path.iter().enumerate() {
                         if i > 0 { out.push(','); }
+                        use std::fmt::Write;
                         match seg {
                             JsonSegment::Key(k) => out.push_str(k),
-                            JsonSegment::Index(n) => {
-                                use std::fmt::Write;
-                                let _ = write!(out, "{n}");
-                            }
+                            JsonSegment::Index(n) => { let _ = write!(out, "{n}"); }
+                            JsonSegment::IndexFromEnd(n) => { let _ = write!(out, "-{n}"); }
                         }
                     }
                     out.push_str("}'");
@@ -885,8 +906,12 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
             return Err(SqlError::Unsupported(
                 "`->>` JSON path terminator cannot be followed by more segments".into()));
         }
-        // ADR 0191 — a segment may be a quoted string key or
-        // a non-negative integer literal (array index).
+        // ADR 0191 / ADR 0196 — a segment may be a quoted
+        // string key, a non-negative integer array index, or a
+        // negative integer from-end index (`-1` = last).  The
+        // expression-mode lexer splits `-N` into `Symbol('-')`
+        // and `Number(N)`; both forms land here as the same
+        // `IndexFromEnd` segment.
         let segment = match p.peek().cloned() {
             Some(Token::Text(s)) => { p.advance(); JsonSegment::Key(s) }
             Some(Token::Number(s)) if !s.contains('.') && !s.starts_with('-') => {
@@ -896,8 +921,39 @@ pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult
                         format!("JSON path array index {s} is not a valid usize")))?;
                 JsonSegment::Index(idx)
             }
+            Some(Token::Number(s)) if !s.contains('.') && s.starts_with('-') => {
+                p.advance();
+                let abs = s.trim_start_matches('-');
+                let n: usize = abs.parse()
+                    .map_err(|_| SqlError::Syntax(
+                        format!("JSON path negative index {s} is not a valid isize")))?;
+                if n == 0 {
+                    return Err(SqlError::Syntax(
+                        "JSON path negative index must be nonzero (-1 is the last element)".into()));
+                }
+                JsonSegment::IndexFromEnd(n)
+            }
+            Some(Token::Symbol('-')) => {
+                p.advance();
+                let num = match p.peek().cloned() {
+                    Some(Token::Number(s)) if !s.contains('.') && !s.starts_with('-') => {
+                        p.advance();
+                        s
+                    }
+                    _ => return Err(SqlError::Syntax(
+                        "JSON path `-` must be followed by a non-negative integer".into())),
+                };
+                let n: usize = num.parse()
+                    .map_err(|_| SqlError::Syntax(
+                        format!("JSON path negative index -{num} is not a valid isize")))?;
+                if n == 0 {
+                    return Err(SqlError::Syntax(
+                        "JSON path negative index must be nonzero (-1 is the last element)".into()));
+                }
+                JsonSegment::IndexFromEnd(n)
+            }
             _ => return Err(SqlError::Syntax(
-                "JSON path segment must be a single-quoted string key or a non-negative integer index".into())),
+                "JSON path segment must be a single-quoted string key or an integer index".into())),
         };
         path.push(segment);
         as_text = final_text;
@@ -935,7 +991,20 @@ fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
             return Err(SqlError::Syntax(
                 "container-path segments must be non-empty".into()));
         }
-        // Integer segment: digits only.
+        // ADR 0196 — negative integer segment resolves to
+        // IndexFromEnd. `-0` is invalid.
+        if let Some(abs) = seg.strip_prefix('-') {
+            if abs.bytes().all(|b| b.is_ascii_digit()) && !abs.is_empty() {
+                let n: usize = abs.parse().map_err(|_| SqlError::Syntax(
+                    format!("container-path negative index {seg:?} is not a valid isize")))?;
+                if n == 0 {
+                    return Err(SqlError::Syntax(
+                        "container-path negative index must be nonzero".into()));
+                }
+                out.push(JsonSegment::IndexFromEnd(n));
+                continue;
+            }
+        }
         if seg.bytes().all(|b| b.is_ascii_digit()) {
             let idx: usize = seg.parse().map_err(|_| SqlError::Syntax(
                 format!("container-path index {seg:?} is not a valid usize")))?;

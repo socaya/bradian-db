@@ -96,12 +96,21 @@ fn where_filter_by_array_index_text() {
 }
 
 #[test]
-fn negative_index_is_rejected_at_parse() {
+fn negative_index_resolves_from_end_after_adr_0196() {
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
-    let err = db.execute("SELECT body -> 'tags' -> -1 FROM t.public.docs WHERE id=1").unwrap_err();
-    assert!(matches!(err, SqlError::Syntax(_)),
-        "negative index must fail; got {err:?}");
+    // ADR 0196 reverses the ADR 0191 negative-rejection: `-1`
+    // now resolves to the last element. The existing tests
+    // continue to use non-negative indices.
+    match db.execute("SELECT body -> 'tags' ->> -1 FROM t.public.docs WHERE id=1").unwrap() {
+        bradian_relational::sql::SqlResultSet::Rows { rows, .. } => {
+            match &rows[0][0] {
+                Value::String(s) => assert_eq!(s, "blue"),
+                other => panic!("expected String; got {other:?}"),
+            }
+        }
+        other => panic!("expected Rows; got {other:?}"),
+    }
 }
 
 #[test]

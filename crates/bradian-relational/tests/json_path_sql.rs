@@ -117,22 +117,18 @@ fn path_on_non_json_column_fails_cleanly() {
 }
 
 #[test]
-fn path_rejects_non_text_non_integer_key_literal() {
+fn path_rejects_non_integer_key_literal() {
     let dir = tempdir().unwrap();
     let db = open(dir.path());
     seeded(&db);
-    // ADR 0191 — array indices are now accepted. A non-integer
-    // numeric or a bare identifier still fails cleanly.
+    // ADR 0191 — integer indices are accepted. ADR 0196 —
+    // negative integer indices are accepted (from-end).
+    // Floats and other non-identifier tokens still fail.
     let err = db.execute(
         "SELECT body -> 4.2 FROM t.public.docs WHERE id=1"
     ).unwrap_err();
     assert!(matches!(err, SqlError::Syntax(_)),
         "float as JSON path segment should be rejected; got {err:?}");
-    let err = db.execute(
-        "SELECT body -> -1 FROM t.public.docs WHERE id=1"
-    ).unwrap_err();
-    assert!(matches!(err, SqlError::Syntax(_)),
-        "negative index should be rejected; got {err:?}");
 }
 
 #[test]
