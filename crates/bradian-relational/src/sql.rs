@@ -509,14 +509,21 @@ impl Parser {
                 | Some(Token::Hash) | Some(Token::HashText));
             let assignment = if next_is_arrow {
                 let projection = parse_projection_tail(self, column)?;
-                self.symbol('=')?;
-                let literal = self.literal()?;
                 let (col, path, as_text) = match projection {
                     Projection::JsonPath { column, path, as_text, .. } =>
                         (column, path, as_text),
                     Projection::Column(_) => unreachable!("arrow guard"),
                 };
-                SetAssignment::JsonPath { column: col, path, as_text, value: literal }
+                // ADR 0200 — `REMOVE` keyword after a JSON path
+                // deletes the terminal element instead of
+                // assigning.
+                if self.consume_word("remove") {
+                    SetAssignment::JsonRemove { column: col, path }
+                } else {
+                    self.symbol('=')?;
+                    let literal = self.literal()?;
+                    SetAssignment::JsonPath { column: col, path, as_text, value: literal }
+                }
             } else {
                 self.symbol('=')?;
                 SetAssignment::Column { column, value: self.literal()? }
@@ -629,8 +636,9 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
 }
 
-/// ADR 0192 — SET assignment element: either a plain column
-/// replacement (existing semantics) or a JSON path mutation.
+/// ADR 0192 + ADR 0200 — SET assignment element: a plain
+/// column replacement, a JSON path mutation, or a JSON path
+/// remove (REMOVE keyword).
 #[derive(Clone, Debug)]
 pub(crate) enum SetAssignment {
     Column { column: String, value: Literal },
@@ -639,6 +647,15 @@ pub(crate) enum SetAssignment {
         path: Vec<JsonSegment>,
         as_text: bool,
         value: Literal,
+    },
+    /// ADR 0200 — delete the terminal JSON element at `path`.
+    /// For an array index the surrounding array shifts left;
+    /// for an object key the key is dropped from the object.
+    /// `Slice` and mid-chain `IndexFromEnd` segments are
+    /// rejected at mutation time.
+    JsonRemove {
+        column: String,
+        path: Vec<JsonSegment>,
     },
 }
 
@@ -674,6 +691,96 @@ pub(crate) fn apply_json_path_mutation(
     descend_and_assign(&mut root, path, new_leaf)?;
     Ok(Value::Json(serde_json::to_string(&root)
         .map_err(|e| SqlError::Type(format!("JSON mutation serialize: {e}")))?))
+}
+
+/// ADR 0200 — delete the terminal element reached by `path`
+/// from the JSON cell. Array elements shift left; object
+/// keys are dropped. Non-array intermediate indices and
+/// `Slice` segments fail with `SqlError::Type` /
+/// `SqlError::Unsupported`. An empty path or a terminal
+/// `Slice` are rejected.
+pub(crate) fn apply_json_path_remove(
+    column: &str,
+    cell: &Value,
+    path: &[JsonSegment],
+) -> SqlResult<Value> {
+    if path.is_empty() {
+        return Err(SqlError::Unsupported(
+            "REMOVE requires a JSON path with at least one segment".into()));
+    }
+    let source = match cell {
+        Value::Null => return Ok(Value::Null),
+        Value::Json(s) | Value::String(s) => s.clone(),
+        other => return Err(SqlError::Type(format!(
+            "JSON remove requires a JSON cell; column {column} holds {other:?}"))),
+    };
+    let mut root: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|e| SqlError::Type(format!("JSON remove source does not parse: {e}")))?;
+    descend_and_remove(&mut root, path)?;
+    Ok(Value::Json(serde_json::to_string(&root)
+        .map_err(|e| SqlError::Type(format!("JSON remove serialize: {e}")))?))
+}
+
+fn descend_and_remove(
+    current: &mut serde_json::Value,
+    path: &[JsonSegment],
+) -> SqlResult<()> {
+    let (seg, rest) = path.split_first().expect("non-empty path");
+    if rest.is_empty() {
+        // Terminal segment — perform the remove.
+        match seg {
+            JsonSegment::Key(k) => {
+                let obj = current.as_object_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON remove: terminal key segment requires an object".into()))?;
+                // Missing key is a no-op (idempotent).
+                obj.remove(k.as_str());
+                Ok(())
+            }
+            JsonSegment::Index(_) | JsonSegment::IndexFromEnd(_) => {
+                let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON remove: terminal index segment requires an array".into()))?;
+                let len = arr.len();
+                let Some(idx) = seg.resolve_for_array(len) else {
+                    return Err(SqlError::Type(format!(
+                        "JSON remove: index {seg:?} out of bounds (len {len})")));
+                };
+                arr.remove(idx);
+                Ok(())
+            }
+            JsonSegment::Slice { .. } => Err(SqlError::Unsupported(
+                "JSON slice segments cannot appear as a REMOVE target".into())),
+        }
+    } else {
+        // Intermediate — descend the usual way.
+        match seg {
+            JsonSegment::Key(k) => {
+                let obj = current.as_object_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON remove: intermediate key requires an object".into()))?;
+                match obj.get_mut(k.as_str()) {
+                    Some(next) => descend_and_remove(next, rest),
+                    // Missing intermediate → nothing to remove; no-op.
+                    None => Ok(()),
+                }
+            }
+            JsonSegment::Index(_) | JsonSegment::IndexFromEnd(_) => {
+                let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(
+                        "JSON remove: intermediate index requires an array".into()))?;
+                let len = arr.len();
+                let Some(idx) = seg.resolve_for_array(len) else {
+                    // Out-of-bounds intermediate → nothing to
+                    // remove; no-op (same as missing key).
+                    return Ok(());
+                };
+                descend_and_remove(&mut arr[idx], rest)
+            }
+            JsonSegment::Slice { .. } => Err(SqlError::Unsupported(
+                "JSON slice segments cannot appear on a REMOVE path".into())),
+        }
+    }
 }
 
 fn descend_and_assign(
@@ -2389,6 +2496,7 @@ impl SqlEngine {
                 p.end()?;
                 let mut column_assignments: BTreeMap<usize, Value> = BTreeMap::new();
                 let mut json_assignments: Vec<(usize, Vec<JsonSegment>, bool, Literal)> = Vec::new();
+                let mut json_removes: Vec<(usize, Vec<JsonSegment>)> = Vec::new();
                 for change in changes {
                     match change {
                         SetAssignment::Column { column, value } => {
@@ -2406,6 +2514,13 @@ impl SqlEngine {
                                 return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
                             }
                             json_assignments.push((position, path, as_text, value));
+                        }
+                        SetAssignment::JsonRemove { column, path } => {
+                            if table.primary_key.columns.contains(&column) {
+                                return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
+                            }
+                            let position = locate(&table, &column)?;
+                            json_removes.push((position, path));
                         }
                     }
                 }
@@ -2443,6 +2558,14 @@ impl SqlEngine {
                         let col_name = table.columns[*pos].name.clone();
                         row[*pos] = apply_json_path_mutation(
                             &col_name, &row[*pos], path, *as_text, literal)?;
+                    }
+                    // ADR 0200 — JSON removes after mutations,
+                    // so `SET col -> 'k' = v, col -> 'k' REMOVE`
+                    // (contrived) ends with the key removed.
+                    for (pos, path) in &json_removes {
+                        let col_name = table.columns[*pos].name.clone();
+                        row[*pos] = apply_json_path_remove(
+                            &col_name, &row[*pos], path)?;
                     }
                     check_row(&table, &row)?;
                     foreign_key_check(self, &table, &row)?;

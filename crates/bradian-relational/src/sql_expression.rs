@@ -32,6 +32,11 @@ pub(crate) enum HistoryAssignment {
         as_text: bool,
         value: Literal,
     },
+    /// ADR 0200 — JSON element removal.
+    JsonRemove {
+        column: String,
+        path: Vec<crate::sql::JsonSegment>,
+    },
 }
 
 /// ADR 0193 — SET list that accepts a mix of the expression
@@ -43,16 +48,23 @@ pub(crate) fn mixed_assignments(p: &mut Parser) -> SqlResult<Vec<HistoryAssignme
         let name = p.word()?;
         if p.next_is_json_arrow() {
             let projection = crate::sql::parse_projection_tail(p, name)?;
-            p.symbol('=')?;
-            let literal = p.literal()?;
             let (column, path, as_text) = match projection {
                 crate::sql::Projection::JsonPath { column, path, as_text, .. } =>
                     (column, path, as_text),
                 crate::sql::Projection::Column(_) => unreachable!("arrow guard"),
             };
-            fields.push(HistoryAssignment::JsonPath {
-                column, path, as_text, value: literal,
-            });
+            // ADR 0200 — `REMOVE` keyword after a JSON path
+            // deletes the terminal element instead of
+            // assigning.
+            if p.consume_word("remove") {
+                fields.push(HistoryAssignment::JsonRemove { column, path });
+            } else {
+                p.symbol('=')?;
+                let literal = p.literal()?;
+                fields.push(HistoryAssignment::JsonPath {
+                    column, path, as_text, value: literal,
+                });
+            }
         } else {
             p.symbol('=')?;
             fields.push(HistoryAssignment::Expression {

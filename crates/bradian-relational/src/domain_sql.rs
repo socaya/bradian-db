@@ -481,6 +481,7 @@ impl<'a> DomainSqlSession<'a> {
                         p.end()?;
                         let mut replacements = BTreeMap::new();
                         let mut json_assignments: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
+                        let mut json_removes: Vec<(usize, Vec<crate::sql::JsonSegment>)> = Vec::new();
                         for change in updates {
                             match change {
                                 crate::sql::SetAssignment::Column { column, value } => {
@@ -498,6 +499,13 @@ impl<'a> DomainSqlSession<'a> {
                                     }
                                     let position = locate(&table, &column)?;
                                     json_assignments.push((position, path, as_text, value));
+                                }
+                                crate::sql::SetAssignment::JsonRemove { column, path } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    json_removes.push((position, path));
                                 }
                             }
                         }
@@ -527,6 +535,12 @@ impl<'a> DomainSqlSession<'a> {
                                 let col_name = table.columns[*pos].name.clone();
                                 row[*pos] = crate::sql::apply_json_path_mutation(
                                     &col_name, &row[*pos], path, *as_text, literal)?;
+                            }
+                            // ADR 0200 — JSON removes.
+                            for (pos, path) in &json_removes {
+                                let col_name = table.columns[*pos].name.clone();
+                                row[*pos] = crate::sql::apply_json_path_remove(
+                                    &col_name, &row[*pos], path)?;
                             }
                             crate::sql::check_row(&table, &row)?;
                             crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
