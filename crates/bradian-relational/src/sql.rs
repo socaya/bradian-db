@@ -1468,18 +1468,21 @@ pub(crate) enum JsonMatcher {
     Between { low: Value, high: Value },
     /// ADR 0208 — negated range.
     NotBetween { low: Value, high: Value },
-    /// ADR 0209 — SQL-style pattern match: `%` = any run, `_` =
-    /// one character. Case-sensitive. Text pattern stored as-is;
-    /// matching converts the extracted value to a string.
-    Like { pattern: String },
-    /// ADR 0209 — negated pattern match.
-    NotLike { pattern: String },
-    /// ADR 0210 — case-insensitive pattern match. Pattern and
-    /// extracted text are both ASCII-lowercased before the
-    /// LIKE walk.
-    Ilike { pattern_lower: String },
-    /// ADR 0210 — negated case-insensitive pattern.
-    NotIlike { pattern_lower: String },
+    /// ADR 0209 + ADR 0211 — SQL-style pattern match: `%` = any
+    /// run, `_` = one character; an optional ESCAPE character
+    /// quotes the next literal `%` or `_`. Case-sensitive. Text
+    /// pattern stored as-is; matching converts the extracted
+    /// value to a string.
+    Like { pattern: String, escape: Option<char> },
+    /// ADR 0209 + ADR 0211 — negated pattern match.
+    NotLike { pattern: String, escape: Option<char> },
+    /// ADR 0210 + ADR 0211 — case-insensitive pattern match.
+    /// Pattern and extracted text are both ASCII-lowercased
+    /// before the LIKE walk; the escape character (if any) is
+    /// lowercased alongside the pattern.
+    Ilike { pattern_lower: String, escape: Option<char> },
+    /// ADR 0210 + ADR 0211 — negated case-insensitive pattern.
+    NotIlike { pattern_lower: String, escape: Option<char> },
 }
 
 #[derive(Clone, Debug)]
@@ -1534,11 +1537,13 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             let matcher = if p.consume_word("in") {
                 JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
             } else if p.consume_word("like") {
-                JsonMatcher::Like { pattern: parse_like_pattern(p)? }
+                let pattern = parse_like_pattern(p)?;
+                let escape = parse_optional_escape(p)?;
+                JsonMatcher::Like { pattern, escape }
             } else if p.consume_word("ilike") {
-                JsonMatcher::Ilike {
-                    pattern_lower: parse_like_pattern(p)?.to_ascii_lowercase(),
-                }
+                let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
+                let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
+                JsonMatcher::Ilike { pattern_lower: pattern, escape }
             } else if p.consume_word("between") {
                 parse_between_tail(p, as_text, /*negated=*/false)?
             } else if p.consume_word("is") {
@@ -1557,11 +1562,13 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
                 } else if p.consume_word("between") {
                     parse_between_tail(p, as_text, /*negated=*/true)?
                 } else if p.consume_word("like") {
-                    JsonMatcher::NotLike { pattern: parse_like_pattern(p)? }
+                    let pattern = parse_like_pattern(p)?;
+                    let escape = parse_optional_escape(p)?;
+                    JsonMatcher::NotLike { pattern, escape }
                 } else if p.consume_word("ilike") {
-                    JsonMatcher::NotIlike {
-                        pattern_lower: parse_like_pattern(p)?.to_ascii_lowercase(),
-                    }
+                    let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
+                    let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
+                    JsonMatcher::NotIlike { pattern_lower: pattern, escape }
                 } else {
                     return Err(SqlError::Unsupported(
                         "NOT must be followed by IN, BETWEEN, LIKE, or ILIKE in a JSON-path predicate".into()));
@@ -1638,42 +1645,66 @@ fn parse_like_pattern(p: &mut Parser) -> SqlResult<String> {
     }
 }
 
-/// ADR 0209 — SQL LIKE semantics: `%` matches zero or more
-/// characters, `_` matches exactly one character. Everything
-/// else is a literal character match. No ESCAPE clause support
-/// yet; a literal `%` or `_` in the data must use a different
-/// matcher. Case-sensitive.
-pub(crate) fn like_matches(pattern: &str, value: &str) -> bool {
-    // Compile into (literal, is_wildcard_percent) segments for
-    // bounded backtracking. `_` is a single-character wildcard
-    // between literal runs.
+/// ADR 0211 — parse an optional `ESCAPE 'c'` suffix after a
+/// LIKE / ILIKE pattern. The escape must be a single-character
+/// text literal; empty or multi-character strings are rejected.
+fn parse_optional_escape(p: &mut Parser) -> SqlResult<Option<char>> {
+    if !p.consume_word("escape") { return Ok(None); }
+    let lit = p.literal()?;
+    let s = match lit {
+        Literal::Text(s) => s,
+        _ => return Err(SqlError::Syntax(
+            "ESCAPE requires a single-character text literal".into())),
+    };
+    let mut chars = s.chars();
+    let c = chars.next().ok_or_else(|| SqlError::Syntax(
+        "ESCAPE requires exactly one character".into()))?;
+    if chars.next().is_some() {
+        return Err(SqlError::Syntax(
+            "ESCAPE requires exactly one character".into()));
+    }
+    Ok(Some(c))
+}
+
+/// ADR 0209 + ADR 0211 — SQL LIKE semantics: `%` matches zero or
+/// more characters, `_` matches exactly one character. If an
+/// `escape` character is set, it quotes the next literal `%`,
+/// `_`, or escape character itself. Case-sensitive.
+pub(crate) fn like_matches(pattern: &str, value: &str, escape: Option<char>) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let text: Vec<char> = value.chars().collect();
-    fn go(pat: &[char], text: &[char]) -> bool {
+    fn go(pat: &[char], text: &[char], escape: Option<char>) -> bool {
         if pat.is_empty() { return text.is_empty(); }
+        // ADR 0211 — escape char forces the next pattern char
+        // to match literally.
+        if let Some(e) = escape {
+            if pat[0] == e {
+                if pat.len() < 2 { return false; }
+                if text.is_empty() || text[0] != pat[1] { return false; }
+                return go(&pat[2..], &text[1..], escape);
+            }
+        }
         match pat[0] {
             '%' => {
-                // Collapse consecutive `%`.
                 let mut i = 1;
                 while i < pat.len() && pat[i] == '%' { i += 1; }
                 if i == pat.len() { return true; }
-                // Try every suffix of `text`.
                 for start in 0..=text.len() {
-                    if go(&pat[i..], &text[start..]) { return true; }
+                    if go(&pat[i..], &text[start..], escape) { return true; }
                 }
                 false
             }
             '_' => {
                 if text.is_empty() { return false; }
-                go(&pat[1..], &text[1..])
+                go(&pat[1..], &text[1..], escape)
             }
             c => {
                 if text.is_empty() || text[0] != c { return false; }
-                go(&pat[1..], &text[1..])
+                go(&pat[1..], &text[1..], escape)
             }
         }
     }
-    go(&pat, &text)
+    go(&pat, &text, escape)
 }
 
 /// ADR 0209 — extract a string view of a value for LIKE
@@ -1854,20 +1885,20 @@ pub(crate) fn apply_where_filter(
                                 == std::cmp::Ordering::Greater
                         }
                     }
-                    JsonMatcher::Like { pattern } => match like_source(&extracted) {
-                        Some(s) => like_matches(pattern, &s),
+                    JsonMatcher::Like { pattern, escape } => match like_source(&extracted) {
+                        Some(s) => like_matches(pattern, &s, *escape),
                         None => false,
                     },
-                    JsonMatcher::NotLike { pattern } => match like_source(&extracted) {
-                        Some(s) => !like_matches(pattern, &s),
+                    JsonMatcher::NotLike { pattern, escape } => match like_source(&extracted) {
+                        Some(s) => !like_matches(pattern, &s, *escape),
                         None => false,
                     },
-                    JsonMatcher::Ilike { pattern_lower } => match like_source(&extracted) {
-                        Some(s) => like_matches(pattern_lower, &s.to_ascii_lowercase()),
+                    JsonMatcher::Ilike { pattern_lower, escape } => match like_source(&extracted) {
+                        Some(s) => like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
                         None => false,
                     },
-                    JsonMatcher::NotIlike { pattern_lower } => match like_source(&extracted) {
-                        Some(s) => !like_matches(pattern_lower, &s.to_ascii_lowercase()),
+                    JsonMatcher::NotIlike { pattern_lower, escape } => match like_source(&extracted) {
+                        Some(s) => !like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
                         None => false,
                     },
                     JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
