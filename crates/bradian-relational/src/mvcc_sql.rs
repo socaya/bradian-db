@@ -500,22 +500,40 @@ impl<'a> MvccSqlSession<'a> {
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         let table = self.engine.resolve(&p.name()?)?;
                         p.expect("set")?;
-                        let updates = p.assignments()?;
+                        // ADR 0192 — bare + JSON-path assignments.
+                        let updates = p.path_assignments()?;
                         let key = key_predicate(&mut p, &table)?;
                         p.end()?;
                         let mut replacements = BTreeMap::new();
-                        for (name, lit) in updates {
-                            if table.primary_key.columns.contains(&name) {
-                                return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
-                            }
-                            let position = locate(&table, &name)?;
-                            if replacements.insert(position, coerce(&lit, &table.columns[position])?).is_some() {
-                                return Err(SqlError::Syntax("duplicate SET column".into()));
+                        let mut json_assignments: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
+                        for change in updates {
+                            match change {
+                                crate::sql::SetAssignment::Column { column, value } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    if replacements.insert(position, coerce(&value, &table.columns[position])?).is_some() {
+                                        return Err(SqlError::Syntax("duplicate SET column".into()));
+                                    }
+                                }
+                                crate::sql::SetAssignment::JsonPath { column, path, as_text, value } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    json_assignments.push((position, path, as_text, value));
+                                }
                             }
                         }
                         let mut written_bytes = 0u64;
                         let affected = if let Some(mut row) = tx.get(table.id, &key)? {
                             for (position, value) in replacements { row[position] = value; }
+                            for (pos, path, as_text, literal) in &json_assignments {
+                                let col_name = table.columns[*pos].name.clone();
+                                row[*pos] = crate::sql::apply_json_path_mutation(
+                                    &col_name, &row[*pos], path, *as_text, literal)?;
+                            }
                             // ADR 0182 — per-column CHECK on
                             // the mutated row.
                             crate::sql::check_row(&table, &row)?;

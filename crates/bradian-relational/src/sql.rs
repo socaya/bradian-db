@@ -461,6 +461,37 @@ impl Parser {
         Ok(fields)
     }
 
+    /// ADR 0192 — SET grammar that also accepts JSON path
+    /// assignment LHS: `col = lit`, `col -> seg = lit`, or
+    /// `col ->> seg = lit`. Reuses `parse_projection_tail` for
+    /// the path-chain portion so array index, chained segments
+    /// and `->>` termination all behave the same way as SELECT.
+    pub(crate) fn path_assignments(&mut self) -> SqlResult<Vec<SetAssignment>> {
+        let mut fields = Vec::new();
+        loop {
+            let column = self.word()?;
+            let next_is_arrow = matches!(self.peek(),
+                Some(Token::Arrow) | Some(Token::ArrowText));
+            let assignment = if next_is_arrow {
+                let projection = parse_projection_tail(self, column)?;
+                self.symbol('=')?;
+                let literal = self.literal()?;
+                let (col, path, as_text) = match projection {
+                    Projection::JsonPath { column, path, as_text } =>
+                        (column, path, as_text),
+                    Projection::Column(_) => unreachable!("arrow guard"),
+                };
+                SetAssignment::JsonPath { column: col, path, as_text, value: literal }
+            } else {
+                self.symbol('=')?;
+                SetAssignment::Column { column, value: self.literal()? }
+            };
+            fields.push(assignment);
+            if !self.consume_symbol(',') { break; }
+        }
+        Ok(fields)
+    }
+
     fn predicate(&mut self) -> SqlResult<Vec<(String, Literal)>> {
         self.expect("where")?;
         let mut tests = Vec::new();
@@ -561,6 +592,128 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
         .checked_add(hour * 3600 + minute * 60 + second)?
         .checked_sub(offset_sec)?;
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
+}
+
+/// ADR 0192 — SET assignment element: either a plain column
+/// replacement (existing semantics) or a JSON path mutation.
+#[derive(Clone, Debug)]
+pub(crate) enum SetAssignment {
+    Column { column: String, value: Literal },
+    JsonPath {
+        column: String,
+        path: Vec<JsonSegment>,
+        as_text: bool,
+        value: Literal,
+    },
+}
+
+/// ADR 0192 — apply a JSON path mutation to the supplied JSON
+/// cell, returning the serialized result. Walks the path
+/// creating missing intermediate objects along the way; a
+/// missing intermediate **array** step cannot be auto-created
+/// and surfaces as `SqlError::Type`.
+pub(crate) fn apply_json_path_mutation(
+    column: &str,
+    cell: &Value,
+    path: &[JsonSegment],
+    as_text: bool,
+    value: &Literal,
+) -> SqlResult<Value> {
+    let source = match cell {
+        Value::Null => "null".to_string(),
+        Value::Json(s) | Value::String(s) => s.clone(),
+        other => return Err(SqlError::Type(format!(
+            "JSON mutation requires a JSON cell; column {column} holds {other:?}"))),
+    };
+    let mut root: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|e| SqlError::Type(format!("JSON mutation source does not parse: {e}")))?;
+    // If the source is a bare null and the first step is a key,
+    // treat the root as an empty object so the assignment
+    // creates one.
+    if matches!(root, serde_json::Value::Null)
+        && matches!(path.first(), Some(JsonSegment::Key(_)))
+    {
+        root = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let new_leaf = literal_to_json(value, as_text)?;
+    descend_and_assign(&mut root, path, new_leaf)?;
+    Ok(Value::Json(serde_json::to_string(&root)
+        .map_err(|e| SqlError::Type(format!("JSON mutation serialize: {e}")))?))
+}
+
+fn descend_and_assign(
+    current: &mut serde_json::Value,
+    path: &[JsonSegment],
+    new_leaf: serde_json::Value,
+) -> SqlResult<()> {
+    match path.split_first() {
+        None => { *current = new_leaf; Ok(()) }
+        Some((seg, rest)) => match seg {
+            JsonSegment::Key(k) => {
+                if !current.is_object() {
+                    // Replacing a non-object intermediate with
+                    // an empty object is the SQL-standard
+                    // "assign creates container" behavior.
+                    *current = serde_json::Value::Object(serde_json::Map::new());
+                }
+                let obj = current.as_object_mut().expect("just replaced");
+                let next = obj.entry(k.as_str().to_string())
+                    .or_insert(serde_json::Value::Null);
+                if rest.iter().next().is_some()
+                    && matches!(next, serde_json::Value::Null)
+                    && matches!(rest.first(), Some(JsonSegment::Key(_)))
+                {
+                    *next = serde_json::Value::Object(serde_json::Map::new());
+                }
+                descend_and_assign(next, rest, new_leaf)
+            }
+            JsonSegment::Index(i) => {
+                let arr = current.as_array_mut()
+                    .ok_or_else(|| SqlError::Type(format!(
+                        "JSON mutation: cannot apply array index to non-array (step index={i})")))?;
+                if *i >= arr.len() {
+                    return Err(SqlError::Type(format!(
+                        "JSON mutation: array index {i} out of bounds (len {})", arr.len())));
+                }
+                descend_and_assign(&mut arr[*i], rest, new_leaf)
+            }
+        }
+    }
+}
+
+fn literal_to_json(lit: &Literal, as_text: bool) -> SqlResult<serde_json::Value> {
+    match (lit, as_text) {
+        (Literal::Null, _) => Ok(serde_json::Value::Null),
+        (Literal::Text(s), true) => Ok(serde_json::Value::String(s.clone())),
+        (Literal::Text(s), false) => {
+            // `->` text literals are canonical strings in JSON;
+            // the user writes `'abc'` and gets a JSON string.
+            Ok(serde_json::Value::String(s.clone()))
+        }
+        (Literal::Number(s), as_text) => {
+            if as_text {
+                Ok(serde_json::Value::String(s.clone()))
+            } else {
+                // Parse as f64 if fractional, else i64.
+                if s.contains('.') {
+                    let n: f64 = s.parse().map_err(|_| SqlError::Type(
+                        format!("invalid numeric for JSON mutation: {s}")))?;
+                    Ok(serde_json::Number::from_f64(n)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null))
+                } else {
+                    let n: i64 = s.parse().map_err(|_| SqlError::Type(
+                        format!("invalid integer for JSON mutation: {s}")))?;
+                    Ok(serde_json::Value::Number(n.into()))
+                }
+            }
+        }
+        (Literal::Bool(b), true) => Ok(serde_json::Value::String(
+            if *b { "true".into() } else { "false".into() })),
+        (Literal::Bool(b), false) => Ok(serde_json::Value::Bool(*b)),
+        (Literal::Default, _) => Err(SqlError::Syntax(
+            "DEFAULT is not supported in a JSON path assignment".into())),
+    }
 }
 
 /// ADR 0191 — one segment of a JSON path chain. A key
@@ -1914,17 +2067,31 @@ impl SqlEngine {
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
                 p.expect("set")?;
-                let changes = p.assignments()?;
+                // ADR 0192 — accept bare-column and JSON-path
+                // assignment LHS forms.
+                let changes = p.path_assignments()?;
                 let pk = key_predicate(&mut p, &table)?;
                 p.end()?;
-                let mut assignments = BTreeMap::new();
-                for (field, lit) in changes {
-                    let position = locate(&table, &field)?;
-                    if table.primary_key.columns.contains(&field) {
-                        return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
-                    }
-                    if assignments.insert(position, coerce(&lit, &table.columns[position])?).is_some() {
-                        return Err(SqlError::Syntax("duplicate SET column".into()));
+                let mut column_assignments: BTreeMap<usize, Value> = BTreeMap::new();
+                let mut json_assignments: Vec<(usize, Vec<JsonSegment>, bool, Literal)> = Vec::new();
+                for change in changes {
+                    match change {
+                        SetAssignment::Column { column, value } => {
+                            let position = locate(&table, &column)?;
+                            if table.primary_key.columns.contains(&column) {
+                                return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
+                            }
+                            if column_assignments.insert(position, coerce(&value, &table.columns[position])?).is_some() {
+                                return Err(SqlError::Syntax("duplicate SET column".into()));
+                            }
+                        }
+                        SetAssignment::JsonPath { column, path, as_text, value } => {
+                            let position = locate(&table, &column)?;
+                            if table.primary_key.columns.contains(&column) {
+                                return Err(SqlError::Unsupported("UPDATE cannot modify primary-key columns".into()));
+                            }
+                            json_assignments.push((position, path, as_text, value));
+                        }
                     }
                 }
                 // ADR 0147 — deadline check before mutation.
@@ -1933,7 +2100,17 @@ impl SqlEngine {
                 let existing = store.get(&pk)?;
                 let mut written_bytes = 0u64;
                 let affected = if let Some(mut row) = existing {
-                    for (pos, value) in assignments { row[pos] = value; }
+                    for (pos, value) in column_assignments { row[pos] = value; }
+                    // ADR 0192 — apply JSON path mutations
+                    // AFTER column-level assignments so that a
+                    // concurrent `SET body = '{}', body->'k'=1`
+                    // target does the right thing (reset then
+                    // write).
+                    for (pos, path, as_text, literal) in &json_assignments {
+                        let col_name = table.columns[*pos].name.clone();
+                        row[*pos] = apply_json_path_mutation(
+                            &col_name, &row[*pos], path, *as_text, literal)?;
+                    }
                     // ADR 0182 — evaluate per-column CHECKs on
                     // the mutated row.
                     check_row(&table, &row)?;
