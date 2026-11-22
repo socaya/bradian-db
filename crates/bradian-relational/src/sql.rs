@@ -1474,6 +1474,12 @@ pub(crate) enum JsonMatcher {
     Like { pattern: String },
     /// ADR 0209 — negated pattern match.
     NotLike { pattern: String },
+    /// ADR 0210 — case-insensitive pattern match. Pattern and
+    /// extracted text are both ASCII-lowercased before the
+    /// LIKE walk.
+    Ilike { pattern_lower: String },
+    /// ADR 0210 — negated case-insensitive pattern.
+    NotIlike { pattern_lower: String },
 }
 
 #[derive(Clone, Debug)]
@@ -1529,6 +1535,10 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
                 JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
             } else if p.consume_word("like") {
                 JsonMatcher::Like { pattern: parse_like_pattern(p)? }
+            } else if p.consume_word("ilike") {
+                JsonMatcher::Ilike {
+                    pattern_lower: parse_like_pattern(p)?.to_ascii_lowercase(),
+                }
             } else if p.consume_word("between") {
                 parse_between_tail(p, as_text, /*negated=*/false)?
             } else if p.consume_word("is") {
@@ -1548,9 +1558,13 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
                     parse_between_tail(p, as_text, /*negated=*/true)?
                 } else if p.consume_word("like") {
                     JsonMatcher::NotLike { pattern: parse_like_pattern(p)? }
+                } else if p.consume_word("ilike") {
+                    JsonMatcher::NotIlike {
+                        pattern_lower: parse_like_pattern(p)?.to_ascii_lowercase(),
+                    }
                 } else {
                     return Err(SqlError::Unsupported(
-                        "NOT must be followed by IN, BETWEEN, or LIKE in a JSON-path predicate".into()));
+                        "NOT must be followed by IN, BETWEEN, LIKE, or ILIKE in a JSON-path predicate".into()));
                 }
             } else {
                 let op = p.word_or_symbol_pair_for_check()?;
@@ -1846,6 +1860,14 @@ pub(crate) fn apply_where_filter(
                     },
                     JsonMatcher::NotLike { pattern } => match like_source(&extracted) {
                         Some(s) => !like_matches(pattern, &s),
+                        None => false,
+                    },
+                    JsonMatcher::Ilike { pattern_lower } => match like_source(&extracted) {
+                        Some(s) => like_matches(pattern_lower, &s.to_ascii_lowercase()),
+                        None => false,
+                    },
+                    JsonMatcher::NotIlike { pattern_lower } => match like_source(&extracted) {
+                        Some(s) => !like_matches(pattern_lower, &s.to_ascii_lowercase()),
                         None => false,
                     },
                     JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
