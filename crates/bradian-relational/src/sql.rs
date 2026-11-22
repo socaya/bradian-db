@@ -1238,6 +1238,10 @@ pub(crate) enum AggSpec {
     /// columns preserve the declared scale (half-even
     /// rounding on the final divide).
     Avg(String),
+    /// ADR 0216 — non-null count of one column.
+    CountCol(String),
+    /// ADR 0216 — distinct non-null count of one column.
+    CountDistinct(String),
 }
 
 impl AggSpec {
@@ -1248,6 +1252,7 @@ impl AggSpec {
             AggSpec::Max(_) => "max",
             AggSpec::Sum(_) => "sum",
             AggSpec::Avg(_) => "avg",
+            AggSpec::CountCol(_) | AggSpec::CountDistinct(_) => "count",
         }
     }
 }
@@ -1259,12 +1264,17 @@ impl AggSpec {
 pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
     let agg = if p.consume_word("count") {
         p.symbol('(')?;
-        if !p.consume_symbol('*') {
-            return Err(SqlError::Unsupported(
-                "only COUNT(*) is supported today; COUNT(col) / DISTINCT reserved".into()));
-        }
+        // ADR 0216 — COUNT branches: `*` counts rows, `DISTINCT
+        // col` counts distinct non-null values, `col` counts
+        // non-null extractions.
+        let spec = if p.consume_symbol('*') { AggSpec::CountStar }
+            else if p.consume_word("distinct") {
+                AggSpec::CountDistinct(p.word()?)
+            } else {
+                AggSpec::CountCol(p.word()?)
+            };
         p.symbol(')')?;
-        AggSpec::CountStar
+        spec
     } else if p.consume_word("min") {
         p.symbol('(')?;
         let column = p.word()?;
@@ -1366,6 +1376,33 @@ pub(crate) fn evaluate_aggregate(
                 (Some(v), DataType::Decimal { .. }) => Value::Decimal(v),
                 _ => unreachable!("type check above excludes other variants"),
             })
+        }
+        // ADR 0216 — non-null count of one column.
+        AggSpec::CountCol(column) => {
+            let position = locate(table, column)?;
+            let n = rows.iter()
+                .filter(|row| !matches!(row[position], Value::Null))
+                .count();
+            Ok(Value::Int64(n as i64))
+        }
+        // ADR 0216 — distinct non-null count. Uses
+        // `compare_values_for_check` so cross-type equivalents
+        // (e.g. Int32 vs Int64, Json vs legacy String-encoded
+        // JSON) collapse into the same bucket, matching the
+        // scalar comparison semantics everywhere else.
+        AggSpec::CountDistinct(column) => {
+            let position = locate(table, column)?;
+            let mut seen: Vec<Value> = Vec::new();
+            for row in rows {
+                if matches!(row[position], Value::Null) { continue; }
+                if !seen.iter().any(|existing|
+                    compare_values_for_check(existing, &row[position])
+                        == std::cmp::Ordering::Equal)
+                {
+                    seen.push(row[position].clone());
+                }
+            }
+            Ok(Value::Int64(seen.len() as i64))
         }
         // ADR 0215 — arithmetic mean over non-null values.
         AggSpec::Avg(column) => {

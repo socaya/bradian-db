@@ -117,11 +117,16 @@ fn count_star_with_like() {
 }
 
 #[test]
-fn count_without_star_is_rejected() {
+fn count_of_column_counts_non_null_rows() {
+    // ADR 0213 scoped to COUNT(*). ADR 0216 added COUNT(col)
+    // as a sibling matcher. All rows here have a non-null id,
+    // so COUNT(id) matches COUNT(*).
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
-    let err = db.execute("SELECT COUNT(id) FROM t.public.items").unwrap_err();
-    assert!(matches!(err, SqlError::Unsupported(_)));
+    assert_eq!(
+        single_count(db.execute("SELECT COUNT(id) FROM t.public.items").unwrap()),
+        5,
+    );
 }
 
 #[test]
