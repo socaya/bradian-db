@@ -108,6 +108,13 @@ enum Token {
     Number(String),
     Text(String),
     Symbol(char),
+    /// ADR 0186 — JSON path operator `->` (returns a JSON
+    /// sub-value).  Lexed as one token so it can't be parsed
+    /// as minus-then-gt in the WHERE grammar.
+    Arrow,
+    /// ADR 0186 — JSON path operator `->>` (returns the
+    /// textual form of the sub-value).
+    ArrowText,
 }
 
 fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
@@ -161,6 +168,19 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 word.push(chars.next().unwrap());
             }
             out.push(Token::Word(word));
+        } else if ch == '-' && chars.clone().nth(1) == Some('>') && !expressions {
+            // ADR 0186 — `->` or `->>` JSON path operator.
+            // Lexed before the number-prefix branch so the
+            // existing "minus must prefix a numeric literal"
+            // check still fires for a lone `-`.
+            chars.next();
+            chars.next();
+            if chars.peek() == Some(&'>') {
+                chars.next();
+                out.push(Token::ArrowText);
+            } else {
+                out.push(Token::Arrow);
+            }
         } else if ch.is_ascii_digit() || (ch == '-' && !expressions) {
             let mut number = String::new();
             if ch == '-' {
@@ -234,6 +254,11 @@ impl Parser {
     }
 
     fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
+
+    /// ADR 0186 — consume the current token without inspection.
+    /// Used when a caller has already matched the token via
+    /// `peek` and wants to move the cursor forward.
+    pub(crate) fn advance(&mut self) { self.pos += 1; }
 
     pub(crate) fn word(&mut self) -> SqlResult<String> {
         match self.tokens.get(self.pos).cloned() {
@@ -527,6 +552,85 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
         .checked_add(hour * 3600 + minute * 60 + second)?
         .checked_sub(offset_sec)?;
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
+}
+
+/// ADR 0186 — SELECT projection element: either a bare column
+/// or a JSON path extraction on a column.
+#[derive(Clone, Debug)]
+pub(crate) enum Projection {
+    Column(String),
+    JsonPath { column: String, key: String, as_text: bool },
+}
+
+impl Projection {
+    pub(crate) fn source_column(&self) -> &str {
+        match self {
+            Projection::Column(c) => c,
+            Projection::JsonPath { column, .. } => column,
+        }
+    }
+
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Projection::Column(c) => c.clone(),
+            Projection::JsonPath { column, key, as_text } => {
+                let op = if *as_text { "->>" } else { "->" };
+                format!("{column}{op}'{key}'")
+            }
+        }
+    }
+}
+
+/// ADR 0186 — parse a single SELECT projection: identifier,
+/// optionally followed by `-> 'key'` (returns JSON sub-value)
+/// or `->> 'key'` (returns the text form of the sub-value).
+pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
+    let column = p.word()?;
+    let as_text = match p.peek() {
+        Some(Token::ArrowText) => { p.advance(); true }
+        Some(Token::Arrow) => { p.advance(); false }
+        _ => return Ok(Projection::Column(column)),
+    };
+    let key = match p.peek().cloned() {
+        Some(Token::Text(s)) => { p.advance(); s }
+        _ => return Err(SqlError::Syntax(
+            "JSON path key must be a single-quoted string literal".into())),
+    };
+    Ok(Projection::JsonPath { column, key, as_text })
+}
+
+/// ADR 0186 — extract `cell -> key` or `cell ->> key` from a
+/// JSON cell. Non-JSON cells raise a type error; missing keys
+/// return `Value::Null`.
+pub(crate) fn apply_projection(pj: &Projection, cell: Value) -> SqlResult<Value> {
+    match pj {
+        Projection::Column(_) => Ok(cell),
+        Projection::JsonPath { column, key, as_text } => {
+            let source = match &cell {
+                Value::Null => return Ok(Value::Null),
+                // Accept both the modern Value::Json variant
+                // (ADR 0173) and legacy String-encoded JSON
+                // from pre-ADR-0173 rows under a JSON column.
+                Value::Json(s) | Value::String(s) => s.as_str(),
+                other => return Err(SqlError::Type(format!(
+                    "JSON path operator requires a JSON cell; column {column} holds {other:?}"))),
+            };
+            let parsed: serde_json::Value = serde_json::from_str(source)
+                .map_err(|e| SqlError::Type(format!("JSON path source does not parse: {e}")))?;
+            let sub = parsed.get(key.as_str()).cloned().unwrap_or(serde_json::Value::Null);
+            if matches!(sub, serde_json::Value::Null) { return Ok(Value::Null); }
+            if *as_text {
+                Ok(Value::String(match sub {
+                    serde_json::Value::String(s) => s,
+                    other => serde_json::to_string(&other)
+                        .map_err(|e| SqlError::Type(format!("JSON path text render: {e}")))?,
+                }))
+            } else {
+                Ok(Value::Json(serde_json::to_string(&sub)
+                    .map_err(|e| SqlError::Type(format!("JSON path sub-render: {e}")))?))
+            }
+        }
+    }
 }
 
 /// ADR 0185 — parse one `CASCADE | SET NULL | RESTRICT |
@@ -1352,39 +1456,43 @@ impl SqlEngine {
                 // ADR 0144 — deadline check before scan.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 let caller_wildcard = p.consume_symbol('*');
-                let selected = if caller_wildcard { Vec::new() } else {
-                    let mut names = vec![p.word()?];
-                    while p.consume_symbol(',') { names.push(p.word()?); }
-                    names
+                // ADR 0186 — projection list accepts bare `col`
+                // plus `col -> 'key'` / `col ->> 'key'` JSON
+                // path extractions.
+                let projections = if caller_wildcard { Vec::new() } else {
+                    let mut out = vec![parse_projection(&mut p)?];
+                    while p.consume_symbol(',') { out.push(parse_projection(&mut p)?); }
+                    out
                 };
                 p.expect("from")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
-                let mut selected = if selected.is_empty() {
-                    table.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
-                } else { selected };
-                if selected.is_empty() {
+                let mut projections = if projections.is_empty() {
+                    table.columns.iter().map(|c| Projection::Column(c.name.clone())).collect::<Vec<_>>()
+                } else { projections };
+                if projections.is_empty() {
                     return Err(SqlError::Syntax("SELECT requires columns".into()));
                 }
                 // ADR 0155 — column-level policy filtering.
                 if let Some(p_) = policy {
                     if p_.column_level.is_configured() {
                         if caller_wildcard {
-                            selected.retain(|c| p_.column_level.allows_read(c));
+                            projections.retain(|pj| p_.column_level.allows_read(pj.source_column()));
                         } else {
-                            for c in &selected {
-                                if !p_.column_level.allows_read(c) {
+                            for pj in &projections {
+                                if !p_.column_level.allows_read(pj.source_column()) {
                                     return Err(SqlError::Policy(
                                         crate::access_policy::PolicyError::ColumnDenied {
-                                            column: c.clone(),
+                                            column: pj.source_column().into(),
                                         }));
                                 }
                             }
                         }
                     }
                 }
-                let mut indices = Vec::new();
-                for column in &selected { indices.push(locate(&table, column)?); }
+                let indices: Vec<usize> = projections.iter()
+                    .map(|pj| locate(&table, pj.source_column()))
+                    .collect::<SqlResult<Vec<_>>>()?;
                 let key = if p.next_is_word("where") { Some(key_predicate(&mut p, &table)?) } else { None };
                 p.end()?;
                 let store = self.table_store(&table)?;
@@ -1411,8 +1519,16 @@ impl SqlEngine {
                     }
                     kept
                 } else { all };
-                let rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
-                Ok(SqlResultSet::Rows { columns: std::mem::take(&mut selected), rows })
+                let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
+                // ADR 0186 — apply JSON path extraction per cell
+                // after the base projection. Bare columns pass
+                // through unchanged.
+                let rows: Vec<Vec<Value>> = base_rows.into_iter().map(|row|
+                    row.into_iter().zip(&projections).map(|(value, pj)| apply_projection(pj, value))
+                        .collect::<SqlResult<Vec<Value>>>()
+                ).collect::<SqlResult<Vec<Vec<Value>>>>()?;
+                let columns: Vec<String> = projections.iter().map(|pj| pj.label()).collect();
+                Ok(SqlResultSet::Rows { columns, rows })
             }
             "update" => {
                 let name = p.name()?;
