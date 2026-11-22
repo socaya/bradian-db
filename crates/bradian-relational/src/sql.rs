@@ -559,12 +559,16 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
 }
 
-/// ADR 0186 — SELECT projection element: either a bare column
-/// or a JSON path extraction on a column.
+/// ADR 0186 + ADR 0189 — SELECT projection element. Either a
+/// bare column or a chained JSON path extraction with one or
+/// more key segments. `as_text` applies to the **final** step;
+/// intermediate steps are always `->` (JSON out), rejected at
+/// parse if a caller writes `col ->> 'a' -> 'b'` (the `->>` can
+/// only appear last).
 #[derive(Clone, Debug)]
 pub(crate) enum Projection {
     Column(String),
-    JsonPath { column: String, key: String, as_text: bool },
+    JsonPath { column: String, path: Vec<String>, as_text: bool },
 }
 
 impl Projection {
@@ -578,60 +582,92 @@ impl Projection {
     pub(crate) fn label(&self) -> String {
         match self {
             Projection::Column(c) => c.clone(),
-            Projection::JsonPath { column, key, as_text } => {
-                let op = if *as_text { "->>" } else { "->" };
-                format!("{column}{op}'{key}'")
+            Projection::JsonPath { column, path, as_text } => {
+                let mut out = column.clone();
+                if let Some((last, mids)) = path.split_last() {
+                    for key in mids {
+                        out.push_str("->'");
+                        out.push_str(key);
+                        out.push('\'');
+                    }
+                    let op = if *as_text { "->>" } else { "->" };
+                    out.push_str(op);
+                    out.push('\'');
+                    out.push_str(last);
+                    out.push('\'');
+                }
+                out
             }
         }
     }
 }
 
-/// ADR 0186 — parse a single SELECT projection: identifier,
-/// optionally followed by `-> 'key'` (returns JSON sub-value)
-/// or `->> 'key'` (returns the text form of the sub-value).
+/// ADR 0186 + ADR 0189 — parse a projection: identifier,
+/// optionally followed by one or more `-> 'key'` / `->> 'key'`
+/// segments. Intermediate segments must be `->`; a `->>`
+/// segment can only appear at the end (SQL-standard: text
+/// extraction terminates the path).
 pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
     let column = p.word()?;
-    let as_text = match p.peek() {
-        Some(Token::ArrowText) => { p.advance(); true }
-        Some(Token::Arrow) => { p.advance(); false }
-        _ => return Ok(Projection::Column(column)),
-    };
-    let key = match p.peek().cloned() {
-        Some(Token::Text(s)) => { p.advance(); s }
-        _ => return Err(SqlError::Syntax(
-            "JSON path key must be a single-quoted string literal".into())),
-    };
-    Ok(Projection::JsonPath { column, key, as_text })
+    let mut path = Vec::new();
+    let mut as_text = false;
+    loop {
+        let final_text = match p.peek() {
+            Some(Token::ArrowText) => { p.advance(); true }
+            Some(Token::Arrow) => { p.advance(); false }
+            _ => break,
+        };
+        if as_text {
+            // A prior segment already consumed `->>` — no
+            // further segments allowed (would require re-
+            // parsing TEXT as JSON).
+            return Err(SqlError::Unsupported(
+                "`->>` JSON path terminator cannot be followed by more segments".into()));
+        }
+        let key = match p.peek().cloned() {
+            Some(Token::Text(s)) => { p.advance(); s }
+            _ => return Err(SqlError::Syntax(
+                "JSON path key must be a single-quoted string literal".into())),
+        };
+        path.push(key);
+        as_text = final_text;
+    }
+    if path.is_empty() {
+        return Ok(Projection::Column(column));
+    }
+    Ok(Projection::JsonPath { column, path, as_text })
 }
 
-/// ADR 0186 — extract `cell -> key` or `cell ->> key` from a
-/// JSON cell. Non-JSON cells raise a type error; missing keys
-/// return `Value::Null`.
+/// ADR 0186 + ADR 0189 — extract a chained JSON path from a
+/// cell. Each segment walks one key into the parsed JSON;
+/// missing / NULL at any step short-circuits to `Value::Null`.
+/// `as_text` controls only the final rendering.
 pub(crate) fn apply_projection(pj: &Projection, cell: Value) -> SqlResult<Value> {
     match pj {
         Projection::Column(_) => Ok(cell),
-        Projection::JsonPath { column, key, as_text } => {
+        Projection::JsonPath { column, path, as_text } => {
             let source = match &cell {
                 Value::Null => return Ok(Value::Null),
-                // Accept both the modern Value::Json variant
-                // (ADR 0173) and legacy String-encoded JSON
-                // from pre-ADR-0173 rows under a JSON column.
                 Value::Json(s) | Value::String(s) => s.as_str(),
                 other => return Err(SqlError::Type(format!(
                     "JSON path operator requires a JSON cell; column {column} holds {other:?}"))),
             };
-            let parsed: serde_json::Value = serde_json::from_str(source)
+            let mut current: serde_json::Value = serde_json::from_str(source)
                 .map_err(|e| SqlError::Type(format!("JSON path source does not parse: {e}")))?;
-            let sub = parsed.get(key.as_str()).cloned().unwrap_or(serde_json::Value::Null);
-            if matches!(sub, serde_json::Value::Null) { return Ok(Value::Null); }
+            for key in path {
+                current = current.get(key.as_str()).cloned().unwrap_or(serde_json::Value::Null);
+                if matches!(current, serde_json::Value::Null) {
+                    return Ok(Value::Null);
+                }
+            }
             if *as_text {
-                Ok(Value::String(match sub {
+                Ok(Value::String(match current {
                     serde_json::Value::String(s) => s,
                     other => serde_json::to_string(&other)
                         .map_err(|e| SqlError::Type(format!("JSON path text render: {e}")))?,
                 }))
             } else {
-                Ok(Value::Json(serde_json::to_string(&sub)
+                Ok(Value::Json(serde_json::to_string(&current)
                     .map_err(|e| SqlError::Type(format!("JSON path sub-render: {e}")))?))
             }
         }
