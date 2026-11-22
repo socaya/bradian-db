@@ -265,6 +265,15 @@ impl Parser {
     /// `peek` and wants to move the cursor forward.
     pub(crate) fn advance(&mut self) { self.pos += 1; }
 
+    /// ADR 0193 — predicate for module-external callers
+    /// (`sql_expression`) that need to tell apart an arithmetic
+    /// `col = expr` SET element from a JSON-path mutation
+    /// `col -> ... = lit` without reaching into the private
+    /// `Token` enum.
+    pub(crate) fn next_is_json_arrow(&self) -> bool {
+        matches!(self.peek(), Some(Token::Arrow) | Some(Token::ArrowText))
+    }
+
     /// ADR 0190 — save / restore the cursor for lookahead.
     pub(crate) fn save_pos(&self) -> usize { self.pos }
     pub(crate) fn restore_pos(&mut self, pos: usize) { self.pos = pos; }

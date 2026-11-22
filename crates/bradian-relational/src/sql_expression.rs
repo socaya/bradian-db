@@ -20,13 +20,45 @@ fn spend(nodes: &mut usize) -> SqlResult<()> {
     Ok(())
 }
 
-pub(crate) fn assignments(p: &mut Parser) -> SqlResult<Vec<(String, Expression)>> {
+/// ADR 0193 — SET element for `HistorySqlEngine` UPDATE.
+/// Either the existing numeric-expression RHS or a JSON path
+/// mutation. Dispatch is decided per-element by peeking the
+/// token after the column name.
+pub(crate) enum HistoryAssignment {
+    Expression { column: String, expr: Expression },
+    JsonPath {
+        column: String,
+        path: Vec<crate::sql::JsonSegment>,
+        as_text: bool,
+        value: Literal,
+    },
+}
+
+/// ADR 0193 — SET list that accepts a mix of the expression
+/// grammar and JSON path mutation per assignment.
+pub(crate) fn mixed_assignments(p: &mut Parser) -> SqlResult<Vec<HistoryAssignment>> {
     let mut nodes = 0;
     let mut fields = Vec::new();
     loop {
         let name = p.word()?;
-        p.symbol('=')?;
-        fields.push((name, sum(p, &mut nodes, 0)?));
+        if p.next_is_json_arrow() {
+            let projection = crate::sql::parse_projection_tail(p, name)?;
+            p.symbol('=')?;
+            let literal = p.literal()?;
+            let (column, path, as_text) = match projection {
+                crate::sql::Projection::JsonPath { column, path, as_text } =>
+                    (column, path, as_text),
+                crate::sql::Projection::Column(_) => unreachable!("arrow guard"),
+            };
+            fields.push(HistoryAssignment::JsonPath {
+                column, path, as_text, value: literal,
+            });
+        } else {
+            p.symbol('=')?;
+            fields.push(HistoryAssignment::Expression {
+                column: name, expr: sum(p, &mut nodes, 0)?,
+            });
+        }
         if !p.consume_symbol(',') { break; }
     }
     Ok(fields)

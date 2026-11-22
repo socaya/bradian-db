@@ -909,17 +909,32 @@ impl<'a> HistorySqlSession<'a> {
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         let table = self.engine.resolve(&p.name()?)?;
                         p.expect("set")?;
-                        let updates = crate::sql_expression::assignments(&mut p)?;
+                        // ADR 0193 — SET accepts expression RHS
+                        // for bare columns AND JSON path mutation
+                        // for JSON columns in the same statement.
+                        let updates = crate::sql_expression::mixed_assignments(&mut p)?;
                         let key = key_predicate(&mut p, &table)?;
                         p.end()?;
                         let mut replacements = BTreeMap::new();
-                        for (name, expression) in updates {
-                            if table.primary_key.columns.contains(&name) {
-                                return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
-                            }
-                            let position = locate(&table, &name)?;
-                            if replacements.insert(position, crate::sql_expression::bind(&table, position, expression)?).is_some() {
-                                return Err(SqlError::Syntax("duplicate SET column".into()));
+                        let mut json_assignments: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
+                        for change in updates {
+                            match change {
+                                crate::sql_expression::HistoryAssignment::Expression { column, expr } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    if replacements.insert(position, crate::sql_expression::bind(&table, position, expr)?).is_some() {
+                                        return Err(SqlError::Syntax("duplicate SET column".into()));
+                                    }
+                                }
+                                crate::sql_expression::HistoryAssignment::JsonPath { column, path, as_text, value } => {
+                                    if table.primary_key.columns.contains(&column) {
+                                        return Err(SqlError::Unsupported("primary key UPDATE not supported".into()));
+                                    }
+                                    let position = locate(&table, &column)?;
+                                    json_assignments.push((position, path, as_text, value));
+                                }
                             }
                         }
                         let mut written_bytes = 0u64;
@@ -927,6 +942,15 @@ impl<'a> HistorySqlSession<'a> {
                             let original = row.clone();
                             for (position, expression) in replacements {
                                 row[position] = expression.evaluate(&original, &table.columns[position])?;
+                            }
+                            // ADR 0193 — apply JSON path
+                            // mutations after expression
+                            // replacements (same order as the
+                            // non-history engines).
+                            for (pos, path, as_text, literal) in &json_assignments {
+                                let col_name = table.columns[*pos].name.clone();
+                                row[*pos] = crate::sql::apply_json_path_mutation(
+                                    &col_name, &row[*pos], path, *as_text, literal)?;
                             }
                             // ADR 0182 — per-column CHECK on
                             // the mutated row.
