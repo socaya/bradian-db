@@ -1451,10 +1451,20 @@ fn parse_container_path(p: &mut Parser) -> SqlResult<Vec<JsonSegment>> {
 /// (equality or any ordering comparison) runs a full scan
 /// with a per-row filter.
 #[derive(Clone, Debug)]
+pub(crate) enum JsonMatcher {
+    /// ADR 0195 — scalar comparison against a single literal.
+    Compare { op: crate::model::CheckOp, literal: Value },
+    /// ADR 0206 — membership: row matches when the extracted
+    /// value equals any of the listed literals.
+    In { literals: Vec<Value> },
+    /// ADR 0206 — negated membership.
+    NotIn { literals: Vec<Value> },
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct JsonPredicate {
     pub(crate) projection: Projection,
-    pub(crate) op: crate::model::CheckOp,
-    pub(crate) literal: Value,
+    pub(crate) matcher: JsonMatcher,
 }
 
 #[derive(Clone, Debug)]
@@ -1493,14 +1503,28 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
         loop {
             let projection = parse_projection_tail(p, col)?;
             locate(table, projection.source_column())?;
-            let op = p.word_or_symbol_pair_for_check()?;
-            let literal = p.literal()?;
-            let value = match &projection {
+            // ADR 0206 — IN (…) / NOT IN (…) before the scalar
+            // comparison dispatch. NOT must be immediately
+            // followed by IN; a bare NOT is not accepted here.
+            let as_text = match &projection {
                 Projection::Column(_) => unreachable!("json path has non-empty chain"),
-                Projection::JsonPath { as_text, .. } =>
-                    coerce_where_literal(&literal, *as_text)?,
+                Projection::JsonPath { as_text, .. } => *as_text,
             };
-            current.push(JsonPredicate { projection, op, literal: value });
+            let matcher = if p.consume_word("in") {
+                JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
+            } else if p.consume_word("not") {
+                if !p.consume_word("in") {
+                    return Err(SqlError::Unsupported(
+                        "NOT must be followed by IN in a JSON-path predicate".into()));
+                }
+                JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
+            } else {
+                let op = p.word_or_symbol_pair_for_check()?;
+                let literal = p.literal()?;
+                let value = coerce_where_literal(&literal, as_text)?;
+                JsonMatcher::Compare { op, literal: value }
+            };
+            current.push(JsonPredicate { projection, matcher });
             // Either continue the current AND-group, start a
             // new OR-group, or stop.
             let next = if p.consume_word("and") { 'a' }
@@ -1553,6 +1577,26 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             .collect();
         Ok(SelectWhere::KeyPredicate(ordered))
     }
+}
+
+/// ADR 0206 — parse `( lit, lit, … )` as the RHS of an IN /
+/// NOT IN predicate. Coerces each literal with the same
+/// `as_text` convention as a scalar JSON-path predicate. At
+/// least one value is required.
+fn parse_literal_list(p: &mut Parser, as_text: bool) -> SqlResult<Vec<Value>> {
+    p.symbol('(')?;
+    let mut values = Vec::new();
+    loop {
+        let literal = p.literal()?;
+        values.push(coerce_where_literal(&literal, as_text)?);
+        if !p.consume_symbol(',') { break; }
+    }
+    p.symbol(')')?;
+    if values.is_empty() {
+        return Err(SqlError::Syntax(
+            "IN / NOT IN requires at least one value".into()));
+    }
+    Ok(values)
 }
 
 /// ADR 0190 — coerce the RHS of a JSON path equality. For
@@ -1609,17 +1653,32 @@ pub(crate) fn apply_where_filter(
         |row: &[Value], group: &[JsonPredicate], positions: &[usize]| -> SqlResult<bool> {
             for (pred, position) in group.iter().zip(positions) {
                 let extracted = apply_projection(&pred.projection, row[*position].clone())?;
-                if matches!(extracted, Value::Null) || matches!(pred.literal, Value::Null) {
+                if matches!(extracted, Value::Null) {
                     return Ok(false);
                 }
-                let ord = compare_values_for_check(&extracted, &pred.literal);
-                let satisfied = match pred.op {
-                    crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
-                    crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
-                    crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
-                    crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
-                    crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
-                    crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                let satisfied = match &pred.matcher {
+                    JsonMatcher::Compare { op, literal } => {
+                        if matches!(literal, Value::Null) { return Ok(false); }
+                        let ord = compare_values_for_check(&extracted, literal);
+                        match op {
+                            crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                            crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                            crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                            crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                            crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                            crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                        }
+                    }
+                    // ADR 0206 — NULL literals in the IN list
+                    // never match (SQL three-valued logic).
+                    JsonMatcher::In { literals } => literals.iter().any(|lit|
+                        !matches!(lit, Value::Null)
+                            && compare_values_for_check(&extracted, lit)
+                                == std::cmp::Ordering::Equal),
+                    JsonMatcher::NotIn { literals } => literals.iter().all(|lit|
+                        !matches!(lit, Value::Null)
+                            && compare_values_for_check(&extracted, lit)
+                                != std::cmp::Ordering::Equal),
                 };
                 if !satisfied { return Ok(false); }
             }
