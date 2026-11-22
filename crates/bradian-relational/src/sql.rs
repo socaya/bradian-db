@@ -529,6 +529,24 @@ pub(crate) fn parse_iso8601_micros(s: &str) -> Option<i64> {
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
 }
 
+/// ADR 0185 — parse one `CASCADE | SET NULL | RESTRICT |
+/// NO ACTION` keyword after `ON DELETE` / `ON UPDATE`.
+fn parse_referential_action(p: &mut Parser) -> SqlResult<crate::model::ReferentialAction> {
+    use crate::model::ReferentialAction;
+    if p.consume_word("cascade") { return Ok(ReferentialAction::Cascade); }
+    if p.consume_word("set") {
+        p.expect("null")?;
+        return Ok(ReferentialAction::SetNull);
+    }
+    if p.consume_word("restrict") { return Ok(ReferentialAction::Restrict); }
+    if p.consume_word("no") {
+        p.expect("action")?;
+        return Ok(ReferentialAction::Restrict);
+    }
+    Err(SqlError::Syntax(
+        "expected CASCADE / SET NULL / RESTRICT / NO ACTION after ON DELETE/UPDATE".into()))
+}
+
 /// ADR 0184 — for a child INSERT or FK-column UPDATE, every
 /// foreign key on `table` requires a matching parent row.
 /// A NULL in any FK column disables that FK for the row
@@ -567,11 +585,18 @@ pub(crate) fn foreign_key_check(
     Ok(())
 }
 
-/// ADR 0184 — RESTRICT: before deleting a parent row (or
-/// updating its PK), scan every child table whose FK points
-/// at this table and ensure no row references the departing
-/// PK projection. Default action per SQL; CASCADE / SET NULL
-/// are ADR 0185 follow-up.
+/// ADR 0184 / ADR 0185 — before deleting a parent row, apply
+/// each referencing FK's `on_delete` action:
+///
+/// - `Restrict` (default) — reject the DELETE if any child
+///   row references the departing PK.
+/// - `Cascade` — delete every matching child row.
+/// - `SetNull` — set the FK columns of every matching child
+///   row to NULL. The catalog refuses SET NULL on a NOT NULL
+///   child column at CREATE, so this can always succeed
+///   schema-wise. Each updated child row still re-runs the
+///   CHECK / FK / UNIQUE pipeline so downstream constraints
+///   can block the cascade.
 pub(crate) fn foreign_key_restrict(
     engine: &SqlEngine, parent: &Table, parent_pk: &[Value],
 ) -> SqlResult<()> {
@@ -594,13 +619,49 @@ pub(crate) fn foreign_key_restrict(
             .map(|c| locate(&child, c)).collect::<SqlResult<Vec<_>>>()?;
         let child_store = engine.table_store(&child)?;
         let rows = child_store.scan()?;
+        let child_pk_positions: Vec<usize> = child.primary_key.columns.iter()
+            .map(|c| locate(&child, c)).collect::<SqlResult<Vec<_>>>()?;
         for r in rows {
             let matches_pk = child_positions.iter().zip(parent_pk_positions.iter())
                 .all(|(ch, pa)| r[*ch] == parent_pk[*pa]);
-            if matches_pk {
-                return Err(SqlError::ForeignKey {
-                    constraint: fk.name, reason: "restrict",
-                });
+            if !matches_pk { continue; }
+            match fk.on_delete {
+                crate::model::ReferentialAction::Restrict => {
+                    return Err(SqlError::ForeignKey {
+                        constraint: fk.name.clone(), reason: "restrict",
+                    });
+                }
+                crate::model::ReferentialAction::Cascade => {
+                    // Delete the matching child by its PK. This
+                    // recursively re-enters foreign_key_restrict
+                    // for any grandchildren — SQL-standard
+                    // CASCADE semantics.
+                    let child_pk: Vec<Value> = child_pk_positions.iter()
+                        .map(|p| r[*p].clone()).collect();
+                    foreign_key_restrict(engine, &child, &child_pk)?;
+                    child_store.delete(&child_pk)?;
+                }
+                crate::model::ReferentialAction::SetNull => {
+                    // Build the mutated row with FK cols nulled.
+                    let mut mutated = r.clone();
+                    for pos in &child_positions {
+                        mutated[*pos] = Value::Null;
+                    }
+                    // Re-run downstream constraints on the
+                    // mutated row (CHECK / FK / UNIQUE).
+                    check_row(&child, &mutated)?;
+                    foreign_key_check(engine, &child, &mutated)?;
+                    if !child.unique_keys.is_empty() {
+                        let child_pk: Vec<Value> = child_pk_positions.iter()
+                            .map(|p| r[*p].clone()).collect();
+                        let others = child_store.scan()?.into_iter()
+                            .filter(|row| child_pk_positions.iter().zip(child_pk.iter())
+                                .any(|(ppos, pk_val)| &row[*ppos] != pk_val));
+                        crate::unique_check::UniqueConstraintChecker::new(&child)
+                            .check(&mutated, others)?;
+                    }
+                    child_store.replace(&mutated)?;
+                }
             }
         }
     }
@@ -1069,7 +1130,14 @@ impl SqlEngine {
                         // ADR 0184 — parser collects inline FK clauses
                         // and the catalog's add_foreign_key is called
                         // after create_table resolves the child id.
-                        let mut pending_fks: Vec<(Vec<String>, Vec<String>, Vec<String>)> = Vec::new();
+                        struct PendingFk {
+                            child_cols: Vec<String>,
+                            parent_name: Vec<String>,
+                            parent_cols: Vec<String>,
+                            on_delete: crate::model::ReferentialAction,
+                            on_update: crate::model::ReferentialAction,
+                        }
+                        let mut pending_fks: Vec<PendingFk> = Vec::new();
                         p.symbol('(')?;
                         loop {
                             if p.consume_word("primary") {
@@ -1096,9 +1164,9 @@ impl SqlEngine {
                             } else if p.consume_word("foreign") {
                                 // ADR 0184 — FOREIGN KEY (child_cols)
                                 // REFERENCES <qual_parent> (parent_cols).
-                                // No ON DELETE / ON UPDATE clauses yet
-                                // (RESTRICT default — ADR 0185 adds
-                                // action keywords).
+                                // ADR 0185 — optional ON DELETE and
+                                // ON UPDATE action clauses (CASCADE /
+                                // SET NULL / RESTRICT / NO ACTION).
                                 p.expect("key")?;
                                 let child_cols = p.list(|parser| parser.word())?;
                                 p.expect("references")?;
@@ -1108,7 +1176,22 @@ impl SqlEngine {
                                 if child_cols.is_empty() || parent_cols.is_empty() {
                                     return Err(SqlError::Syntax("FOREIGN KEY requires at least one column pair".into()));
                                 }
-                                pending_fks.push((child_cols, parent_name, parent_cols));
+                                let mut on_delete = crate::model::ReferentialAction::Restrict;
+                                let mut on_update = crate::model::ReferentialAction::Restrict;
+                                while p.consume_word("on") {
+                                    let which = p.word()?;
+                                    let action = parse_referential_action(&mut p)?;
+                                    match which.as_str() {
+                                        "delete" => on_delete = action,
+                                        "update" => on_update = action,
+                                        other => return Err(SqlError::Syntax(
+                                            format!("expected ON DELETE / ON UPDATE; got ON {other}"))),
+                                    }
+                                }
+                                pending_fks.push(PendingFk {
+                                    child_cols, parent_name, parent_cols,
+                                    on_delete, on_update,
+                                });
                             } else {
                                 let column = p.word()?;
                                 let data_type = p.data_type()?;
@@ -1181,19 +1264,21 @@ impl SqlEngine {
                         // PK or non-null UNIQUE) handles the rest.
                         if !pending_fks.is_empty() {
                             let snap = self.catalog.snapshot();
-                            for (i, (child_cols, parent_name, parent_cols)) in pending_fks.into_iter().enumerate() {
-                                let db = snap.databases().find(|d| d.name == parent_name[0])
-                                    .ok_or_else(|| SqlError::Resolution(format!("unknown database {}", parent_name[0])))?;
-                                let sc = snap.schemas().find(|s| s.database == db.id && s.name == parent_name[1])
-                                    .ok_or_else(|| SqlError::Resolution(format!("unknown schema {}.{}", parent_name[0], parent_name[1])))?;
-                                let parent = snap.tables().find(|t| t.schema == sc.id && t.name == parent_name[2])
+                            for (i, fk) in pending_fks.into_iter().enumerate() {
+                                let db = snap.databases().find(|d| d.name == fk.parent_name[0])
+                                    .ok_or_else(|| SqlError::Resolution(format!("unknown database {}", fk.parent_name[0])))?;
+                                let sc = snap.schemas().find(|s| s.database == db.id && s.name == fk.parent_name[1])
+                                    .ok_or_else(|| SqlError::Resolution(format!("unknown schema {}.{}", fk.parent_name[0], fk.parent_name[1])))?;
+                                let parent = snap.tables().find(|t| t.schema == sc.id && t.name == fk.parent_name[2])
                                     .ok_or_else(|| SqlError::Resolution(format!("unknown table {}.{}.{}",
-                                        parent_name[0], parent_name[1], parent_name[2])))?;
+                                        fk.parent_name[0], fk.parent_name[1], fk.parent_name[2])))?;
                                 self.catalog.add_foreign_key(child_id, crate::model::ForeignKeySpec {
                                     name: format!("fk_{}_{i}", name[2]),
-                                    columns: child_cols,
+                                    columns: fk.child_cols,
                                     referenced_table: parent.id,
-                                    referenced_columns: parent_cols,
+                                    referenced_columns: fk.parent_cols,
+                                    on_delete: fk.on_delete,
+                                    on_update: fk.on_update,
                                 })?;
                             }
                         }

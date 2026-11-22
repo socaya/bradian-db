@@ -155,6 +155,7 @@ fn widen_incoming_fk_column_rejected() {
         columns: vec!["tid".into()],
         referenced_table: t,
         referenced_columns: vec!["id".into()],
+        ..Default::default()
     }).unwrap();
     // id column has incoming FK — even a same-direction widening
     // attempt would fail dependency check (but Int64 -> anything

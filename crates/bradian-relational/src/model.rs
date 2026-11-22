@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct DatabaseId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SchemaId(pub u64);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TableId(pub u64);
 
 /// Minimal validated relational data types; SQL precision and runtime value checks
@@ -67,6 +67,25 @@ impl CheckOp {
     }
 }
 
+/// ADR 0185 — referential actions for `ON DELETE` (and
+/// `ON UPDATE` once PK UPDATE is supported). `Restrict` is
+/// the default and also what the SQL standard calls
+/// `NO ACTION` for our purposes (no deferral).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReferentialAction {
+    #[default]
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+impl ReferentialAction {
+    /// Signature takes `&self` so serde's
+    /// `skip_serializing_if` can call it directly on the
+    /// field's `&T` without cloning.
+    pub fn is_restrict(&self) -> bool { matches!(self, ReferentialAction::Restrict) }
+}
+
 /// Target table and columns are resolved to stable object identifiers by the catalog.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignKey {
@@ -74,14 +93,30 @@ pub struct ForeignKey {
     pub columns: Vec<String>,
     pub referenced_table: TableId,
     pub referenced_columns: Vec<String>,
+    /// ADR 0185 — action on parent DELETE. Default
+    /// `Restrict` preserves ADR 0184 behavior.
+    #[serde(default, skip_serializing_if = "ReferentialAction::is_restrict")]
+    pub on_delete: ReferentialAction,
+    /// ADR 0185 — action on parent PK UPDATE. Default
+    /// `Restrict`. Note that SqlEngine currently rejects
+    /// PK UPDATE unconditionally, so this field is reserved
+    /// for the future PK-UPDATE path.
+    #[serde(default, skip_serializing_if = "ReferentialAction::is_restrict")]
+    pub on_update: ReferentialAction,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForeignKeySpec {
     pub name: String,
     pub columns: Vec<String>,
     pub referenced_table: TableId,
     pub referenced_columns: Vec<String>,
+    /// ADR 0185 — referential actions carried through
+    /// `add_foreign_key`. Default is RESTRICT.
+    #[serde(default, skip_serializing_if = "ReferentialAction::is_restrict")]
+    pub on_delete: ReferentialAction,
+    #[serde(default, skip_serializing_if = "ReferentialAction::is_restrict")]
+    pub on_update: ReferentialAction,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

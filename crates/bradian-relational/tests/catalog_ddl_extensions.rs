@@ -96,6 +96,7 @@ fn rename_column_updates_incoming_fk() {
         columns: vec!["item_id".into()],
         referenced_table: t,
         referenced_columns: vec!["id".into()],
+        ..Default::default()
     }).unwrap();
     c.rename_column(t, "id", "item_pk").unwrap();
     let fk = &c.table(child).unwrap().foreign_keys[0];
@@ -159,6 +160,7 @@ fn drop_column_rejects_incoming_fk_referenced() {
         columns: vec!["item_sku".into()],
         referenced_table: t,
         referenced_columns: vec!["sku".into()],
+        ..Default::default()
     }).unwrap();
     let err = c.drop_column(t, "sku").unwrap_err();
     assert!(matches!(err, CatalogError::DependentObjects(_)));

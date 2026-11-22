@@ -42,12 +42,14 @@ fn mk() -> (Catalog, TableId, TableId) {
         columns: vec!["item_id".into()],
         referenced_table: parent,
         referenced_columns: vec!["id".into()],
+        ..Default::default()
     }).unwrap();
     c.add_foreign_key(child, ForeignKeySpec {
         name: "fk_item_sku".into(),
         columns: vec!["item_sku".into()],
         referenced_table: parent,
         referenced_columns: vec!["sku".into()],
+        ..Default::default()
     }).unwrap();
     (c, parent, child)
 }

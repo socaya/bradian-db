@@ -83,6 +83,7 @@ fn foreign_key_restricts_drop_and_supports_cross_schema_same_db() {
         columns: vec!["account_id".into()],
         referenced_table: parent,
         referenced_columns: vec!["id".into()],
+        ..Default::default()
     }).unwrap();
     assert_eq!(cat.table(orders).unwrap().foreign_keys.len(), 1);
     assert!(matches!(cat.drop_table(parent), Err(CatalogError::DependentObjects(_))));
@@ -105,6 +106,7 @@ fn foreign_keys_require_type_and_unique_target_match() {
     let err = cat.add_foreign_key(child_id, ForeignKeySpec {
         name: "bad_fk".into(), columns: vec!["wrong_type".into()],
         referenced_table: parent, referenced_columns: vec!["id".into()],
+        ..Default::default()
     }).unwrap_err();
     assert!(matches!(err, CatalogError::InvalidDefinition(_)));
     assert!(cat.table(child_id).unwrap().foreign_keys.is_empty());
@@ -130,6 +132,7 @@ fn recognizes_nonnull_unique_keys_as_reference_targets() {
         columns: vec!["external_id".into()],
         referenced_table: p,
         referenced_columns: vec!["external_id".into()],
+        ..Default::default()
     }).unwrap();
 }
 
@@ -145,6 +148,7 @@ fn forbids_cross_database_foreign_keys() {
     assert!(matches!(cat.add_foreign_key(c, ForeignKeySpec {
         name: "fk".into(), columns: vec!["id".into()], referenced_table: p,
         referenced_columns: vec!["id".into()],
+        ..Default::default()
     }), Err(CatalogError::InvalidDefinition(_))));
 }
 

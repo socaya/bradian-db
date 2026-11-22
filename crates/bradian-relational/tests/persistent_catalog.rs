@@ -83,6 +83,7 @@ fn foreign_keys_and_restrict_deletes_remain_valid_after_replay() {
             columns: vec!["patient_id".into()],
             referenced_table: parent,
             referenced_columns: vec!["id".into()],
+            ..Default::default()
         }).unwrap();
         db.checkpoint().unwrap();
     }
@@ -509,6 +510,7 @@ fn pending_revision_fences_constraint_changes_without_wal_append() {
     assert!(catalog.add_foreign_key(id, ForeignKeySpec {
         name: "self_ref".into(), columns: vec!["id".into()],
         referenced_table: id, referenced_columns: vec!["id".into()],
+        ..Default::default()
     }).is_err());
     assert_eq!(catalog.last_lsn(), before);
     assert!(catalog.snapshot().table(id).unwrap().foreign_keys.is_empty());

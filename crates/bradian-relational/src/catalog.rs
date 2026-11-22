@@ -329,12 +329,25 @@ impl Catalog {
                 return Err(CatalogError::InvalidDefinition("foreign key types differ".into()));
             }
         }
+        // ADR 0185 — SET NULL requires every child FK column
+        // to be nullable, otherwise the action is unsatisfiable.
+        if matches!(spec.on_delete, crate::model::ReferentialAction::SetNull) {
+            for name in &columns {
+                let col = source.columns.iter().find(|c| &c.name == name).expect("validated column");
+                if !col.nullable {
+                    return Err(CatalogError::InvalidDefinition(format!(
+                        "ON DELETE SET NULL requires nullable child column {name}")));
+                }
+            }
+        }
         self.tables.get_mut(&source_id).expect("validated table")
             .foreign_keys.push(ForeignKey {
                 name: constraint_name,
                 columns,
                 referenced_table: spec.referenced_table,
                 referenced_columns,
+                on_delete: spec.on_delete,
+                on_update: spec.on_update,
             });
         Ok(())
     }
