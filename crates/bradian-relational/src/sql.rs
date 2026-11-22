@@ -2383,7 +2383,9 @@ impl SqlEngine {
                 // ADR 0192 — accept bare-column and JSON-path
                 // assignment LHS forms.
                 let changes = p.path_assignments()?;
-                let pk = key_predicate(&mut p, &table)?;
+                // ADR 0199 — WHERE accepts PK equality OR a
+                // JSON-path predicate (full-scan + filter).
+                let where_clause = parse_select_where(&mut p, &table)?;
                 p.end()?;
                 let mut column_assignments: BTreeMap<usize, Value> = BTreeMap::new();
                 let mut json_assignments: Vec<(usize, Vec<JsonSegment>, bool, Literal)> = Vec::new();
@@ -2410,40 +2412,41 @@ impl SqlEngine {
                 // ADR 0147 — deadline check before mutation.
                 if let Some(b) = budget.as_deref() { b.check_deadline()?; }
                 let store = self.table_store(&table)?;
-                let existing = store.get(&pk)?;
-                let mut written_bytes = 0u64;
-                let affected = if let Some(mut row) = existing {
-                    for (pos, value) in column_assignments { row[pos] = value; }
-                    // ADR 0192 — apply JSON path mutations
-                    // AFTER column-level assignments so that a
-                    // concurrent `SET body = '{}', body->'k'=1`
-                    // target does the right thing (reset then
-                    // write).
+                // ADR 0199 — select target rows. PK equality
+                // stays on the fast lookup path; JSON path
+                // scans the table and filters per row.
+                let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                    .map(|c| locate(&table, c))
+                    .collect::<SqlResult<Vec<_>>>()?;
+                let targets: Vec<(Vec<Value>, Vec<Value>)> = match &where_clause {
+                    SelectWhere::KeyPredicate(pk) => match store.get(pk)? {
+                        Some(row) => vec![(pk.clone(), row)],
+                        None => Vec::new(),
+                    },
+                    SelectWhere::JsonPathPredicate { projection, op, literal } => {
+                        let filtered = apply_where_filter(
+                            store.scan()?, &table, projection, *op, literal)?;
+                        filtered.into_iter().map(|row| {
+                            let pk: Vec<Value> = pk_positions.iter()
+                                .map(|p| row[*p].clone()).collect();
+                            (pk, row)
+                        }).collect()
+                    }
+                };
+                let mut written_bytes: u64 = 0;
+                let mut affected: u64 = 0;
+                for (pk, mut row) in targets {
+                    for (pos, value) in &column_assignments {
+                        row[*pos] = value.clone();
+                    }
                     for (pos, path, as_text, literal) in &json_assignments {
                         let col_name = table.columns[*pos].name.clone();
                         row[*pos] = apply_json_path_mutation(
                             &col_name, &row[*pos], path, *as_text, literal)?;
                     }
-                    // ADR 0182 — evaluate per-column CHECKs on
-                    // the mutated row.
                     check_row(&table, &row)?;
-                    // ADR 0184 — FOREIGN KEY parent-exists check
-                    // on the mutated row. Covers the case where
-                    // an FK column is being changed to a value
-                    // whose parent does not exist. NULL FK cols
-                    // disable the FK for the row.
                     foreign_key_check(self, &table, &row)?;
-                    // ADR 0177 — UNIQUE enforcement on UPDATE.
-                    // Scan all rows, exclude the one being
-                    // updated (matched by PK projection), and
-                    // run the checker against the mutated row.
-                    // Primary key cannot change (checked above),
-                    // so PK comparison before/after the mutation
-                    // is stable.
                     if !table.unique_keys.is_empty() {
-                        let pk_positions: Vec<usize> = table.primary_key.columns.iter()
-                            .map(|c| locate(&table, c))
-                            .collect::<SqlResult<Vec<_>>>()?;
                         let others = store.scan()?.into_iter()
                             .filter(|r| pk_positions.iter()
                                 .zip(pk.iter())
@@ -2451,12 +2454,14 @@ impl SqlEngine {
                         crate::unique_check::UniqueConstraintChecker::new(&table)
                             .check(&row, others)?;
                     }
-                    written_bytes = crate::query_budget::row_bytes(&row);
-                    // ADR 0151 — preflight before replace.
-                    if let Some(b) = budget.as_deref() { b.preview_charge(1, written_bytes)?; }
+                    let row_bytes = crate::query_budget::row_bytes(&row);
+                    written_bytes = written_bytes.saturating_add(row_bytes);
+                    if let Some(b) = budget.as_deref() {
+                        b.preview_charge(1, row_bytes)?;
+                    }
                     store.replace(&row)?;
-                    1
-                } else { 0 };
+                    affected += 1;
+                }
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(affected)?;
                     if affected > 0 { b.charge_bytes(written_bytes)?; }
@@ -2469,25 +2474,41 @@ impl SqlEngine {
                 p.expect("from")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
-                let pk = key_predicate(&mut p, &table)?;
+                // ADR 0199 — WHERE accepts PK equality OR a
+                // JSON-path predicate (full-scan + filter).
+                let where_clause = parse_select_where(&mut p, &table)?;
                 p.end()?;
                 let store = self.table_store(&table)?;
-                let existing = store.get(&pk)?;
-                let deleted_bytes = existing.as_ref()
-                    .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
-                // ADR 0151 — preflight before delete.
-                if existing.is_some() {
-                    if let Some(b) = budget.as_deref() { b.preview_charge(1, deleted_bytes)?; }
-                }
-                // ADR 0184 — RESTRICT: if any child row references
-                // this parent's PK, refuse the DELETE.
-                if existing.is_some() {
+                let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                    .map(|c| locate(&table, c))
+                    .collect::<SqlResult<Vec<_>>>()?;
+                let targets: Vec<(Vec<Value>, Vec<Value>)> = match &where_clause {
+                    SelectWhere::KeyPredicate(pk) => match store.get(pk)? {
+                        Some(row) => vec![(pk.clone(), row)],
+                        None => Vec::new(),
+                    },
+                    SelectWhere::JsonPathPredicate { projection, op, literal } => {
+                        let filtered = apply_where_filter(
+                            store.scan()?, &table, projection, *op, literal)?;
+                        filtered.into_iter().map(|row| {
+                            let pk: Vec<Value> = pk_positions.iter()
+                                .map(|p| row[*p].clone()).collect();
+                            (pk, row)
+                        }).collect()
+                    }
+                };
+                let mut deleted_bytes: u64 = 0;
+                let mut affected: u64 = 0;
+                for (pk, row) in targets {
+                    let row_bytes = crate::query_budget::row_bytes(&row);
+                    if let Some(b) = budget.as_deref() {
+                        b.preview_charge(1, row_bytes)?;
+                    }
                     foreign_key_restrict(self, &table, &pk)?;
-                }
-                let affected = if existing.is_some() {
                     store.delete(&pk)?;
-                    1
-                } else { 0 };
+                    deleted_bytes = deleted_bytes.saturating_add(row_bytes);
+                    affected += 1;
+                }
                 if let Some(b) = budget.as_mut() {
                     b.charge_rows(affected)?;
                     if affected > 0 { b.charge_bytes(deleted_bytes)?; }

@@ -15,7 +15,7 @@ use crate::Table;
 use crate::persistent_catalog::PersistentCatalog;
 use crate::row_store::BaceWiring;
 use crate::sql::{
-    coerce, key_predicate, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
+    coerce, locate, qualified, Parser, SqlError, SqlResult, SqlResultSet,
 };
 use crate::transaction_domain::{MultiTableStore, MultiTableTransaction};
 
@@ -475,7 +475,9 @@ impl<'a> DomainSqlSession<'a> {
                         p.expect("set")?;
                         // ADR 0192 — bare + JSON-path assignments.
                         let updates = p.path_assignments()?;
-                        let key = key_predicate(&mut p, &table)?;
+                        // ADR 0199 — WHERE accepts PK equality
+                        // or JSON-path predicate.
+                        let where_clause = crate::sql::parse_select_where(&mut p, &table)?;
                         p.end()?;
                         let mut replacements = BTreeMap::new();
                         let mut json_assignments: Vec<(usize, Vec<crate::sql::JsonSegment>, bool, crate::sql::Literal)> = Vec::new();
@@ -499,40 +501,47 @@ impl<'a> DomainSqlSession<'a> {
                                 }
                             }
                         }
-                        let mut written_bytes = 0u64;
-                        let affected = if let Some(mut row) = tx.get(table.id, &key)? {
-                            for (position, value) in replacements { row[position] = value; }
+                        let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                            .map(|c| locate(&table, c))
+                            .collect::<SqlResult<Vec<_>>>()?;
+                        let targets: Vec<(Vec<crate::typed_table::Value>, Vec<crate::typed_table::Value>)> = match &where_clause {
+                            crate::sql::SelectWhere::KeyPredicate(pk) => match tx.get(table.id, pk)? {
+                                Some(row) => vec![(pk.clone(), row)],
+                                None => Vec::new(),
+                            },
+                            crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal } => {
+                                let filtered = crate::sql::apply_where_filter(
+                                    tx.scan(table.id)?, &table, projection, *op, literal)?;
+                                filtered.into_iter().map(|row| {
+                                    let pk: Vec<crate::typed_table::Value> = pk_positions.iter()
+                                        .map(|p| row[*p].clone()).collect();
+                                    (pk, row)
+                                }).collect()
+                            }
+                        };
+                        let mut written_bytes: u64 = 0;
+                        let mut affected: u64 = 0;
+                        for (pk, mut row) in targets {
+                            for (pos, value) in &replacements { row[*pos] = value.clone(); }
                             for (pos, path, as_text, literal) in &json_assignments {
                                 let col_name = table.columns[*pos].name.clone();
                                 row[*pos] = crate::sql::apply_json_path_mutation(
                                     &col_name, &row[*pos], path, *as_text, literal)?;
                             }
-                            // ADR 0182 — per-column CHECK on
-                            // the mutated row.
                             crate::sql::check_row(&table, &row)?;
-                            // ADR 0187 — FK parent-exists on the
-                            // mutated row (same as INSERT).
                             crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
-                            // ADR 0178 — UNIQUE enforcement at
-                            // UPDATE mirrors ADR 0177: scan the
-                            // table under the active transaction
-                            // and filter the row being updated by
-                            // PK projection before running the
-                            // checker on the mutated row.
                             if !table.unique_keys.is_empty() {
-                                let pk_positions: Vec<usize> = table.primary_key.columns.iter()
-                                    .map(|c| locate(&table, c))
-                                    .collect::<SqlResult<Vec<_>>>()?;
                                 let others = tx.scan(table.id)?.into_iter()
-                                    .filter(|r| pk_positions.iter().zip(key.iter())
+                                    .filter(|r| pk_positions.iter().zip(pk.iter())
                                         .any(|(pos, k)| &r[*pos] != k));
                                 crate::unique_check::UniqueConstraintChecker::new(&table)
                                     .check(&row, others)?;
                             }
-                            written_bytes = crate::query_budget::row_bytes(&row);
+                            let row_bytes = crate::query_budget::row_bytes(&row);
+                            written_bytes = written_bytes.saturating_add(row_bytes);
                             tx.replace(table.id, &row)?;
-                            1
-                        } else { 0 };
+                            affected += 1;
+                        }
                         if let Some(b) = self.budget.as_mut() {
                             b.charge_rows(affected)?;
                             if affected > 0 { b.charge_bytes(written_bytes)?; }
@@ -544,21 +553,36 @@ impl<'a> DomainSqlSession<'a> {
                         if let Some(b) = self.budget.as_ref() { b.check_deadline()?; }
                         p.expect("from")?;
                         let table = self.engine.resolve(&p.name()?)?;
-                        let key = key_predicate(&mut p, &table)?;
+                        // ADR 0199 — WHERE accepts PK equality
+                        // or JSON-path predicate.
+                        let where_clause = crate::sql::parse_select_where(&mut p, &table)?;
                         p.end()?;
-                        let existing = tx.get(table.id, &key)?;
-                        let deleted_bytes = existing.as_ref()
-                            .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
-                        // ADR 0187 — apply RESTRICT / CASCADE /
-                        // SET NULL on each referencing child
-                        // before deleting the parent row.
-                        if existing.is_some() {
-                            crate::sql::fk_apply_parent_delete_tx(&self.engine.catalog, &table, &key, tx)?;
+                        let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                            .map(|c| locate(&table, c))
+                            .collect::<SqlResult<Vec<_>>>()?;
+                        let targets: Vec<(Vec<crate::typed_table::Value>, Vec<crate::typed_table::Value>)> = match &where_clause {
+                            crate::sql::SelectWhere::KeyPredicate(pk) => match tx.get(table.id, pk)? {
+                                Some(row) => vec![(pk.clone(), row)],
+                                None => Vec::new(),
+                            },
+                            crate::sql::SelectWhere::JsonPathPredicate { projection, op, literal } => {
+                                let filtered = crate::sql::apply_where_filter(
+                                    tx.scan(table.id)?, &table, projection, *op, literal)?;
+                                filtered.into_iter().map(|row| {
+                                    let pk: Vec<crate::typed_table::Value> = pk_positions.iter()
+                                        .map(|p| row[*p].clone()).collect();
+                                    (pk, row)
+                                }).collect()
+                            }
+                        };
+                        let mut deleted_bytes: u64 = 0;
+                        let mut affected: u64 = 0;
+                        for (pk, row) in targets {
+                            crate::sql::fk_apply_parent_delete_tx(&self.engine.catalog, &table, &pk, tx)?;
+                            tx.delete(table.id, &pk)?;
+                            deleted_bytes = deleted_bytes.saturating_add(crate::query_budget::row_bytes(&row));
+                            affected += 1;
                         }
-                        let affected = if existing.is_some() {
-                            tx.delete(table.id, &key)?;
-                            1
-                        } else { 0 };
                         if let Some(b) = self.budget.as_mut() {
                             b.charge_rows(affected)?;
                             if affected > 0 { b.charge_bytes(deleted_bytes)?; }
