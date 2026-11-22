@@ -1464,6 +1464,10 @@ pub(crate) enum JsonMatcher {
     IsNull,
     /// ADR 0207 — explicit NOT NULL test.
     IsNotNull,
+    /// ADR 0208 — inclusive range: low <= extracted <= high.
+    Between { low: Value, high: Value },
+    /// ADR 0208 — negated range.
+    NotBetween { low: Value, high: Value },
 }
 
 #[derive(Clone, Debug)]
@@ -1517,6 +1521,8 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             };
             let matcher = if p.consume_word("in") {
                 JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
+            } else if p.consume_word("between") {
+                parse_between_tail(p, as_text, /*negated=*/false)?
             } else if p.consume_word("is") {
                 // ADR 0207 — IS NULL / IS NOT NULL. `NOT` here
                 // belongs to the IS test; it does not flip to IN.
@@ -1527,11 +1533,15 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
                 }
                 if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
             } else if p.consume_word("not") {
-                if !p.consume_word("in") {
+                // ADR 0206 / 0208 — NOT IN or NOT BETWEEN.
+                if p.consume_word("in") {
+                    JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
+                } else if p.consume_word("between") {
+                    parse_between_tail(p, as_text, /*negated=*/true)?
+                } else {
                     return Err(SqlError::Unsupported(
-                        "NOT must be followed by IN in a JSON-path predicate".into()));
+                        "NOT must be followed by IN or BETWEEN in a JSON-path predicate".into()));
                 }
-                JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
             } else {
                 let op = p.word_or_symbol_pair_for_check()?;
                 let literal = p.literal()?;
@@ -1591,6 +1601,33 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             .collect();
         Ok(SelectWhere::KeyPredicate(ordered))
     }
+}
+
+/// ADR 0208 — parse `low AND high` as the RHS of a BETWEEN /
+/// NOT BETWEEN predicate. The `AND` here is a grammar keyword,
+/// not a DNF separator.  Inclusive on both ends. `low > high`
+/// is rejected at parse (empty range would be surprising to
+/// readers).
+fn parse_between_tail(p: &mut Parser, as_text: bool, negated: bool) -> SqlResult<JsonMatcher> {
+    let low_lit = p.literal()?;
+    let low = coerce_where_literal(&low_lit, as_text)?;
+    if !p.consume_word("and") {
+        return Err(SqlError::Syntax(
+            "BETWEEN requires `AND` between low and high".into()));
+    }
+    let high_lit = p.literal()?;
+    let high = coerce_where_literal(&high_lit, as_text)?;
+    if !matches!(low, Value::Null) && !matches!(high, Value::Null)
+        && compare_values_for_check(&low, &high) == std::cmp::Ordering::Greater
+    {
+        return Err(SqlError::Syntax(
+            "BETWEEN low must not exceed high".into()));
+    }
+    Ok(if negated {
+        JsonMatcher::NotBetween { low, high }
+    } else {
+        JsonMatcher::Between { low, high }
+    })
 }
 
 /// ADR 0206 — parse `( lit, lit, … )` as the RHS of an IN /
@@ -1707,6 +1744,26 @@ pub(crate) fn apply_where_filter(
                         !matches!(lit, Value::Null)
                             && compare_values_for_check(&extracted, lit)
                                 != std::cmp::Ordering::Equal),
+                    JsonMatcher::Between { low, high } => {
+                        if matches!(low, Value::Null) || matches!(high, Value::Null) {
+                            false
+                        } else {
+                            compare_values_for_check(&extracted, low)
+                                != std::cmp::Ordering::Less
+                            && compare_values_for_check(&extracted, high)
+                                != std::cmp::Ordering::Greater
+                        }
+                    }
+                    JsonMatcher::NotBetween { low, high } => {
+                        if matches!(low, Value::Null) || matches!(high, Value::Null) {
+                            false
+                        } else {
+                            compare_values_for_check(&extracted, low)
+                                == std::cmp::Ordering::Less
+                            || compare_values_for_check(&extracted, high)
+                                == std::cmp::Ordering::Greater
+                        }
+                    }
                     JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
                         unreachable!("handled above the NULL guard"),
                 };
