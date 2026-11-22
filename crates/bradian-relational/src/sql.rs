@@ -1233,6 +1233,11 @@ pub(crate) enum AggSpec {
     Min(String),
     Max(String),
     Sum(String),
+    /// ADR 0215 — arithmetic mean over non-null values. Int32
+    /// / Int64 columns yield a truncated Int64; Decimal
+    /// columns preserve the declared scale (half-even
+    /// rounding on the final divide).
+    Avg(String),
 }
 
 impl AggSpec {
@@ -1242,6 +1247,7 @@ impl AggSpec {
             AggSpec::Min(_) => "min",
             AggSpec::Max(_) => "max",
             AggSpec::Sum(_) => "sum",
+            AggSpec::Avg(_) => "avg",
         }
     }
 }
@@ -1274,6 +1280,11 @@ pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
         let column = p.word()?;
         p.symbol(')')?;
         AggSpec::Sum(column)
+    } else if p.consume_word("avg") {
+        p.symbol('(')?;
+        let column = p.word()?;
+        p.symbol(')')?;
+        AggSpec::Avg(column)
     } else {
         return Ok(None);
     };
@@ -1356,7 +1367,66 @@ pub(crate) fn evaluate_aggregate(
                 _ => unreachable!("type check above excludes other variants"),
             })
         }
+        // ADR 0215 — arithmetic mean over non-null values.
+        AggSpec::Avg(column) => {
+            let position = locate(table, column)?;
+            let col = &table.columns[position];
+            match col.data_type {
+                DataType::Int32 | DataType::Int64 | DataType::Decimal { .. } => {}
+                _ => return Err(SqlError::Type(format!(
+                    "AVG requires a numeric column; {column} is not numeric"))),
+            };
+            let mut sum: i128 = 0;
+            let mut count: i128 = 0;
+            for row in rows {
+                let add = match row[position] {
+                    Value::Null => continue,
+                    Value::Int32(n) => i128::from(n),
+                    Value::Int64(n) => i128::from(n),
+                    Value::Decimal(n) => n,
+                    _ => return Err(SqlError::Type(
+                        "AVG encountered a non-numeric value".into())),
+                };
+                sum = sum.checked_add(add)
+                    .ok_or_else(|| SqlError::Type("AVG overflow".into()))?;
+                count += 1;
+            }
+            if count == 0 { return Ok(Value::Null); }
+            // Half-even rounding keeps averages stable across
+            // repeated accumulation and matches most SQL engines.
+            let divided = divide_round_half_even(sum, count)?;
+            Ok(match col.data_type {
+                DataType::Int32 | DataType::Int64 => Value::Int64(divided.try_into()
+                    .map_err(|_| SqlError::Type("AVG result overflow".into()))?),
+                DataType::Decimal { .. } => Value::Decimal(divided),
+                _ => unreachable!("type check above excludes other variants"),
+            })
+        }
     }
+}
+
+/// ADR 0215 — divide two i128 with half-even rounding of the
+/// final integer result. Rejects divide-by-zero (callers must
+/// skip when `count == 0`).
+fn divide_round_half_even(numerator: i128, denominator: i128) -> SqlResult<i128> {
+    if denominator == 0 {
+        return Err(SqlError::Type("AVG divide by zero".into()));
+    }
+    let quotient = numerator / denominator;
+    let remainder = numerator - quotient * denominator;
+    let double_rem = remainder.checked_mul(2)
+        .ok_or_else(|| SqlError::Type("AVG rounding overflow".into()))?;
+    let abs_double_rem = double_rem.unsigned_abs();
+    let abs_denom = denominator.unsigned_abs();
+    let sign_adjust = if numerator.signum() * denominator.signum() >= 0 { 1 } else { -1 };
+    Ok(match abs_double_rem.cmp(&abs_denom) {
+        std::cmp::Ordering::Less => quotient,
+        std::cmp::Ordering::Greater => quotient + sign_adjust,
+        std::cmp::Ordering::Equal => {
+            // Half: round to even.
+            if quotient.rem_euclid(2) == 0 { quotient } else { quotient + sign_adjust }
+        }
+    })
 }
 
 /// ADR 0186 + ADR 0189 — parse a projection: identifier,
