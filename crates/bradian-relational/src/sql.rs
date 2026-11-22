@@ -689,6 +689,157 @@ pub(crate) fn foreign_key_check(
     Ok(())
 }
 
+/// ADR 0187 — trait abstracting the row-access surface the FK
+/// helpers need, so the three session engines
+/// (DomainSqlSession / HistorySqlSession / MvccSqlSession) can
+/// share the same enforcement code with `SqlEngine`. The
+/// implementations wrap each engine's transaction type.
+pub(crate) trait TxFkRowAccess {
+    fn fk_scan(&mut self, table_id: crate::TableId) -> SqlResult<Vec<Vec<Value>>>;
+    fn fk_delete(&mut self, table_id: crate::TableId, pk: &[Value]) -> SqlResult<()>;
+    fn fk_replace(&mut self, table_id: crate::TableId, row: &[Value]) -> SqlResult<()>;
+}
+
+impl TxFkRowAccess for crate::transaction_domain::MultiTableTransaction<'_> {
+    fn fk_scan(&mut self, table_id: crate::TableId) -> SqlResult<Vec<Vec<Value>>> {
+        self.scan(table_id).map_err(SqlError::Domain)
+    }
+    fn fk_delete(&mut self, table_id: crate::TableId, pk: &[Value]) -> SqlResult<()> {
+        self.delete(table_id, pk).map_err(SqlError::Domain)
+    }
+    fn fk_replace(&mut self, table_id: crate::TableId, row: &[Value]) -> SqlResult<()> {
+        self.replace(table_id, row).map_err(SqlError::Domain)
+    }
+}
+
+impl TxFkRowAccess for crate::durable_typed::DurableTypedTransaction<'_> {
+    fn fk_scan(&mut self, table_id: crate::TableId) -> SqlResult<Vec<Vec<Value>>> {
+        self.scan(table_id).map_err(SqlError::Domain)
+    }
+    fn fk_delete(&mut self, table_id: crate::TableId, pk: &[Value]) -> SqlResult<()> {
+        self.delete(table_id, pk).map_err(SqlError::Domain)
+    }
+    fn fk_replace(&mut self, table_id: crate::TableId, row: &[Value]) -> SqlResult<()> {
+        self.replace(table_id, row).map_err(SqlError::Domain)
+    }
+}
+
+impl TxFkRowAccess for crate::typed_mvcc::TypedMvccTransaction<'_> {
+    fn fk_scan(&mut self, table_id: crate::TableId) -> SqlResult<Vec<Vec<Value>>> {
+        self.scan(table_id).map_err(SqlError::Domain)
+    }
+    fn fk_delete(&mut self, table_id: crate::TableId, pk: &[Value]) -> SqlResult<()> {
+        self.delete(table_id, pk).map_err(SqlError::Domain)
+    }
+    fn fk_replace(&mut self, table_id: crate::TableId, row: &[Value]) -> SqlResult<()> {
+        self.replace(table_id, row).map_err(SqlError::Domain)
+    }
+}
+
+/// ADR 0187 — generic FK parent-exists check. Reads the parent
+/// table through the caller-supplied tx so pending inserts in
+/// the same session are visible.
+pub(crate) fn fk_check_child_row_tx(
+    catalog: &crate::persistent_catalog::PersistentCatalog,
+    table: &Table,
+    row: &[Value],
+    tx: &mut dyn TxFkRowAccess,
+) -> SqlResult<()> {
+    if table.foreign_keys.is_empty() { return Ok(()); }
+    let snap = catalog.snapshot();
+    for fk in &table.foreign_keys {
+        let child_positions: Vec<usize> = fk.columns.iter()
+            .map(|c| locate(table, c)).collect::<SqlResult<Vec<_>>>()?;
+        let projection: Vec<Value> = child_positions.iter().map(|p| row[*p].clone()).collect();
+        if projection.iter().any(|v| matches!(v, Value::Null)) { continue; }
+        let parent = snap.tables().find(|t| t.id == fk.referenced_table)
+            .ok_or_else(|| SqlError::Resolution(format!("foreign key {} target missing", fk.name)))?;
+        let parent_positions: Vec<usize> = fk.referenced_columns.iter()
+            .map(|c| parent.columns.iter().position(|col| col.name == *c)
+                .ok_or_else(|| SqlError::Resolution(
+                    format!("foreign key {} referenced column {c} missing", fk.name))))
+            .collect::<SqlResult<Vec<_>>>()?;
+        let parent_rows = tx.fk_scan(parent.id)?;
+        let hit = parent_rows.iter().any(|r|
+            parent_positions.iter().zip(projection.iter())
+                .all(|(pos, val)| &r[*pos] == val));
+        if !hit {
+            return Err(SqlError::ForeignKey {
+                constraint: fk.name.clone(), reason: "missing-parent",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// ADR 0187 — generic parent-DELETE action dispatcher. Mirrors
+/// `foreign_key_restrict` but reads / writes through the
+/// supplied tx so the delete / replace are visible to the
+/// surrounding session.
+pub(crate) fn fk_apply_parent_delete_tx(
+    catalog: &crate::persistent_catalog::PersistentCatalog,
+    parent: &Table,
+    parent_pk: &[Value],
+    tx: &mut dyn TxFkRowAccess,
+) -> SqlResult<()> {
+    let snap = catalog.snapshot();
+    let parent_pk_positions: Vec<usize> = parent.primary_key.columns.iter()
+        .map(|c| locate(parent, c)).collect::<SqlResult<Vec<_>>>()?;
+    let mut children: Vec<(Table, crate::model::ForeignKey)> = Vec::new();
+    for child in snap.tables() {
+        for fk in &child.foreign_keys {
+            if fk.referenced_table == parent.id
+                && fk.referenced_columns == parent.primary_key.columns
+            {
+                children.push((child.clone(), fk.clone()));
+            }
+        }
+    }
+    drop(snap);
+    for (child, fk) in children {
+        let child_positions: Vec<usize> = fk.columns.iter()
+            .map(|c| locate(&child, c)).collect::<SqlResult<Vec<_>>>()?;
+        let child_pk_positions: Vec<usize> = child.primary_key.columns.iter()
+            .map(|c| locate(&child, c)).collect::<SqlResult<Vec<_>>>()?;
+        let rows = tx.fk_scan(child.id)?;
+        for r in rows {
+            let matches_pk = child_positions.iter().zip(parent_pk_positions.iter())
+                .all(|(ch, pa)| r[*ch] == parent_pk[*pa]);
+            if !matches_pk { continue; }
+            match fk.on_delete {
+                crate::model::ReferentialAction::Restrict => {
+                    return Err(SqlError::ForeignKey {
+                        constraint: fk.name.clone(), reason: "restrict",
+                    });
+                }
+                crate::model::ReferentialAction::Cascade => {
+                    let child_pk: Vec<Value> = child_pk_positions.iter()
+                        .map(|p| r[*p].clone()).collect();
+                    fk_apply_parent_delete_tx(catalog, &child, &child_pk, tx)?;
+                    tx.fk_delete(child.id, &child_pk)?;
+                }
+                crate::model::ReferentialAction::SetNull => {
+                    let mut mutated = r.clone();
+                    for pos in &child_positions { mutated[*pos] = Value::Null; }
+                    check_row(&child, &mutated)?;
+                    fk_check_child_row_tx(catalog, &child, &mutated, tx)?;
+                    if !child.unique_keys.is_empty() {
+                        let child_pk: Vec<Value> = child_pk_positions.iter()
+                            .map(|p| r[*p].clone()).collect();
+                        let others = tx.fk_scan(child.id)?.into_iter()
+                            .filter(|row| child_pk_positions.iter().zip(child_pk.iter())
+                                .any(|(pp, pk_val)| &row[*pp] != pk_val));
+                        crate::unique_check::UniqueConstraintChecker::new(&child)
+                            .check(&mutated, others)?;
+                    }
+                    tx.fk_replace(child.id, &mutated)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ADR 0184 / ADR 0185 — before deleting a parent row, apply
 /// each referencing FK's `on_delete` action:
 ///

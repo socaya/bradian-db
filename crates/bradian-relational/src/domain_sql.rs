@@ -353,6 +353,12 @@ impl<'a> DomainSqlSession<'a> {
                         }).collect::<SqlResult<Vec<_>>>()?;
                         // ADR 0182 — per-column CHECK.
                         crate::sql::check_row(&table, &row)?;
+                        // ADR 0187 — FK parent-exists check for
+                        // every FK on the inserted row. Scans
+                        // each parent via the active transaction
+                        // so it sees this session's own pending
+                        // inserts.
+                        crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
                         // ADR 0178 — UNIQUE enforcement at INSERT
                         // mirrors ADR 0176 for the single-table
                         // engine. Scan this table under the active
@@ -462,6 +468,9 @@ impl<'a> DomainSqlSession<'a> {
                             // ADR 0182 — per-column CHECK on
                             // the mutated row.
                             crate::sql::check_row(&table, &row)?;
+                            // ADR 0187 — FK parent-exists on the
+                            // mutated row (same as INSERT).
+                            crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
                             // ADR 0178 — UNIQUE enforcement at
                             // UPDATE mirrors ADR 0177: scan the
                             // table under the active transaction
@@ -498,6 +507,12 @@ impl<'a> DomainSqlSession<'a> {
                         let existing = tx.get(table.id, &key)?;
                         let deleted_bytes = existing.as_ref()
                             .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
+                        // ADR 0187 — apply RESTRICT / CASCADE /
+                        // SET NULL on each referencing child
+                        // before deleting the parent row.
+                        if existing.is_some() {
+                            crate::sql::fk_apply_parent_delete_tx(&self.engine.catalog, &table, &key, tx)?;
+                        }
                         let affected = if existing.is_some() {
                             tx.delete(table.id, &key)?;
                             1

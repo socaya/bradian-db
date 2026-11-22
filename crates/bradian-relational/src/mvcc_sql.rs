@@ -386,6 +386,10 @@ impl<'a> MvccSqlSession<'a> {
                         }).collect::<SqlResult<Vec<_>>>()?;
                         // ADR 0182 — per-column CHECK.
                         crate::sql::check_row(&table, &row)?;
+                        // ADR 0187 — FK parent-exists through
+                        // the active MVCC-SQL transaction.
+                        crate::sql::fk_check_child_row_tx(
+                            &self.engine.catalog, &table, &row, tx)?;
                         // ADR 0179 — UNIQUE enforcement at
                         // MVCC-SQL INSERT mirrors the pattern
                         // across the other three engines.
@@ -494,6 +498,10 @@ impl<'a> MvccSqlSession<'a> {
                             // ADR 0182 — per-column CHECK on
                             // the mutated row.
                             crate::sql::check_row(&table, &row)?;
+                            // ADR 0187 — FK parent-exists on the
+                            // mutated row.
+                            crate::sql::fk_check_child_row_tx(
+                                &self.engine.catalog, &table, &row, tx)?;
                             // ADR 0179 — UNIQUE enforcement at
                             // MVCC-SQL UPDATE: self-filter by PK
                             // and run the checker on the mutated
@@ -528,6 +536,12 @@ impl<'a> MvccSqlSession<'a> {
                         let existing = tx.get(table.id, &key)?;
                         let deleted_bytes = existing.as_ref()
                             .map(|r| crate::query_budget::row_bytes(r)).unwrap_or(0);
+                        // ADR 0187 — apply referential actions
+                        // before deleting.
+                        if existing.is_some() {
+                            crate::sql::fk_apply_parent_delete_tx(
+                                &self.engine.catalog, &table, &key, tx)?;
+                        }
                         let affected = if existing.is_some() {
                             tx.delete(table.id, &key)?;
                             1
