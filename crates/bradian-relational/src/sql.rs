@@ -1871,8 +1871,71 @@ fn divide_round_half_even(numerator: i128, denominator: i128) -> SqlResult<i128>
 /// segment can only appear at the end (SQL-standard: text
 /// extraction terminates the path).
 pub(crate) fn parse_projection(p: &mut Parser) -> SqlResult<Projection> {
-    let column = p.word()?;
+    let first = p.word()?;
+    // ADR 0226 — accept a two-part `table.column` reference for
+    // joined SELECT. The lexer never admits `.` inside a word
+    // so the check is unambiguous; non-join flows reject
+    // dotted projections at resolution time.
+    let column = if p.consume_symbol('.') {
+        let second = p.word()?;
+        format!("{first}.{second}")
+    } else { first };
     parse_projection_tail(p, column)
+}
+
+/// ADR 0226 — split a projection column reference into
+/// `(table_prefix, column_name)`. Returns `(None, name)` for
+/// bare references.
+pub(crate) fn split_qualified_column(s: &str) -> (Option<&str>, &str) {
+    if let Some(dot) = s.find('.') { (Some(&s[..dot]), &s[dot + 1..]) }
+    else { (None, s) }
+}
+
+/// ADR 0226 — resolve an `ON t1.c = t2.c` reference pair into
+/// `(left_column_position, right_column_position)`.  Each side
+/// of ON must be a two-part `[table, column]` and must name
+/// the matching source table.
+pub(crate) fn join_resolve_on(
+    left: &Table, right: &Table,
+    left_ref: &[String], right_ref: &[String],
+) -> SqlResult<(usize, usize)> {
+    if left_ref.len() != 2 || right_ref.len() != 2 {
+        return Err(SqlError::Unsupported(
+            "JOIN ON clause requires `table.col = table.col`".into()));
+    }
+    let (lref_table, lref_col) = (&left_ref[0], &left_ref[1]);
+    let (rref_table, rref_col) = (&right_ref[0], &right_ref[1]);
+    // Accept either ordering: lref matches left + rref matches right,
+    // or the mirror. Reject ambiguous references.
+    if lref_table == &left.name && rref_table == &right.name {
+        Ok((locate(left, lref_col)?, locate(right, rref_col)?))
+    } else if lref_table == &right.name && rref_table == &left.name {
+        Ok((locate(left, rref_col)?, locate(right, lref_col)?))
+    } else {
+        Err(SqlError::Resolution(
+            "JOIN ON references do not match the FROM/JOIN tables".into()))
+    }
+}
+
+/// ADR 0226 — resolve a qualified column reference against a
+/// two-table join namespace.  Returns `(is_right_side, position,
+/// column_name)`.
+pub(crate) fn join_resolve_column(
+    left: &Table, right: &Table, reference: &[String],
+) -> SqlResult<(bool, usize, String)> {
+    if reference.len() != 2 {
+        return Err(SqlError::Unsupported(
+            "JOIN WHERE references must be qualified as `table.col`".into()));
+    }
+    let (table, col) = (&reference[0], &reference[1]);
+    if table == &left.name {
+        Ok((false, locate(left, col)?, col.clone()))
+    } else if table == &right.name {
+        Ok((true, locate(right, col)?, col.clone()))
+    } else {
+        Err(SqlError::Resolution(format!(
+            "JOIN WHERE references unknown table {table}")))
+    }
 }
 
 /// ADR 0190 — parse the arrow chain after an already-consumed
@@ -3368,6 +3431,98 @@ impl SqlEngine {
         self.execute_impl_single(sql, control, budget, policy, authz)
     }
 
+    /// ADR 0226 — execute a simple INNER JOIN between two tables.
+    /// Builds the composite row namespace, resolves qualified
+    /// column references, runs a nested-loop join under the
+    /// operation mutex, applies the optional WHERE, and emits
+    /// projected rows.  No aggregates, DISTINCT, ORDER BY, or
+    /// ADR 0225 UNION composition — each is a separate ADR.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_inner_join(
+        &self,
+        left: &Table,
+        right: &Table,
+        left_ref: &[String],
+        right_ref: &[String],
+        select_items: &[SelectItem],
+        caller_wildcard: bool,
+        where_clause: Option<(Vec<String>, Literal)>,
+        _control: &ScanControl,
+        mut budget: Option<&mut crate::query_budget::BudgetTracker>,
+    ) -> SqlResult<SqlResultSet> {
+        // The operation mutex is already held by the caller
+        // (`execute_impl_single`).  Taking it again would
+        // deadlock on parking_lot's non-reentrant `Mutex`.
+        // Validate ON columns.
+        let (left_pos, right_pos) =
+            join_resolve_on(left, right, left_ref, right_ref)?;
+        let left_store = self.table_store(left)?;
+        let right_store = self.table_store(right)?;
+        let left_rows = left_store.scan()?;
+        let right_rows = right_store.scan()?;
+        if let Some(b) = budget.as_mut() {
+            let total_rows = (left_rows.len() + right_rows.len()) as u64;
+            b.charge_rows(total_rows)?;
+            b.charge_bytes(crate::query_budget::rows_bytes(&left_rows)
+                + crate::query_budget::rows_bytes(&right_rows))?;
+        }
+        // Expand `SELECT *` to every column from left then right.
+        let projections: Vec<(String /* table */, String /* col */)> = if caller_wildcard {
+            left.columns.iter().map(|c| (left.name.clone(), c.name.clone()))
+                .chain(right.columns.iter().map(|c| (right.name.clone(), c.name.clone())))
+                .collect()
+        } else {
+            select_items.iter().map(|item| match item {
+                SelectItem::Column(Projection::Column(s)) => {
+                    let (prefix, col) = split_qualified_column(s);
+                    let table = prefix.ok_or_else(|| SqlError::Unsupported(
+                        "joined SELECT requires qualified column references".into()))?;
+                    Ok((table.to_string(), col.to_string()))
+                }
+                _ => Err(SqlError::Unsupported(
+                    "joined SELECT accepts bare qualified columns only (no aggregates, JSON paths, ORDER BY, …)".into())),
+            }).collect::<SqlResult<Vec<_>>>()?
+        };
+        // Map each projection to (which_side, column_position).
+        let proj_positions: Vec<(bool /* is_right */, usize)> = projections.iter().map(|(table, col)| {
+            if table == &left.name { Ok((false, locate(left, col)?)) }
+            else if table == &right.name { Ok((true, locate(right, col)?)) }
+            else { Err(SqlError::Resolution(format!(
+                "joined SELECT references unknown table {table}"))) }
+        }).collect::<SqlResult<Vec<_>>>()?;
+        // Build output columns using `table.col` labels.
+        let columns: Vec<String> = projections.iter()
+            .map(|(t, c)| format!("{t}.{c}")).collect();
+        // Optional WHERE: single predicate on qualified column.
+        let where_filter: Option<(bool, usize, Value)> = match where_clause {
+            None => None,
+            Some((col_ref, lit)) => {
+                let (side, pos, col) = join_resolve_column(left, right, &col_ref)?;
+                let column_def = if side { &right.columns[pos] } else { &left.columns[pos] };
+                let _ = col;
+                Some((side, pos, coerce(&lit, column_def)?))
+            }
+        };
+        // Nested-loop join.
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        for lrow in &left_rows {
+            for rrow in &right_rows {
+                if compare_values_for_check(&lrow[left_pos], &rrow[right_pos])
+                    != std::cmp::Ordering::Equal { continue; }
+                if let Some((side, pos, ref lit)) = where_filter {
+                    let v = if side { &rrow[pos] } else { &lrow[pos] };
+                    if compare_values_for_check(v, lit)
+                        != std::cmp::Ordering::Equal { continue; }
+                }
+                let out: Vec<Value> = proj_positions.iter().map(|(is_right, pos)|
+                    if *is_right { rrow[*pos].clone() } else { lrow[*pos].clone() }
+                ).collect();
+                rows.push(out);
+            }
+        }
+        Ok(SqlResultSet::Rows { columns, rows })
+    }
+
     fn execute_impl_single(
         &self, sql: &str, control: &ScanControl,
         mut budget: Option<&mut crate::query_budget::BudgetTracker>,
@@ -3805,6 +3960,34 @@ impl SqlEngine {
                 p.expect("from")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
+                // ADR 0226 — INNER JOIN detection.  Forks to a
+                // dedicated two-table executor; MVP bounds:
+                // one JOIN, no OUTER / aliases / subqueries,
+                // ON is `t1.c = t2.c`, no aggregates / DISTINCT
+                // / GROUP BY / HAVING / ORDER BY / LIMIT in a
+                // joined query.
+                if p.consume_word("join") {
+                    let right_name = p.name()?;
+                    let right_table = self.resolve(&right_name)?;
+                    p.expect("on")?;
+                    let left_ref = p.name()?;
+                    p.symbol('=')?;
+                    let right_ref = p.name()?;
+                    let where_clause = if p.next_is_word("where") {
+                        p.expect("where")?;
+                        let col = p.name()?;
+                        p.symbol('=')?;
+                        let lit = p.literal()?;
+                        Some((col, lit))
+                    } else { None };
+                    p.end()?;
+                    return self.execute_inner_join(
+                        &table, &right_table,
+                        &left_ref, &right_ref,
+                        &select_items, caller_wildcard,
+                        where_clause, control, budget,
+                    );
+                }
                 // ADR 0217 — expand `SELECT *` into bare columns.
                 let mut select_items: Vec<SelectItem> = if select_items.is_empty() {
                     table.columns.iter()
@@ -3813,6 +3996,16 @@ impl SqlEngine {
                 } else { select_items };
                 if select_items.is_empty() {
                     return Err(SqlError::Syntax("SELECT requires columns".into()));
+                }
+                // ADR 0226 — reject dotted projections on the
+                // single-table path.
+                for item in &select_items {
+                    if let SelectItem::Column(Projection::Column(name)) = item {
+                        if name.contains('.') {
+                            return Err(SqlError::Unsupported(
+                                "qualified column references require a JOIN".into()));
+                        }
+                    }
                 }
                 // Back-compat for existing rows path: strip into
                 // projections when no aggregate appears.
