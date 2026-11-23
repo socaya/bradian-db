@@ -175,6 +175,21 @@ impl TableStore {
     }
 
     pub fn table(&self) -> &Table { &self.table }
+
+    /// ADR 0241 — rewrite the META_KEY schema pin to a new
+    /// table definition.  Caller must have ensured every row
+    /// still validates under the new schema (SET NOT NULL
+    /// after backfilling NULLs, for example).  The pk_positions
+    /// are recomputed from the new column layout.
+    pub fn rewrite_schema_pin(&mut self, new_table: Table) -> TableResult<()> {
+        let pk_positions = validate_table(&new_table)?;
+        let expected = serde_json::to_vec(&new_table)
+            .map_err(|e| TableError::Schema(format!("cannot serialize table definition: {e}")))?;
+        self.storage.put(META_KEY, &expected)?;
+        self.table = new_table;
+        self.pk_positions = pk_positions;
+        Ok(())
+    }
     pub fn last_lsn(&self) -> u64 { self.storage.last_lsn() }
     pub fn checkpoint(&self) -> TableResult<u64> { Ok(self.storage.checkpoint()?) }
 

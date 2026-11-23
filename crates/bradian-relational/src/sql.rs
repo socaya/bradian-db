@@ -5759,6 +5759,53 @@ impl SqlEngine {
                     p.expect("column")?;
                     let col = p.word()?;
                     if p.consume_word("set") {
+                        // ADR 0241 — SET NOT NULL [BACKFILL lit].
+                        if p.consume_word("not") {
+                            p.expect("null")?;
+                            let backfill_literal = if p.consume_word("backfill") {
+                                Some(p.literal()?)
+                            } else { None };
+                            p.end()?;
+                            let column = table.columns.iter()
+                                .find(|c| c.name == col)
+                                .ok_or_else(|| SqlError::Resolution(
+                                    format!("unknown column {col}")))?;
+                            if !column.nullable {
+                                return Err(SqlError::Unsupported(
+                                    "SET NOT NULL: column is already NOT NULL".into()));
+                            }
+                            let col_pos = locate(&table, &col)?;
+                            let mut store = self.table_store(&table)?;
+                            let existing = store.scan()?;
+                            let has_null = existing.iter().any(|row|
+                                matches!(row[col_pos], Value::Null));
+                            let backfill_value = match (has_null, backfill_literal) {
+                                (false, _) => None,
+                                (true, None) => return Err(SqlError::Type(
+                                    "SET NOT NULL rejects: existing rows carry NULL and no BACKFILL was supplied".into())),
+                                (true, Some(lit)) => Some(coerce(&lit, column)?),
+                            };
+                            if let Some(ref v) = backfill_value {
+                                for mut row in existing {
+                                    if matches!(row[col_pos], Value::Null) {
+                                        row[col_pos] = v.clone();
+                                        store.replace(&row)?;
+                                    }
+                                }
+                            }
+                            self.catalog.strengthen_column_not_null(table.id, &col)?;
+                            // ADR 0241 — rewrite the META_KEY so the
+                            // next open sees the strengthened schema.
+                            let new_table = self.catalog.snapshot()
+                                .table(table.id)
+                                .ok_or_else(|| SqlError::Resolution(
+                                    "table disappeared after SET NOT NULL".into()))?
+                                .clone();
+                            store.rewrite_schema_pin(new_table)
+                                .map_err(|e| SqlError::Type(format!(
+                                    "SET NOT NULL pin rewrite: {e}")))?;
+                            return Ok(SqlResultSet::Command { affected: 0 });
+                        }
                         p.expect("default")?;
                         let column = table.columns.iter()
                             .find(|c| c.name == col)

@@ -76,6 +76,10 @@ enum Command {
     SetColumnDefault { table: TableId, column: String, value: crate::typed_table::Value },
     DropColumnDefault { table: TableId, column: String },
     WidenColumnType { table: TableId, column: String, new_type: crate::model::DataType },
+    /// ADR 0241 — SET NOT NULL. Flips the column's nullable
+    /// bit after the SQL engine has validated that no existing
+    /// row carries NULL in the column.
+    StrengthenColumnNotNull { table: TableId, column: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +158,10 @@ impl Event {
             }
             Command::WidenColumnType { table, column, new_type } => {
                 catalog.widen_column_type(*table, column, new_type.clone())?;
+                None
+            }
+            Command::StrengthenColumnNotNull { table, column } => {
+                catalog.strengthen_column_not_null(*table, column)?;
                 None
             }
             Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } | Command::ProposeDefaultedRevision { table, proposed } => {
@@ -505,6 +513,16 @@ impl PersistentCatalog {
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::WidenColumnType {
             table, column: column.into(), new_type,
+        })?.1)
+    }
+
+    /// ADR 0241 — SET NOT NULL. Caller must ensure no stored
+    /// row carries NULL in this column before invoking.
+    pub fn strengthen_column_not_null(
+        &self, table: TableId, column: &str,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::StrengthenColumnNotNull {
+            table, column: column.into(),
         })?.1)
     }
 

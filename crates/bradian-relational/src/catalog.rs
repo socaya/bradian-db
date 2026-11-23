@@ -626,6 +626,29 @@ impl Catalog {
         Ok(())
     }
 
+    /// ADR 0241 — SET NOT NULL. Flips the nullable bit from
+    /// true → false. Row-level validation (no NULLs remaining)
+    /// is the caller's responsibility; the catalog only
+    /// mutates metadata. Rejects when the column is a primary-
+    /// key column (already NOT NULL), already NOT NULL, or
+    /// unknown.
+    pub fn strengthen_column_not_null(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        let col = table.columns.iter().find(|c| c.name == name)
+            .ok_or_else(|| CatalogError::NotFound(format!("column {name}")))?;
+        if !col.nullable {
+            return Err(CatalogError::InvalidDefinition(format!(
+                "column {name} is already NOT NULL")));
+        }
+        let t = self.tables.get_mut(&id).expect("validated table");
+        for c in &mut t.columns {
+            if c.name == name { c.nullable = false; }
+        }
+        Ok(())
+    }
+
     /// ADR 0124 — DROP DEFAULT. No-op if none set.
     pub fn drop_column_default(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
         let name = identifier(name)?;
