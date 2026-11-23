@@ -1542,7 +1542,17 @@ pub(crate) enum FuncArg {
     Literal(Value),
 }
 
-/// ADR 0232 — scalar function call in a SELECT projection.
+/// ADR 0233 — one `WHEN predicate THEN value` arm of a CASE.
+#[derive(Clone, Debug)]
+pub(crate) struct CaseArm {
+    pub(crate) column: FuncArg,
+    pub(crate) op: crate::model::CheckOp,
+    pub(crate) literal: Value,
+    pub(crate) result: FuncArg,
+}
+
+/// ADR 0232 + 0233 — scalar function call in a SELECT
+/// projection, now including CASE and extended string functions.
 #[derive(Clone, Debug)]
 pub(crate) enum FuncExpr {
     Upper(FuncArg),
@@ -1551,6 +1561,18 @@ pub(crate) enum FuncExpr {
     Abs(FuncArg),
     Coalesce(Vec<FuncArg>),
     NullIf(FuncArg, FuncArg),
+    /// ADR 0233 — variadic text concat (NULL propagates).
+    Concat(Vec<FuncArg>),
+    /// ADR 0233 — `SUBSTR(s, start[, length])`, 1-based `start`
+    /// matching SQL convention; negative / zero `start` clamps
+    /// to 1.
+    Substr { s: FuncArg, start: FuncArg, length: Option<FuncArg> },
+    /// ADR 0233 — remove ASCII whitespace from both ends.
+    Trim(FuncArg),
+    /// ADR 0233 — replace every occurrence of `from` with `to`.
+    Replace { s: FuncArg, from: FuncArg, to: FuncArg },
+    /// ADR 0233 — `CASE WHEN p THEN v [WHEN …] [ELSE v] END`.
+    Case { arms: Vec<CaseArm>, else_result: Option<FuncArg> },
 }
 
 impl FuncExpr {
@@ -1562,6 +1584,11 @@ impl FuncExpr {
             FuncExpr::Abs(_) => "abs".into(),
             FuncExpr::Coalesce(_) => "coalesce".into(),
             FuncExpr::NullIf(_, _) => "nullif".into(),
+            FuncExpr::Concat(_) => "concat".into(),
+            FuncExpr::Substr { .. } => "substr".into(),
+            FuncExpr::Trim(_) => "trim".into(),
+            FuncExpr::Replace { .. } => "replace".into(),
+            FuncExpr::Case { .. } => "case".into(),
         }
     }
 }
@@ -1644,6 +1671,110 @@ pub(crate) fn evaluate_func(fe: &FuncExpr, row: &[Value], table: &Table) -> SqlR
                 Ok(Value::Null)
             } else { Ok(va) }
         }
+        FuncExpr::Concat(args) => {
+            let mut out = String::new();
+            for a in args {
+                match evaluate_func_arg(a, row, table)? {
+                    Value::Null => return Ok(Value::Null),
+                    Value::String(s) | Value::Json(s) => out.push_str(&s),
+                    Value::Int32(n) => out.push_str(&n.to_string()),
+                    Value::Int64(n) => out.push_str(&n.to_string()),
+                    Value::Decimal(n) => out.push_str(&n.to_string()),
+                    Value::Boolean(b) => out.push_str(if b { "true" } else { "false" }),
+                    other => return Err(SqlError::Type(format!(
+                        "CONCAT cannot stringify {other:?}"))),
+                }
+            }
+            Ok(Value::String(out))
+        }
+        FuncExpr::Substr { s, start, length } => {
+            let sv = match evaluate_func_arg(s, row, table)? {
+                Value::Null => return Ok(Value::Null),
+                Value::String(s) => s,
+                Value::Json(s) => s,
+                other => return Err(SqlError::Type(format!(
+                    "SUBSTR requires a text argument; got {other:?}"))),
+            };
+            let start_i = match evaluate_func_arg(start, row, table)? {
+                Value::Null => return Ok(Value::Null),
+                Value::Int32(n) => i64::from(n),
+                Value::Int64(n) => n,
+                other => return Err(SqlError::Type(format!(
+                    "SUBSTR start must be an integer; got {other:?}"))),
+            };
+            let len_i = match length {
+                None => None,
+                Some(arg) => Some(match evaluate_func_arg(arg, row, table)? {
+                    Value::Null => return Ok(Value::Null),
+                    Value::Int32(n) => i64::from(n),
+                    Value::Int64(n) => n,
+                    other => return Err(SqlError::Type(format!(
+                        "SUBSTR length must be an integer; got {other:?}"))),
+                }),
+            };
+            let chars: Vec<char> = sv.chars().collect();
+            // SQL-standard 1-based start; <= 0 clamps to 1.
+            let start0 = if start_i < 1 { 0usize } else { (start_i - 1).min(chars.len() as i64) as usize };
+            let end0 = match len_i {
+                None => chars.len(),
+                Some(l) if l <= 0 => start0,
+                Some(l) => (start0 + l as usize).min(chars.len()),
+            };
+            Ok(Value::String(chars[start0..end0].iter().collect()))
+        }
+        FuncExpr::Trim(a) => match evaluate_func_arg(a, row, table)? {
+            Value::Null => Ok(Value::Null),
+            Value::String(s) => Ok(Value::String(s.trim().to_string())),
+            Value::Json(s) => Ok(Value::String(s.trim().to_string())),
+            other => Err(SqlError::Type(format!(
+                "TRIM requires a text argument; got {other:?}"))),
+        },
+        FuncExpr::Replace { s, from, to } => {
+            let sv = match evaluate_func_arg(s, row, table)? {
+                Value::Null => return Ok(Value::Null),
+                Value::String(s) => s,
+                Value::Json(s) => s,
+                other => return Err(SqlError::Type(format!(
+                    "REPLACE requires text arguments; got {other:?}"))),
+            };
+            let fv = match evaluate_func_arg(from, row, table)? {
+                Value::Null => return Ok(Value::Null),
+                Value::String(s) | Value::Json(s) => s,
+                other => return Err(SqlError::Type(format!(
+                    "REPLACE 'from' must be text; got {other:?}"))),
+            };
+            let tv = match evaluate_func_arg(to, row, table)? {
+                Value::Null => return Ok(Value::Null),
+                Value::String(s) | Value::Json(s) => s,
+                other => return Err(SqlError::Type(format!(
+                    "REPLACE 'to' must be text; got {other:?}"))),
+            };
+            if fv.is_empty() {
+                return Err(SqlError::Type(
+                    "REPLACE 'from' must be non-empty".into()));
+            }
+            Ok(Value::String(sv.replace(&fv, &tv)))
+        }
+        FuncExpr::Case { arms, else_result } => {
+            for arm in arms {
+                let v = evaluate_func_arg(&arm.column, row, table)?;
+                if matches!(v, Value::Null) { continue; }
+                let ord = compare_values_for_check(&v, &arm.literal);
+                let matched = match arm.op {
+                    crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                    crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                    crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                    crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                    crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                    crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                };
+                if matched { return evaluate_func_arg(&arm.result, row, table); }
+            }
+            match else_result {
+                Some(e) => evaluate_func_arg(e, row, table),
+                None => Ok(Value::Null),
+            }
+        }
     }
 }
 
@@ -1717,6 +1848,65 @@ fn consume_func(p: &mut Parser) -> SqlResult<Option<FuncExpr>> {
         let b = parse_func_arg(p)?;
         p.symbol(')')?;
         Ok(Some(FuncExpr::NullIf(a, b)))
+    } else if p.consume_word("concat") {
+        p.symbol('(')?;
+        let mut args = vec![parse_func_arg(p)?];
+        while p.consume_symbol(',') { args.push(parse_func_arg(p)?); }
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Concat(args)))
+    } else if p.consume_word("substr") {
+        p.symbol('(')?;
+        let s = parse_func_arg(p)?;
+        p.symbol(',')?;
+        let start = parse_func_arg(p)?;
+        let length = if p.consume_symbol(',') { Some(parse_func_arg(p)?) } else { None };
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Substr { s, start, length }))
+    } else if p.consume_word("trim") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Trim(a)))
+    } else if p.consume_word("replace") {
+        p.symbol('(')?;
+        let s = parse_func_arg(p)?;
+        p.symbol(',')?;
+        let from = parse_func_arg(p)?;
+        p.symbol(',')?;
+        let to = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Replace { s, from, to }))
+    } else if p.consume_word("case") {
+        // ADR 0233 — CASE WHEN c op lit THEN v [WHEN …] [ELSE v] END.
+        let mut arms = Vec::new();
+        while p.consume_word("when") {
+            let column = parse_func_arg(p)?;
+            let op = p.word_or_symbol_pair_for_check()?;
+            let literal_lit = p.literal()?;
+            let literal = match literal_lit {
+                Literal::Null => Value::Null,
+                Literal::Bool(b) => Value::Boolean(b),
+                Literal::Text(s) => Value::String(s),
+                Literal::Number(s) => {
+                    if let Ok(n) = s.parse::<i64>() { Value::Int64(n) }
+                    else { return Err(SqlError::Type(format!(
+                        "CASE WHEN literal {s} is not a valid numeric"))); }
+                }
+                Literal::Default => return Err(SqlError::Syntax(
+                    "DEFAULT is not a CASE comparator".into())),
+            };
+            p.expect("then")?;
+            let result = parse_func_arg(p)?;
+            arms.push(CaseArm { column, op, literal, result });
+        }
+        if arms.is_empty() {
+            return Err(SqlError::Syntax("CASE requires at least one WHEN".into()));
+        }
+        let else_result = if p.consume_word("else") {
+            Some(parse_func_arg(p)?)
+        } else { None };
+        p.expect("end")?;
+        Ok(Some(FuncExpr::Case { arms, else_result }))
     } else {
         Ok(None)
     }
