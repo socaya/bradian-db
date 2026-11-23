@@ -1533,21 +1533,192 @@ pub(crate) fn sort_distinct_output(rows: &mut [Vec<Value>]) {
     });
 }
 
-/// ADR 0217 — one element of a SELECT list. A plain column
-/// projection (ADR 0186+), or a scalar aggregate.
+/// ADR 0232 — argument to a scalar function call. Columns are
+/// stored as raw name (may be dotted for joined queries);
+/// literals materialize as `Value` at parse time.
+#[derive(Clone, Debug)]
+pub(crate) enum FuncArg {
+    ColumnRef(String),
+    Literal(Value),
+}
+
+/// ADR 0232 — scalar function call in a SELECT projection.
+#[derive(Clone, Debug)]
+pub(crate) enum FuncExpr {
+    Upper(FuncArg),
+    Lower(FuncArg),
+    Length(FuncArg),
+    Abs(FuncArg),
+    Coalesce(Vec<FuncArg>),
+    NullIf(FuncArg, FuncArg),
+}
+
+impl FuncExpr {
+    fn label(&self) -> String {
+        match self {
+            FuncExpr::Upper(_) => "upper".into(),
+            FuncExpr::Lower(_) => "lower".into(),
+            FuncExpr::Length(_) => "length".into(),
+            FuncExpr::Abs(_) => "abs".into(),
+            FuncExpr::Coalesce(_) => "coalesce".into(),
+            FuncExpr::NullIf(_, _) => "nullif".into(),
+        }
+    }
+}
+
+/// ADR 0217 + 0232 — one element of a SELECT list. A plain
+/// column projection (ADR 0186+), a scalar aggregate, or a
+/// scalar function call.
 #[derive(Clone, Debug)]
 pub(crate) enum SelectItem {
     Column(Projection),
     Agg(AggSpec),
+    Func(FuncExpr),
 }
 
 impl SelectItem {
     pub(crate) fn is_aggregate(&self) -> bool { matches!(self, SelectItem::Agg(_)) }
+    pub(crate) fn is_func(&self) -> bool { matches!(self, SelectItem::Func(_)) }
     pub(crate) fn label(&self) -> String {
         match self {
             SelectItem::Column(pj) => pj.label(),
             SelectItem::Agg(spec) => spec.result_column().to_string(),
+            SelectItem::Func(fe) => fe.label(),
         }
+    }
+}
+
+/// ADR 0232 — resolve a FuncArg against a row.
+fn evaluate_func_arg(arg: &FuncArg, row: &[Value], table: &Table) -> SqlResult<Value> {
+    match arg {
+        FuncArg::Literal(v) => Ok(v.clone()),
+        FuncArg::ColumnRef(name) => {
+            let pos = locate(table, name)?;
+            Ok(row[pos].clone())
+        }
+    }
+}
+
+/// ADR 0232 — evaluate a scalar function call against a row.
+pub(crate) fn evaluate_func(fe: &FuncExpr, row: &[Value], table: &Table) -> SqlResult<Value> {
+    match fe {
+        FuncExpr::Upper(a) => match evaluate_func_arg(a, row, table)? {
+            Value::Null => Ok(Value::Null),
+            Value::String(s) => Ok(Value::String(s.to_uppercase())),
+            other => Err(SqlError::Type(format!(
+                "UPPER requires a text argument; got {other:?}"))),
+        },
+        FuncExpr::Lower(a) => match evaluate_func_arg(a, row, table)? {
+            Value::Null => Ok(Value::Null),
+            Value::String(s) => Ok(Value::String(s.to_lowercase())),
+            other => Err(SqlError::Type(format!(
+                "LOWER requires a text argument; got {other:?}"))),
+        },
+        FuncExpr::Length(a) => match evaluate_func_arg(a, row, table)? {
+            Value::Null => Ok(Value::Null),
+            Value::String(s) => Ok(Value::Int64(s.chars().count() as i64)),
+            Value::Json(s) => Ok(Value::Int64(s.chars().count() as i64)),
+            other => Err(SqlError::Type(format!(
+                "LENGTH requires a text argument; got {other:?}"))),
+        },
+        FuncExpr::Abs(a) => match evaluate_func_arg(a, row, table)? {
+            Value::Null => Ok(Value::Null),
+            Value::Int32(n) => Ok(Value::Int32(n.abs())),
+            Value::Int64(n) => Ok(Value::Int64(n.abs())),
+            Value::Decimal(n) => Ok(Value::Decimal(n.abs())),
+            other => Err(SqlError::Type(format!(
+                "ABS requires a numeric argument; got {other:?}"))),
+        },
+        FuncExpr::Coalesce(args) => {
+            for a in args {
+                let v = evaluate_func_arg(a, row, table)?;
+                if !matches!(v, Value::Null) { return Ok(v); }
+            }
+            Ok(Value::Null)
+        }
+        FuncExpr::NullIf(a, b) => {
+            let va = evaluate_func_arg(a, row, table)?;
+            let vb = evaluate_func_arg(b, row, table)?;
+            if matches!(va, Value::Null) || matches!(vb, Value::Null) { return Ok(va); }
+            if compare_values_for_check(&va, &vb) == std::cmp::Ordering::Equal {
+                Ok(Value::Null)
+            } else { Ok(va) }
+        }
+    }
+}
+
+/// ADR 0232 — parse a FuncArg (column ref or literal) inside
+/// function argument lists.
+fn parse_func_arg(p: &mut Parser) -> SqlResult<FuncArg> {
+    if p.next_is_literal() {
+        let lit = p.literal()?;
+        // Coerce the literal to a Value without a target column.
+        // For text/number/bool/null we have a direct mapping.
+        return Ok(FuncArg::Literal(match lit {
+            Literal::Null => Value::Null,
+            Literal::Bool(b) => Value::Boolean(b),
+            Literal::Text(s) => Value::String(s),
+            Literal::Number(s) => {
+                if let Ok(n) = s.parse::<i64>() { Value::Int64(n) }
+                else if let Ok(d) = s.parse::<i128>() { Value::Decimal(d) }
+                else { return Err(SqlError::Type(format!(
+                    "function literal {s} is not a valid numeric"))); }
+            }
+            Literal::Default => return Err(SqlError::Syntax(
+                "DEFAULT is not a function argument".into())),
+        }));
+    }
+    // Column reference (optionally dotted for joined queries).
+    let first = p.word()?;
+    if p.consume_symbol('.') {
+        let second = p.word()?;
+        Ok(FuncArg::ColumnRef(format!("{first}.{second}")))
+    } else { Ok(FuncArg::ColumnRef(first)) }
+}
+
+/// ADR 0232 — recognize a scalar function head. Returns `Some`
+/// after consuming the tokens. The caller must ensure the next
+/// word is one of the function names before calling.
+fn consume_func(p: &mut Parser) -> SqlResult<Option<FuncExpr>> {
+    if p.consume_word("upper") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Upper(a)))
+    } else if p.consume_word("lower") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Lower(a)))
+    } else if p.consume_word("length") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Length(a)))
+    } else if p.consume_word("abs") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Abs(a)))
+    } else if p.consume_word("coalesce") {
+        p.symbol('(')?;
+        let mut args = vec![parse_func_arg(p)?];
+        while p.consume_symbol(',') { args.push(parse_func_arg(p)?); }
+        p.symbol(')')?;
+        if args.is_empty() {
+            return Err(SqlError::Syntax(
+                "COALESCE requires at least one argument".into()));
+        }
+        Ok(Some(FuncExpr::Coalesce(args)))
+    } else if p.consume_word("nullif") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(',')?;
+        let b = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::NullIf(a, b)))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1556,6 +1727,7 @@ impl SelectItem {
 /// list; GROUP BY enforcement runs at planning time.
 pub(crate) fn parse_select_item(p: &mut Parser) -> SqlResult<SelectItem> {
     if let Some(spec) = consume_aggregate(p)? { return Ok(SelectItem::Agg(spec)); }
+    if let Some(fe) = consume_func(p)? { return Ok(SelectItem::Func(fe)); }
     Ok(SelectItem::Column(parse_projection(p)?))
 }
 
@@ -1742,6 +1914,8 @@ pub(crate) fn evaluate_grouped(
                 SelectItem::Agg(spec) => {
                     out.push(evaluate_aggregate(spec, table, bucket_rows)?);
                 }
+                SelectItem::Func(_) => return Err(SqlError::Unsupported(
+                    "scalar functions in grouped SELECT are a future extension".into())),
             }
         }
         output_rows.push(out);
@@ -4438,7 +4612,7 @@ impl SqlEngine {
                         if caller_wildcard {
                             select_items.retain(|item| match item {
                                 SelectItem::Column(pj) => p_.column_level.allows_read(pj.source_column()),
-                                SelectItem::Agg(_) => true,
+                                SelectItem::Agg(_) | SelectItem::Func(_) => true,
                             });
                         } else {
                             for item in &select_items {
@@ -4560,23 +4734,36 @@ impl SqlEngine {
                 // before projection so sort keys can reference
                 // columns that are not in the projection list.
                 let all = window.apply(all, &table)?;
-                let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
-                // ADR 0186 — apply JSON path extraction per cell
-                // after the base projection. Bare columns pass
-                // through unchanged.
-                let rows: Vec<Vec<Value>> = base_rows.into_iter().map(|row|
-                    row.into_iter().zip(&plain_projections).map(|(value, pj)| apply_projection(pj, value))
-                        .collect::<SqlResult<Vec<Value>>>()
-                ).collect::<SqlResult<Vec<Vec<Value>>>>()?;
-                // ADR 0219 — DISTINCT dedups output tuples using
-                // the cross-type equality rule, then sorts for
-                // deterministic emission.
+                // ADR 0232 — if any projection is a scalar
+                // function, evaluate per full row (functions
+                // can reference columns outside the projection
+                // list via column name).
+                let any_func = select_items.iter().any(|it| it.is_func());
+                let rows: Vec<Vec<Value>> = if any_func {
+                    let _ = indices;
+                    all.into_iter().map(|row|
+                        select_items.iter().map(|item| match item {
+                            SelectItem::Column(pj) => {
+                                let pos = locate(&table, pj.source_column())?;
+                                apply_projection(pj, row[pos].clone())
+                            }
+                            SelectItem::Func(fe) => evaluate_func(fe, &row, &table),
+                            SelectItem::Agg(_) => unreachable!("scalar row path"),
+                        }).collect::<SqlResult<Vec<Value>>>()
+                    ).collect::<SqlResult<Vec<Vec<Value>>>>()?
+                } else {
+                    let base_rows = crate::typed_table::project_rows_with_control(all, &indices, control)?;
+                    base_rows.into_iter().map(|row|
+                        row.into_iter().zip(&plain_projections).map(|(value, pj)| apply_projection(pj, value))
+                            .collect::<SqlResult<Vec<Value>>>()
+                    ).collect::<SqlResult<Vec<Vec<Value>>>>()?
+                };
                 let rows = if distinct {
                     let mut out = dedup_rows(rows);
                     sort_distinct_output(&mut out);
                     out
                 } else { rows };
-                let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
+                let columns: Vec<String> = select_items.iter().map(|it| it.label()).collect();
                 Ok(SqlResultSet::Rows { columns, rows })
             }
             "update" => {

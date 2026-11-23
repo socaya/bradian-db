@@ -577,7 +577,7 @@ impl<'a> DomainSqlSession<'a> {
                                 if caller_wildcard {
                                     select_items.retain(|item| match item {
                                         crate::sql::SelectItem::Column(pj) => p_.column_level.allows_read(pj.source_column()),
-                                        crate::sql::SelectItem::Agg(_) => true,
+                                        crate::sql::SelectItem::Agg(_) | crate::sql::SelectItem::Func(_) => true,
                                     });
                                 } else {
                                     for item in &select_items {
