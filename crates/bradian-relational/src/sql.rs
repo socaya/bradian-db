@@ -3204,6 +3204,15 @@ pub(crate) enum JsonMatcher {
     Ilike { pattern_lower: String, escape: Option<char> },
     /// ADR 0210 + ADR 0211 — negated case-insensitive pattern.
     NotIlike { pattern_lower: String, escape: Option<char> },
+    /// ADR 0243 — NULL-aware inequality. `extracted IS DISTINCT
+    /// FROM literal` returns true when either side is NULL and
+    /// the other is not, OR both are non-NULL and unequal. Both
+    /// NULL is NOT distinct, so returns false.
+    IsDistinctFrom { literal: Value },
+    /// ADR 0243 — NULL-aware equality. Inverse of IsDistinctFrom:
+    /// both-NULL is true; one-NULL-one-non-NULL is false; both
+    /// non-NULL compares as ordinary equality.
+    IsNotDistinctFrom { literal: Value },
 }
 
 #[derive(Clone, Debug)]
@@ -3365,11 +3374,18 @@ fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicat
         parse_between_tail(p, as_text, /*negated=*/false)?
     } else if p.consume_word("is") {
         let negated = p.consume_word("not");
-        if !p.consume_word("null") {
+        if p.consume_word("null") {
+            if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
+        } else if p.consume_word("distinct") {
+            p.expect("from")?;
+            let literal = p.literal()?;
+            let value = coerce_where_literal(&literal, as_text)?;
+            if negated { JsonMatcher::IsNotDistinctFrom { literal: value } }
+            else { JsonMatcher::IsDistinctFrom { literal: value } }
+        } else {
             return Err(SqlError::Unsupported(
-                "IS [NOT] NULL is the only IS-form supported for JSON paths".into()));
+                "IS supports [NOT] NULL and [NOT] DISTINCT FROM".into()));
         }
-        if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
     } else if p.consume_word("not") {
         if p.consume_word("in") {
             JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
@@ -3586,6 +3602,28 @@ fn eval_predicate(
     match &pred.matcher {
         JsonMatcher::IsNull => return Ok(matches!(extracted, Value::Null)),
         JsonMatcher::IsNotNull => return Ok(!matches!(extracted, Value::Null)),
+        // ADR 0243 — IS [NOT] DISTINCT FROM is NULL-aware and
+        // must see the extracted value even when it is NULL.
+        JsonMatcher::IsDistinctFrom { literal } => {
+            let ex_null = matches!(extracted, Value::Null);
+            let lit_null = matches!(literal, Value::Null);
+            return Ok(match (ex_null, lit_null) {
+                (true, true) => false,
+                (true, false) | (false, true) => true,
+                (false, false) =>
+                    compare_values_for_check(&extracted, literal) != std::cmp::Ordering::Equal,
+            });
+        }
+        JsonMatcher::IsNotDistinctFrom { literal } => {
+            let ex_null = matches!(extracted, Value::Null);
+            let lit_null = matches!(literal, Value::Null);
+            return Ok(match (ex_null, lit_null) {
+                (true, true) => true,
+                (true, false) | (false, true) => false,
+                (false, false) =>
+                    compare_values_for_check(&extracted, literal) == std::cmp::Ordering::Equal,
+            });
+        }
         _ => {}
     }
     if matches!(extracted, Value::Null) { return Ok(false); }
@@ -3636,7 +3674,8 @@ fn eval_predicate(
             Some(s) => !like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
             None => false,
         },
-        JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
+        JsonMatcher::IsNull | JsonMatcher::IsNotNull
+        | JsonMatcher::IsDistinctFrom { .. } | JsonMatcher::IsNotDistinctFrom { .. } =>
             unreachable!("handled above the NULL guard"),
     })
 }
