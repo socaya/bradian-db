@@ -3212,15 +3212,26 @@ pub(crate) struct JsonPredicate {
     pub(crate) matcher: JsonMatcher,
 }
 
+/// ADR 0240 — boolean tree over JSON-path predicates. Replaces
+/// the ADR 0205 DNF when arbitrary parenthesization or `NOT`
+/// prefix is used.
+#[derive(Clone, Debug)]
+pub(crate) enum WhereTree {
+    Predicate(JsonPredicate),
+    And(Box<WhereTree>, Box<WhereTree>),
+    Or(Box<WhereTree>, Box<WhereTree>),
+    Not(Box<WhereTree>),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum SelectWhere {
     KeyPredicate(Vec<Value>),
-    /// ADR 0190 + ADR 0204 + ADR 0205 — JSON-path WHERE in
-    /// disjunctive normal form: the outer `Vec` is OR-joined;
-    /// each inner `Vec` is an AND-group. A row matches when
-    /// at least one AND-group holds. Single-predicate and
-    /// AND-only queries remain a single outer element.
-    JsonPathPredicates(Vec<Vec<JsonPredicate>>),
+    /// ADR 0190 + ADR 0204 + ADR 0205 + ADR 0240 — JSON-path
+    /// WHERE as a boolean tree. The tree degenerates to the
+    /// earlier DNF shape (OR-of-AND groups) for queries that
+    /// do not use NOT or parens, so all the existing matcher
+    /// composition and admission behavior is preserved.
+    JsonPathPredicates(WhereTree),
 }
 
 /// ADR 0190 — parse the full WHERE clause for a SELECT. The
@@ -3236,91 +3247,21 @@ pub(crate) enum SelectWhere {
 pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<SelectWhere> {
     p.expect("where")?;
     let saved = p.save_pos();
-    let column_name = p.word()?;
+    // ADR 0240 — look one token ahead: `NOT`, `(`, or a word
+    // followed by a JSON-arrow / hash-arrow dispatches to the
+    // tree parser. Anything else goes to the PK-equality path.
+    if p.next_is_word("not") || matches!(p.peek(), Some(Token::Symbol('('))) {
+        let tree = parse_where_expr(p, table)?;
+        return Ok(SelectWhere::JsonPathPredicates(tree));
+    }
+    let _column_name = p.word()?;
     let is_json_path = matches!(p.peek(),
         Some(Token::Arrow) | Some(Token::ArrowText)
         | Some(Token::Hash) | Some(Token::HashText));
     if is_json_path {
-        // ADR 0205 — DNF: groups are AND-groups, joined by OR.
-        let mut groups: Vec<Vec<JsonPredicate>> = Vec::new();
-        let mut current: Vec<JsonPredicate> = Vec::new();
-        let mut col = column_name;
-        loop {
-            let projection = parse_projection_tail(p, col)?;
-            locate(table, projection.source_column())?;
-            // ADR 0206 — IN (…) / NOT IN (…) before the scalar
-            // comparison dispatch. NOT must be immediately
-            // followed by IN; a bare NOT is not accepted here.
-            let as_text = match &projection {
-                Projection::Column(_) => unreachable!("json path has non-empty chain"),
-                Projection::JsonPath { as_text, .. } => *as_text,
-            };
-            let matcher = if p.consume_word("in") {
-                JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
-            } else if p.consume_word("like") {
-                let pattern = parse_like_pattern(p)?;
-                let escape = parse_optional_escape(p)?;
-                JsonMatcher::Like { pattern, escape }
-            } else if p.consume_word("ilike") {
-                let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
-                let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
-                JsonMatcher::Ilike { pattern_lower: pattern, escape }
-            } else if p.consume_word("between") {
-                parse_between_tail(p, as_text, /*negated=*/false)?
-            } else if p.consume_word("is") {
-                // ADR 0207 — IS NULL / IS NOT NULL. `NOT` here
-                // belongs to the IS test; it does not flip to IN.
-                let negated = p.consume_word("not");
-                if !p.consume_word("null") {
-                    return Err(SqlError::Unsupported(
-                        "IS [NOT] NULL is the only IS-form supported for JSON paths".into()));
-                }
-                if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
-            } else if p.consume_word("not") {
-                // ADR 0206 / 0208 / 0209 — NOT IN / NOT BETWEEN / NOT LIKE.
-                if p.consume_word("in") {
-                    JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
-                } else if p.consume_word("between") {
-                    parse_between_tail(p, as_text, /*negated=*/true)?
-                } else if p.consume_word("like") {
-                    let pattern = parse_like_pattern(p)?;
-                    let escape = parse_optional_escape(p)?;
-                    JsonMatcher::NotLike { pattern, escape }
-                } else if p.consume_word("ilike") {
-                    let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
-                    let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
-                    JsonMatcher::NotIlike { pattern_lower: pattern, escape }
-                } else {
-                    return Err(SqlError::Unsupported(
-                        "NOT must be followed by IN, BETWEEN, LIKE, or ILIKE in a JSON-path predicate".into()));
-                }
-            } else {
-                let op = p.word_or_symbol_pair_for_check()?;
-                let literal = p.literal()?;
-                let value = coerce_where_literal(&literal, as_text)?;
-                JsonMatcher::Compare { op, literal: value }
-            };
-            current.push(JsonPredicate { projection, matcher });
-            // Either continue the current AND-group, start a
-            // new OR-group, or stop.
-            let next = if p.consume_word("and") { 'a' }
-                else if p.consume_word("or") { 'o' }
-                else { 'e' };
-            if next == 'e' { break; }
-            col = p.word()?;
-            let next_json = matches!(p.peek(),
-                Some(Token::Arrow) | Some(Token::ArrowText)
-                | Some(Token::Hash) | Some(Token::HashText));
-            if !next_json {
-                return Err(SqlError::Unsupported(
-                    "AND/OR after a JSON-path predicate must be another JSON-path predicate".into()));
-            }
-            if next == 'o' {
-                groups.push(std::mem::take(&mut current));
-            }
-        }
-        groups.push(current);
-        Ok(SelectWhere::JsonPathPredicates(groups))
+        p.restore_pos(saved);
+        let tree = parse_where_expr(p, table)?;
+        Ok(SelectWhere::JsonPathPredicates(tree))
     } else {
         // Rewind and dispatch to the existing PK grammar.
         p.restore_pos(saved);
@@ -3353,6 +3294,106 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
             .collect();
         Ok(SelectWhere::KeyPredicate(ordered))
     }
+}
+
+/// ADR 0240 — parse a JSON-path WHERE as a boolean tree.
+/// Grammar:
+///   expr    := or_expr
+///   or_expr := and_expr ( "OR" and_expr )*
+///   and_expr:= unary   ( "AND" unary   )*
+///   unary   := "NOT" unary | primary
+///   primary := "(" expr ")" | predicate
+fn parse_where_expr(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
+    parse_or_expr(p, table)
+}
+
+fn parse_or_expr(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
+    let mut lhs = parse_and_expr(p, table)?;
+    while p.consume_word("or") {
+        let rhs = parse_and_expr(p, table)?;
+        lhs = WhereTree::Or(Box::new(lhs), Box::new(rhs));
+    }
+    Ok(lhs)
+}
+
+fn parse_and_expr(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
+    let mut lhs = parse_where_unary(p, table)?;
+    while p.consume_word("and") {
+        let rhs = parse_where_unary(p, table)?;
+        lhs = WhereTree::And(Box::new(lhs), Box::new(rhs));
+    }
+    Ok(lhs)
+}
+
+fn parse_where_unary(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
+    if p.consume_word("not") {
+        let inner = parse_where_unary(p, table)?;
+        return Ok(WhereTree::Not(Box::new(inner)));
+    }
+    parse_where_primary(p, table)
+}
+
+fn parse_where_primary(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
+    if p.consume_symbol('(') {
+        let inner = parse_where_expr(p, table)?;
+        p.symbol(')')?;
+        return Ok(inner);
+    }
+    Ok(WhereTree::Predicate(parse_json_predicate(p, table)?))
+}
+
+fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicate> {
+    let column_name = p.word()?;
+    let projection = parse_projection_tail(p, column_name)?;
+    locate(table, projection.source_column())?;
+    let as_text = match &projection {
+        Projection::Column(_) => return Err(SqlError::Unsupported(
+            "WHERE predicate requires a JSON path chain on the column".into())),
+        Projection::JsonPath { as_text, .. } => *as_text,
+    };
+    let matcher = if p.consume_word("in") {
+        JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
+    } else if p.consume_word("like") {
+        let pattern = parse_like_pattern(p)?;
+        let escape = parse_optional_escape(p)?;
+        JsonMatcher::Like { pattern, escape }
+    } else if p.consume_word("ilike") {
+        let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
+        let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
+        JsonMatcher::Ilike { pattern_lower: pattern, escape }
+    } else if p.consume_word("between") {
+        parse_between_tail(p, as_text, /*negated=*/false)?
+    } else if p.consume_word("is") {
+        let negated = p.consume_word("not");
+        if !p.consume_word("null") {
+            return Err(SqlError::Unsupported(
+                "IS [NOT] NULL is the only IS-form supported for JSON paths".into()));
+        }
+        if negated { JsonMatcher::IsNotNull } else { JsonMatcher::IsNull }
+    } else if p.consume_word("not") {
+        if p.consume_word("in") {
+            JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
+        } else if p.consume_word("between") {
+            parse_between_tail(p, as_text, /*negated=*/true)?
+        } else if p.consume_word("like") {
+            let pattern = parse_like_pattern(p)?;
+            let escape = parse_optional_escape(p)?;
+            JsonMatcher::NotLike { pattern, escape }
+        } else if p.consume_word("ilike") {
+            let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
+            let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
+            JsonMatcher::NotIlike { pattern_lower: pattern, escape }
+        } else {
+            return Err(SqlError::Unsupported(
+                "NOT must be followed by IN, BETWEEN, LIKE, or ILIKE after a JSON-path predicate (or placed as a boolean prefix)".into()));
+        }
+    } else {
+        let op = p.word_or_symbol_pair_for_check()?;
+        let literal = p.literal()?;
+        let value = coerce_where_literal(&literal, as_text)?;
+        JsonMatcher::Compare { op, literal: value }
+    };
+    Ok(JsonPredicate { projection, matcher })
 }
 
 /// ADR 0209 — parse a LIKE / NOT LIKE pattern. Must be a quoted
@@ -3530,116 +3571,109 @@ fn coerce_where_literal(lit: &Literal, as_text: bool) -> SqlResult<Value> {
 /// projected value satisfies `op` against `literal`. NULL on
 /// either side never matches (SQL three-valued logic — a
 /// comparison with NULL is UNKNOWN, treated as not-true).
+/// ADR 0240 — evaluate a single `JsonPredicate` against one
+/// row, returning `Some(bool)` for the row's truth value.  NULL
+/// three-valued logic is handled as follows: IS [NOT] NULL
+/// returns `Some(...)` always; every other matcher returns
+/// `Some(false)` on NULL-extracted (preserving ADR 0206's
+/// semantics for AND / OR).  Callers wrap `Some(false)` in
+/// `WhereTree::Not` to produce `Some(true)` under NOT.
+fn eval_predicate(
+    pred: &JsonPredicate, row: &[Value], table: &Table,
+) -> SqlResult<bool> {
+    let position = locate(table, pred.projection.source_column())?;
+    let extracted = apply_projection(&pred.projection, row[position].clone())?;
+    match &pred.matcher {
+        JsonMatcher::IsNull => return Ok(matches!(extracted, Value::Null)),
+        JsonMatcher::IsNotNull => return Ok(!matches!(extracted, Value::Null)),
+        _ => {}
+    }
+    if matches!(extracted, Value::Null) { return Ok(false); }
+    Ok(match &pred.matcher {
+        JsonMatcher::Compare { op, literal } => {
+            if matches!(literal, Value::Null) { false }
+            else {
+                let ord = compare_values_for_check(&extracted, literal);
+                match op {
+                    crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                    crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                    crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                    crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                    crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                    crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                }
+            }
+        }
+        JsonMatcher::In { literals } => literals.iter().any(|lit|
+            !matches!(lit, Value::Null)
+                && compare_values_for_check(&extracted, lit)
+                    == std::cmp::Ordering::Equal),
+        JsonMatcher::NotIn { literals } => literals.iter().all(|lit|
+            !matches!(lit, Value::Null)
+                && compare_values_for_check(&extracted, lit)
+                    != std::cmp::Ordering::Equal),
+        JsonMatcher::Between { low, high } =>
+            !matches!(low, Value::Null) && !matches!(high, Value::Null)
+                && compare_values_for_check(&extracted, low) != std::cmp::Ordering::Less
+                && compare_values_for_check(&extracted, high) != std::cmp::Ordering::Greater,
+        JsonMatcher::NotBetween { low, high } =>
+            !matches!(low, Value::Null) && !matches!(high, Value::Null)
+                && (compare_values_for_check(&extracted, low) == std::cmp::Ordering::Less
+                    || compare_values_for_check(&extracted, high) == std::cmp::Ordering::Greater),
+        JsonMatcher::Like { pattern, escape } => match like_source(&extracted) {
+            Some(s) => like_matches(pattern, &s, *escape),
+            None => false,
+        },
+        JsonMatcher::NotLike { pattern, escape } => match like_source(&extracted) {
+            Some(s) => !like_matches(pattern, &s, *escape),
+            None => false,
+        },
+        JsonMatcher::Ilike { pattern_lower, escape } => match like_source(&extracted) {
+            Some(s) => like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
+            None => false,
+        },
+        JsonMatcher::NotIlike { pattern_lower, escape } => match like_source(&extracted) {
+            Some(s) => !like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
+            None => false,
+        },
+        JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
+            unreachable!("handled above the NULL guard"),
+    })
+}
+
+/// ADR 0240 — walk a `WhereTree` and return the row's truth
+/// value. Short-circuiting applies at AND / OR nodes.
+fn eval_where_tree(
+    tree: &WhereTree, row: &[Value], table: &Table,
+) -> SqlResult<bool> {
+    match tree {
+        WhereTree::Predicate(pred) => eval_predicate(pred, row, table),
+        WhereTree::And(a, b) => {
+            if !eval_where_tree(a, row, table)? { return Ok(false); }
+            eval_where_tree(b, row, table)
+        }
+        WhereTree::Or(a, b) => {
+            if eval_where_tree(a, row, table)? { return Ok(true); }
+            eval_where_tree(b, row, table)
+        }
+        WhereTree::Not(inner) => Ok(!eval_where_tree(inner, row, table)?),
+    }
+}
+
 pub(crate) fn apply_where_filter(
     rows: Vec<Vec<Value>>,
     table: &Table,
-    groups: &[Vec<JsonPredicate>],
+    tree: &WhereTree,
 ) -> SqlResult<Vec<Vec<Value>>> {
-    // ADR 0205 — DNF evaluation: outer OR, inner AND. Resolve
-    // column positions once per group.
-    let positions: Vec<Vec<usize>> = groups.iter().map(|group|
-        group.iter()
-            .map(|pred| locate(table, pred.projection.source_column()))
-            .collect::<SqlResult<Vec<_>>>()
-    ).collect::<SqlResult<Vec<_>>>()?;
-    let eval_group =
-        |row: &[Value], group: &[JsonPredicate], positions: &[usize]| -> SqlResult<bool> {
-            for (pred, position) in group.iter().zip(positions) {
-                let extracted = apply_projection(&pred.projection, row[*position].clone())?;
-                // ADR 0207 — IS [NOT] NULL evaluates NULL
-                // directly; every other matcher short-circuits
-                // on NULL-extracted under three-valued logic.
-                match &pred.matcher {
-                    JsonMatcher::IsNull => {
-                        if !matches!(extracted, Value::Null) { return Ok(false); }
-                        continue;
-                    }
-                    JsonMatcher::IsNotNull => {
-                        if matches!(extracted, Value::Null) { return Ok(false); }
-                        continue;
-                    }
-                    _ => {}
-                }
-                if matches!(extracted, Value::Null) {
-                    return Ok(false);
-                }
-                let satisfied = match &pred.matcher {
-                    JsonMatcher::Compare { op, literal } => {
-                        if matches!(literal, Value::Null) { return Ok(false); }
-                        let ord = compare_values_for_check(&extracted, literal);
-                        match op {
-                            crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
-                            crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
-                            crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
-                            crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
-                            crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
-                            crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
-                        }
-                    }
-                    // ADR 0206 — NULL literals in the IN list
-                    // never match (SQL three-valued logic).
-                    JsonMatcher::In { literals } => literals.iter().any(|lit|
-                        !matches!(lit, Value::Null)
-                            && compare_values_for_check(&extracted, lit)
-                                == std::cmp::Ordering::Equal),
-                    JsonMatcher::NotIn { literals } => literals.iter().all(|lit|
-                        !matches!(lit, Value::Null)
-                            && compare_values_for_check(&extracted, lit)
-                                != std::cmp::Ordering::Equal),
-                    JsonMatcher::Between { low, high } => {
-                        if matches!(low, Value::Null) || matches!(high, Value::Null) {
-                            false
-                        } else {
-                            compare_values_for_check(&extracted, low)
-                                != std::cmp::Ordering::Less
-                            && compare_values_for_check(&extracted, high)
-                                != std::cmp::Ordering::Greater
-                        }
-                    }
-                    JsonMatcher::NotBetween { low, high } => {
-                        if matches!(low, Value::Null) || matches!(high, Value::Null) {
-                            false
-                        } else {
-                            compare_values_for_check(&extracted, low)
-                                == std::cmp::Ordering::Less
-                            || compare_values_for_check(&extracted, high)
-                                == std::cmp::Ordering::Greater
-                        }
-                    }
-                    JsonMatcher::Like { pattern, escape } => match like_source(&extracted) {
-                        Some(s) => like_matches(pattern, &s, *escape),
-                        None => false,
-                    },
-                    JsonMatcher::NotLike { pattern, escape } => match like_source(&extracted) {
-                        Some(s) => !like_matches(pattern, &s, *escape),
-                        None => false,
-                    },
-                    JsonMatcher::Ilike { pattern_lower, escape } => match like_source(&extracted) {
-                        Some(s) => like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
-                        None => false,
-                    },
-                    JsonMatcher::NotIlike { pattern_lower, escape } => match like_source(&extracted) {
-                        Some(s) => !like_matches(pattern_lower, &s.to_ascii_lowercase(), *escape),
-                        None => false,
-                    },
-                    JsonMatcher::IsNull | JsonMatcher::IsNotNull =>
-                        unreachable!("handled above the NULL guard"),
-                };
-                if !satisfied { return Ok(false); }
-            }
-            Ok(true)
-        };
     let mut kept = Vec::with_capacity(rows.len());
-    'row: for row in rows {
-        for (group, group_positions) in groups.iter().zip(&positions) {
-            if eval_group(&row, group, group_positions)? {
-                kept.push(row);
-                continue 'row;
-            }
+    for row in rows {
+        if eval_where_tree(tree, &row, table)? {
+            kept.push(row);
         }
     }
     Ok(kept)
 }
+
 
 /// ADR 0186 + ADR 0189 — extract a chained JSON path from a
 /// cell. Each segment walks one key into the parsed JSON;
