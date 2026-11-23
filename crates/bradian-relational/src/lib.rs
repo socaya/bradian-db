@@ -110,7 +110,7 @@ pub mod query_budget;
 pub mod rate_limiter;
 pub mod bace;
 
-pub use catalog::{Catalog, CatalogError, Dependency};
+pub use catalog::{Catalog, CatalogError, Dependency, SchemaSnapshot, SchemaStale};
 pub use model::{
     Column, DataType, Database, DatabaseId, ForeignKey, ForeignKeySpec, PrimaryKey,
     Schema, SchemaId, Table, TableId, TableSpec, UniqueKey,

@@ -27,6 +27,68 @@ pub struct Catalog {
     databases: BTreeMap<DatabaseId, Database>,
     schemas: BTreeMap<SchemaId, Schema>,
     tables: BTreeMap<TableId, Table>,
+    /// ADR 0242 — monotonic per-table schema version. Bumped by
+    /// every schema-mutating catalog method. Readers capture
+    /// versions in a SchemaSnapshot at BEGIN and reconcile at
+    /// completion; a bumped version signals the schema shifted
+    /// underneath them. Default empty for backcompat with
+    /// earlier serialized catalogs.
+    #[serde(default)]
+    schema_versions: BTreeMap<TableId, u64>,
+}
+
+/// ADR 0242 — snapshot of schema versions at a point in time.
+/// Returned by `Catalog::capture_schema_snapshot`. Readers
+/// call `reconcile` later to learn whether any observed
+/// schema has advanced.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SchemaSnapshot {
+    versions: BTreeMap<TableId, u64>,
+}
+
+/// ADR 0242 — a captured table's schema version no longer
+/// matches the live catalog. The caller must re-resolve the
+/// schema and retry (reads must restart against the current
+/// schema; writes must re-plan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaStale {
+    pub table: TableId,
+    pub captured: u64,
+    pub current: u64,
+}
+
+impl std::fmt::Display for SchemaStale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "schema for table {} advanced from {} to {}",
+            self.table.0, self.captured, self.current)
+    }
+}
+impl std::error::Error for SchemaStale {}
+
+impl SchemaSnapshot {
+    /// All observed (table, captured_version) pairs.
+    pub fn entries(&self) -> impl Iterator<Item = (TableId, u64)> + '_ {
+        self.versions.iter().map(|(t, v)| (*t, *v))
+    }
+
+    /// Return the captured version for `id`, or None if the
+    /// snapshot never observed that table.
+    pub fn version_of(&self, id: TableId) -> Option<u64> {
+        self.versions.get(&id).copied()
+    }
+
+    /// Return Err at the first observed table whose version
+    /// has advanced. A dropped table (no current version)
+    /// reports current = 0.
+    pub fn reconcile(&self, catalog: &Catalog) -> Result<(), SchemaStale> {
+        for (&table, &captured) in &self.versions {
+            let current = catalog.schema_version(table).unwrap_or(0);
+            if current != captured {
+                return Err(SchemaStale { table, captured, current });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn identifier(name: &str) -> Result<String, CatalogError> {
@@ -168,6 +230,47 @@ impl Catalog {
         Ok(id)
     }
 
+    /// ADR 0242 — bump `id`'s schema_version. Called from every
+    /// schema-mutating path. Saturating addition so a catalog
+    /// that lives through 2^64 mutations stops bumping rather
+    /// than wrapping silently.
+    fn bump_schema_version(&mut self, id: TableId) {
+        let v = self.schema_versions.entry(id).or_insert(0);
+        *v = v.saturating_add(1);
+    }
+
+    /// ADR 0242 — current schema version for a table. Returns
+    /// None if the table has never been created in this catalog
+    /// (also used to detect drops in SchemaSnapshot::reconcile).
+    pub fn schema_version(&self, id: TableId) -> Option<u64> {
+        if !self.tables.contains_key(&id) { return None; }
+        Some(self.schema_versions.get(&id).copied().unwrap_or(0))
+    }
+
+    /// ADR 0242 — capture the current schema versions for the
+    /// requested tables. Unknown table ids are skipped (reads
+    /// targeting a dropped table see SchemaStale on reconcile).
+    pub fn capture_schema_snapshot<I: IntoIterator<Item = TableId>>(&self, tables: I) -> SchemaSnapshot {
+        let mut versions = BTreeMap::new();
+        for id in tables {
+            if let Some(v) = self.schema_version(id) {
+                versions.insert(id, v);
+            }
+        }
+        SchemaSnapshot { versions }
+    }
+
+    /// ADR 0242 — snapshot every known table's version. Useful
+    /// for broad-scope readers; narrow-scope readers should use
+    /// `capture_schema_snapshot` with just the tables they touch.
+    pub fn capture_full_schema_snapshot(&self) -> SchemaSnapshot {
+        let mut versions = BTreeMap::new();
+        for id in self.tables.keys() {
+            versions.insert(*id, self.schema_versions.get(id).copied().unwrap_or(0));
+        }
+        SchemaSnapshot { versions }
+    }
+
     pub fn databases(&self) -> impl Iterator<Item = &Database> {
         self.databases.values()
     }
@@ -290,6 +393,7 @@ impl Catalog {
             policies: BTreeMap::new(),
             column_checks,
         });
+        self.schema_versions.insert(id, 1);
         Ok(id)
     }
 
@@ -349,6 +453,7 @@ impl Catalog {
                 on_delete: spec.on_delete,
                 on_update: spec.on_update,
             });
+        self.bump_schema_version(source_id);
         Ok(())
     }
 
@@ -360,6 +465,7 @@ impl Catalog {
             .map_err(|err| CatalogError::InvalidDefinition(err.to_string()))?;
         validate_revision_columns(proposed)?;
         self.tables.insert(proposed.id, proposed.clone());
+        self.bump_schema_version(proposed.id);
         Ok(())
     }
 
@@ -374,6 +480,7 @@ impl Catalog {
             return Err(CatalogError::DependentObjects(format!("table {}", id.0)));
         }
         self.tables.remove(&id);
+        self.schema_versions.remove(&id);
         Ok(())
     }
 
@@ -401,6 +508,7 @@ impl Catalog {
             return Err(CatalogError::Duplicate(format!("table {new_name}")));
         }
         self.tables.get_mut(&id).expect("validated table").name = new_name;
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -432,14 +540,21 @@ impl Catalog {
         if let Some(v) = t.column_defaults.remove(&old) { t.column_defaults.insert(new.clone(), v); }
         if let Some(v) = t.column_collations.remove(&old) { t.column_collations.insert(new.clone(), v); }
         // Fix incoming FKs that reference this table's renamed column.
+        let mut incoming_bumps: Vec<TableId> = Vec::new();
         for other in self.tables.values_mut() {
             if other.id == id { continue; }
+            let mut changed = false;
             for fk in &mut other.foreign_keys {
                 if fk.referenced_table == id {
-                    for c in &mut fk.referenced_columns { if *c == old { c.clone_from(&new); } }
+                    for c in &mut fk.referenced_columns {
+                        if *c == old { c.clone_from(&new); changed = true; }
+                    }
                 }
             }
+            if changed { incoming_bumps.push(other.id); }
         }
+        self.bump_schema_version(id);
+        for other_id in incoming_bumps { self.bump_schema_version(other_id); }
         Ok(())
     }
 
@@ -478,6 +593,7 @@ impl Catalog {
         t.columns.retain(|c| c.name != name);
         t.column_defaults.remove(&name);
         t.column_collations.remove(&name);
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -498,6 +614,7 @@ impl Catalog {
         }
         self.tables.get_mut(&id).expect("validated table")
             .column_defaults.insert(name, value);
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -623,6 +740,7 @@ impl Catalog {
         for c in &mut t.columns {
             if c.name == column { c.data_type = new_type.clone(); }
         }
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -646,6 +764,7 @@ impl Catalog {
         for c in &mut t.columns {
             if c.name == name { c.nullable = false; }
         }
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -659,6 +778,7 @@ impl Catalog {
         }
         self.tables.get_mut(&id).expect("validated table")
             .column_defaults.remove(&name);
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -675,6 +795,7 @@ impl Catalog {
         let table = self.tables.get_mut(&id)
             .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
         table.policies.insert(name, policy);
+        self.bump_schema_version(id);
         Ok(())
     }
 
@@ -683,7 +804,8 @@ impl Catalog {
         let name = identifier(name)?;
         let table = self.tables.get_mut(&id)
             .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
-        table.policies.remove(&name);
+        let removed = table.policies.remove(&name).is_some();
+        if removed { self.bump_schema_version(id); }
         Ok(())
     }
 

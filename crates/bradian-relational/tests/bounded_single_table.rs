@@ -86,7 +86,10 @@ fn autocommit_select_enforces_scan_budgets_and_binding_precedes_scanning() {
     assert!(matches!(db.execute_with_control("SELECT id FROM test.public.items",&limits),Err(SqlError::Table(TableError::Resource(ResourceError::Limit { resource:"rows",.. })))));
     assert!(matches!(db.execute_with_control("SELECT id FROM test.public.items WHERE id=1",&limits).unwrap(),SqlResultSet::Rows { rows,.. } if rows==vec![vec![Value::Int64(1)]]));
     assert!(matches!(db.execute_with_control("SELECT missing FROM test.public.items",&control(0,0,0)),Err(SqlError::Resolution(_))));
-    assert!(matches!(db.execute_with_control("SELECT id FROM test.public.items ORDER BY id",&control(0,0,0)),Err(SqlError::Unsupported(_))));
+    // ORDER BY on an unknown column must fail at binding
+    // before any scan is attempted — demonstrates
+    // binding-precedes-scanning even with budget=0.
+    assert!(matches!(db.execute_with_control("SELECT id FROM test.public.items ORDER BY missing",&control(0,0,0)),Err(SqlError::Resolution(_))));
 }
 
 #[test]
