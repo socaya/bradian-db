@@ -340,6 +340,8 @@ impl<'a> DomainSqlSession<'a> {
                             tuples.push(p.list(|parser| parser.literal())?);
                             if !p.consume_symbol(',') { break; }
                         }
+                        // ADR 0223 — optional ON CONFLICT clause.
+                        let on_conflict = crate::sql::parse_on_conflict(&mut p, &table)?;
                         // ADR 0221 — optional RETURNING tail.
                         let returning = crate::sql::parse_returning(&mut p, &table)?;
                         p.end()?;
@@ -374,7 +376,39 @@ impl<'a> DomainSqlSession<'a> {
                         } else { Vec::new() };
                         let mut captured: Vec<Vec<_>> = Vec::new();
                         let mut inserted_bytes: u64 = 0;
+                        let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                            .map(|c| locate(&table, c))
+                            .collect::<SqlResult<Vec<_>>>()?;
                         for row in rows {
+                            // ADR 0223 — ON CONFLICT handling.
+                            if let Some(action) = &on_conflict {
+                                let pk: Vec<_> = pk_positions.iter()
+                                    .map(|p| row[*p].clone()).collect();
+                                if let Some(mut existing) = tx.get(table.id, &pk)? {
+                                    match action {
+                                        crate::sql::OnConflict::DoNothing => continue,
+                                        crate::sql::OnConflict::DoUpdate { assignments } => {
+                                            for (col, lit) in assignments {
+                                                let idx = locate(&table, col)?;
+                                                existing[idx] = coerce(lit, &table.columns[idx])?;
+                                            }
+                                            crate::sql::check_row(&table, &existing)?;
+                                            crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &existing, tx)?;
+                                            if !table.unique_keys.is_empty() {
+                                                let others = tx.scan(table.id)?.into_iter()
+                                                    .filter(|r| pk_positions.iter().zip(pk.iter())
+                                                        .any(|(pos, k)| &r[*pos] != k));
+                                                crate::unique_check::UniqueConstraintChecker::new(&table)
+                                                    .check(&existing, others)?;
+                                            }
+                                            inserted_bytes += crate::query_budget::row_bytes(&existing);
+                                            tx.replace(table.id, &existing)?;
+                                            captured.push(existing);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                             crate::sql::check_row(&table, &row)?;
                             crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
                             if !table.unique_keys.is_empty() {

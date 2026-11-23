@@ -1257,6 +1257,49 @@ impl AggSpec {
     }
 }
 
+/// ADR 0223 — ON CONFLICT (pk_cols) DO NOTHING | DO UPDATE SET …
+/// The conflict target is scoped to the primary-key column set for
+/// the MVP; UNIQUE-key targets are a future extension.
+#[derive(Clone, Debug)]
+pub(crate) enum OnConflict {
+    DoNothing,
+    DoUpdate { assignments: Vec<(String, Literal)> },
+}
+
+pub(crate) fn parse_on_conflict(
+    p: &mut Parser, table: &Table,
+) -> SqlResult<Option<OnConflict>> {
+    if !p.consume_word("on") { return Ok(None); }
+    p.expect("conflict")?;
+    let cols = p.list(|parser| parser.word())?;
+    // Conflict target must be the PK column set (order-free).
+    let mut target_sorted = cols.clone();
+    target_sorted.sort();
+    let mut pk_sorted = table.primary_key.columns.clone();
+    pk_sorted.sort();
+    if target_sorted != pk_sorted {
+        return Err(SqlError::Unsupported(
+            "ON CONFLICT target must be the primary-key column set".into()));
+    }
+    p.expect("do")?;
+    if p.consume_word("nothing") { return Ok(Some(OnConflict::DoNothing)); }
+    p.expect("update")?;
+    p.expect("set")?;
+    let mut assignments: Vec<(String, Literal)> = Vec::new();
+    loop {
+        let col = p.word()?;
+        if table.primary_key.columns.contains(&col) {
+            return Err(SqlError::Unsupported(
+                "ON CONFLICT DO UPDATE cannot modify primary-key columns".into()));
+        }
+        locate(table, &col)?;
+        p.symbol('=')?;
+        assignments.push((col, p.literal()?));
+        if !p.consume_symbol(',') { break; }
+    }
+    Ok(Some(OnConflict::DoUpdate { assignments }))
+}
+
 /// ADR 0221 — optional `RETURNING col[, col] | *` tail on
 /// INSERT / UPDATE / DELETE. Returns `None` when absent; `Some(vec)`
 /// with a list of `Projection`s otherwise. A bare `*` expands to
@@ -1301,6 +1344,67 @@ pub(crate) fn finish_dml_result_with_table(
             Ok(SqlResultSet::Rows { columns, rows })
         }
     }
+}
+
+/// ADR 0225 — split a top-level `SELECT … UNION [ALL] SELECT …`
+/// chain into its parts. Returns `None` when the input has no
+/// top-level UNION; `Some(parts)` otherwise. Each part is a
+/// tuple of `(preceded_by_union_all, sql_fragment)`. The first
+/// part's boolean is always `false` (no preceding separator).
+pub(crate) fn split_top_level_unions(sql: &str) -> Option<Vec<(bool, String)>> {
+    let bytes = sql.as_bytes();
+    let mut separators: Vec<(bool, usize, usize)> = Vec::new();
+    let mut i = 0;
+    let mut in_quote = false;
+    let mut paren_depth = 0u32;
+    let word_boundary = |b: u8| !b.is_ascii_alphanumeric() && b != b'_';
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quote {
+            if b == b'\'' { in_quote = false; }
+            i += 1; continue;
+        }
+        match b {
+            b'\'' => { in_quote = true; i += 1; continue; }
+            b'(' => { paren_depth += 1; i += 1; continue; }
+            b')' => { paren_depth = paren_depth.saturating_sub(1); i += 1; continue; }
+            _ => {}
+        }
+        if paren_depth == 0
+            && (i == 0 || word_boundary(bytes[i - 1]))
+            && i + 5 <= bytes.len()
+            && bytes[i..i + 5].eq_ignore_ascii_case(b"UNION")
+            && (i + 5 == bytes.len() || word_boundary(bytes[i + 5]))
+        {
+            let mut after = i + 5;
+            while after < bytes.len() && (bytes[after] == b' ' || bytes[after] == b'\t' || bytes[after] == b'\n') {
+                after += 1;
+            }
+            let mut all = false;
+            if after + 3 <= bytes.len()
+                && bytes[after..after + 3].eq_ignore_ascii_case(b"ALL")
+                && (after + 3 == bytes.len() || word_boundary(bytes[after + 3]))
+            {
+                all = true;
+                after += 3;
+            }
+            separators.push((all, i, after));
+            i = after;
+            continue;
+        }
+        i += 1;
+    }
+    if separators.is_empty() { return None; }
+    let mut cursor = 0usize;
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let mut pending_all = false;
+    for (all, start, end) in separators {
+        out.push((pending_all, sql[cursor..start].trim().to_string()));
+        pending_all = all;
+        cursor = end;
+    }
+    out.push((pending_all, sql[cursor..].trim().to_string()));
+    Some(out)
 }
 
 /// ADR 0219 — dedup a slice of row tuples using the same
@@ -3221,6 +3325,55 @@ impl SqlEngine {
         policy: Option<&crate::access_policy::TableAccessPolicy>,
         authz: Option<&bradian_core::AuthorizationContext>,
     ) -> SqlResult<SqlResultSet> {
+        // ADR 0225 — UNION / UNION ALL at the top level. Each
+        // arm runs through `execute_impl_single` with its own
+        // short-lived mutex guard; the results are combined and
+        // returned as a single `Rows` shape.
+        if let Some(parts) = split_top_level_unions(sql) {
+            if parts.len() >= 2 {
+                let mut parts_iter = parts.into_iter();
+                let (_, first_sql) = parts_iter.next().expect("at least one part");
+                let first = self.execute_impl_single(
+                    &first_sql, control, budget.as_deref_mut(), policy, authz)?;
+                let (mut columns, mut rows) = match first {
+                    SqlResultSet::Rows { columns, rows } => (columns, rows),
+                    _ => return Err(SqlError::Unsupported(
+                        "UNION requires every arm to be a SELECT".into())),
+                };
+                let mut any_dedup = false;
+                for (all, piece) in parts_iter {
+                    let next = self.execute_impl_single(
+                        &piece, control, budget.as_deref_mut(), policy, authz)?;
+                    let (next_cols, next_rows) = match next {
+                        SqlResultSet::Rows { columns, rows } => (columns, rows),
+                        _ => return Err(SqlError::Unsupported(
+                            "UNION requires every arm to be a SELECT".into())),
+                    };
+                    if next_cols.len() != columns.len() {
+                        return Err(SqlError::Unsupported(
+                            "UNION arms must have the same column count".into()));
+                    }
+                    rows.extend(next_rows);
+                    if !all { any_dedup = true; }
+                    let _ = next_cols;
+                }
+                if any_dedup {
+                    rows = dedup_rows(rows);
+                    sort_distinct_output(&mut rows);
+                }
+                let _ = &mut columns;
+                return Ok(SqlResultSet::Rows { columns, rows });
+            }
+        }
+        self.execute_impl_single(sql, control, budget, policy, authz)
+    }
+
+    fn execute_impl_single(
+        &self, sql: &str, control: &ScanControl,
+        mut budget: Option<&mut crate::query_budget::BudgetTracker>,
+        policy: Option<&crate::access_policy::TableAccessPolicy>,
+        authz: Option<&bradian_core::AuthorizationContext>,
+    ) -> SqlResult<SqlResultSet> {
         let _guard = self.operation.lock();
         // ADR 0170 — workspace-wide admission cap. Sampled
         // before every statement; unlimited default never
@@ -3429,6 +3582,88 @@ impl SqlEngine {
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
                 let names = p.list(|parser| parser.word())?;
+                // ADR 0224 — INSERT INTO t (cols) SELECT a, b
+                // FROM src [WHERE pk = lit AND …]. The source
+                // SELECT is a narrow MVP subset: bare columns,
+                // one source table, optional PK WHERE.
+                if p.consume_word("select") {
+                    let mut src_cols: Vec<String> = vec![p.word()?];
+                    while p.consume_symbol(',') { src_cols.push(p.word()?); }
+                    p.expect("from")?;
+                    let src_name = p.name()?;
+                    let src_table = self.resolve(&src_name)?;
+                    let where_clause = if p.next_is_word("where") {
+                        Some(parse_select_where(&mut p, &src_table)?)
+                    } else { None };
+                    let returning = parse_returning(&mut p, &table)?;
+                    p.end()?;
+                    if src_cols.len() != names.len() || names.len() != table.columns.len() {
+                        return Err(SqlError::Unsupported(
+                            "INSERT SELECT must project every target column exactly once".into()));
+                    }
+                    let src_positions: Vec<usize> = src_cols.iter()
+                        .map(|c| locate(&src_table, c))
+                        .collect::<SqlResult<Vec<_>>>()?;
+                    let src_store = self.table_store(&src_table)?;
+                    let src_rows: Vec<Vec<Value>> = match &where_clause {
+                        Some(SelectWhere::KeyPredicate(key)) =>
+                            src_store.get(key)?.into_iter().collect(),
+                        Some(SelectWhere::JsonPathPredicates(preds)) =>
+                            apply_where_filter(src_store.scan()?, &src_table, preds)?,
+                        None => src_store.scan()?,
+                    };
+                    let target_store = self.table_store(&table)?;
+                    let mut unique_pool: Vec<Vec<Value>> = if !table.unique_keys.is_empty() {
+                        target_store.scan()?
+                    } else { Vec::new() };
+                    let mut captured: Vec<Vec<Value>> = Vec::new();
+                    let mut inserted_bytes: u64 = 0;
+                    for src_row in src_rows {
+                        // Project source → ordered target values.
+                        let mut fields = BTreeMap::new();
+                        for (name_, pos) in names.iter().zip(&src_positions) {
+                            if fields.insert(name_.clone(), src_row[*pos].clone()).is_some() {
+                                return Err(SqlError::Syntax(
+                                    format!("repeated INSERT column {name_}")));
+                            }
+                        }
+                        let values: Vec<Value> = table.columns.iter().map(|column| {
+                            let v = fields.remove(&column.name)
+                                .ok_or_else(|| SqlError::Resolution(format!(
+                                    "missing column {}", column.name)))?;
+                            // Type-match: cross-type numerics
+                            // (Int32 ↔ Int64) are permitted since
+                            // the source may differ in width.
+                            match (&column.data_type, &v) {
+                                (DataType::Int32, Value::Int64(n)) =>
+                                    Ok(Value::Int32((*n).try_into()
+                                        .map_err(|_| SqlError::Type(
+                                            "INSERT SELECT: value does not fit Int32".into()))?)),
+                                (DataType::Int64, Value::Int32(n)) =>
+                                    Ok(Value::Int64(i64::from(*n))),
+                                _ => Ok(v),
+                            }
+                        }).collect::<SqlResult<Vec<_>>>()?;
+                        check_row(&table, &values)?;
+                        foreign_key_check(self, &table, &values)?;
+                        if !table.unique_keys.is_empty() {
+                            crate::unique_check::UniqueConstraintChecker::new(&table)
+                                .check(&values, unique_pool.iter().cloned())?;
+                        }
+                        let row_bytes = crate::query_budget::row_bytes(&values);
+                        target_store.insert(&values)?;
+                        inserted_bytes += row_bytes;
+                        if !table.unique_keys.is_empty() {
+                            unique_pool.push(values.clone());
+                        }
+                        captured.push(values);
+                    }
+                    if let Some(b) = budget.as_mut() {
+                        b.charge_rows(captured.len() as u64)?;
+                        b.charge_bytes(inserted_bytes)?;
+                    }
+                    return finish_dml_result_with_table(&table, captured, returning.as_deref());
+                }
                 p.expect("values")?;
                 // ADR 0220 — accept one or more comma-separated
                 // `(lit, lit, …)` tuples. Each tuple must match
@@ -3438,6 +3673,8 @@ impl SqlEngine {
                     tuples.push(p.list(|parser| parser.literal())?);
                     if !p.consume_symbol(',') { break; }
                 }
+                // ADR 0223 — optional ON CONFLICT clause.
+                let on_conflict = parse_on_conflict(&mut p, &table)?;
                 // ADR 0221 — optional RETURNING tail.
                 let returning = parse_returning(&mut p, &table)?;
                 p.end()?;
@@ -3489,7 +3726,41 @@ impl SqlEngine {
                 } else { Vec::new() };
                 let mut captured: Vec<Vec<Value>> = Vec::new();
                 let mut inserted_bytes: u64 = 0;
+                let pk_positions: Vec<usize> = table.primary_key.columns.iter()
+                    .map(|c| locate(&table, c))
+                    .collect::<SqlResult<Vec<_>>>()?;
                 for values in rows {
+                    // ADR 0223 — ON CONFLICT: detect existing PK
+                    // match and skip / update as directed.
+                    if let Some(action) = &on_conflict {
+                        let pk: Vec<Value> = pk_positions.iter()
+                            .map(|p| values[*p].clone()).collect();
+                        if let Some(mut existing) = store.get(&pk)? {
+                            match action {
+                                OnConflict::DoNothing => continue,
+                                OnConflict::DoUpdate { assignments } => {
+                                    for (col, lit) in assignments {
+                                        let idx = locate(&table, col)?;
+                                        existing[idx] = coerce(lit, &table.columns[idx])?;
+                                    }
+                                    check_row(&table, &existing)?;
+                                    foreign_key_check(self, &table, &existing)?;
+                                    if !table.unique_keys.is_empty() {
+                                        let others = store.scan()?.into_iter()
+                                            .filter(|r| pk_positions.iter().zip(pk.iter())
+                                                .any(|(p_, k)| &r[*p_] != k));
+                                        crate::unique_check::UniqueConstraintChecker::new(&table)
+                                            .check(&existing, others)?;
+                                    }
+                                    let row_bytes = crate::query_budget::row_bytes(&existing);
+                                    store.replace(&existing)?;
+                                    inserted_bytes += row_bytes;
+                                    captured.push(existing);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     check_row(&table, &values)?;
                     foreign_key_check(self, &table, &values)?;
                     if !table.unique_keys.is_empty() {
@@ -3905,16 +4176,17 @@ impl SqlEngine {
                 p.expect("table")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
+                // ADR 0222 — optional RETURNING captures rows
+                // before bulk deletion.
+                let returning = parse_returning(&mut p, &table)?;
                 p.end()?;
                 let store = self.table_store(&table)?;
                 let rows = store.scan()?;
-                // ADR 0149 — charge bytes once for the whole truncated set.
                 let truncated_bytes = crate::query_budget::rows_bytes(&rows);
-                // ADR 0151 — preflight before bulk delete.
                 if let Some(b) = budget.as_deref() {
                     b.preview_charge(rows.len() as u64, truncated_bytes)?;
                 }
-                let mut affected = 0u64;
+                let mut captured: Vec<Vec<Value>> = Vec::new();
                 for row in rows {
                     let pk_values: Vec<Value> = table.primary_key.columns.iter()
                         .map(|c| {
@@ -3923,13 +4195,13 @@ impl SqlEngine {
                             row[idx].clone()
                         }).collect();
                     store.delete(&pk_values)?;
-                    affected += 1;
+                    captured.push(row);
                 }
                 if let Some(b) = budget.as_mut() {
-                    b.charge_rows(affected)?;
+                    b.charge_rows(captured.len() as u64)?;
                     b.charge_bytes(truncated_bytes)?;
                 }
-                Ok(SqlResultSet::Command { affected })
+                finish_dml_result_with_table(&table, captured, returning.as_deref())
             }
             // ADR 0165/0166 — ALTER TABLE statements.
             //   ALTER TABLE <name> RENAME TO <new_name>
