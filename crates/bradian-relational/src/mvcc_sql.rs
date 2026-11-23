@@ -310,6 +310,41 @@ impl<'a> MvccSqlSession<'a> {
     /// A failed statement aborts the current transaction; subsequent COMMIT
     /// cannot accidentally publish earlier staged writes.
     pub fn execute(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // ADR 0230 — UNION across SELECT arms inside the
+        // session. Mutations between arms are not allowed
+        // (plain SELECTs only).
+        if let Some(parts) = crate::sql::split_top_level_unions(sql) {
+            if parts.len() >= 2 {
+                let mut iter = parts.into_iter();
+                let (_, first_sql) = iter.next().expect("at least one part");
+                let first = self.execute(&first_sql)?;
+                let (columns, mut rows) = match first {
+                    SqlResultSet::Rows { columns, rows } => (columns, rows),
+                    _ => return Err(SqlError::Unsupported(
+                        "UNION requires every arm to be a SELECT".into())),
+                };
+                let mut any_dedup = false;
+                for (all, piece) in iter {
+                    let next = self.execute(&piece)?;
+                    let (next_cols, next_rows) = match next {
+                        SqlResultSet::Rows { columns, rows } => (columns, rows),
+                        _ => return Err(SqlError::Unsupported(
+                            "UNION requires every arm to be a SELECT".into())),
+                    };
+                    if next_cols.len() != columns.len() {
+                        return Err(SqlError::Unsupported(
+                            "UNION arms must have the same column count".into()));
+                    }
+                    rows.extend(next_rows);
+                    if !all { any_dedup = true; }
+                }
+                if any_dedup {
+                    rows = crate::sql::dedup_rows(rows);
+                    crate::sql::sort_distinct_output(&mut rows);
+                }
+                return Ok(SqlResultSet::Rows { columns, rows });
+            }
+        }
         let result = self.execute_inner(sql);
         if result.is_err() { self.active = None; }
         result
@@ -366,6 +401,77 @@ impl<'a> MvccSqlSession<'a> {
                         p.expect("into")?;
                         let table = self.engine.resolve(&p.name()?)?;
                         let names = p.list(|parser| parser.word())?;
+                        // ADR 0230 — INSERT INTO … SELECT.
+                        if p.consume_word("select") {
+                            let mut src_cols: Vec<String> = vec![p.word()?];
+                            while p.consume_symbol(',') { src_cols.push(p.word()?); }
+                            p.expect("from")?;
+                            let src_table = self.engine.resolve(&p.name()?)?;
+                            let where_clause = if p.next_is_word("where") {
+                                Some(crate::sql::parse_select_where(&mut p, &src_table)?)
+                            } else { None };
+                            let returning = crate::sql::parse_returning(&mut p, &table)?;
+                            p.end()?;
+                            if src_cols.len() != names.len() || names.len() != table.columns.len() {
+                                return Err(SqlError::Unsupported(
+                                    "INSERT SELECT must project every target column exactly once".into()));
+                            }
+                            let src_positions: Vec<usize> = src_cols.iter()
+                                .map(|c| locate(&src_table, c))
+                                .collect::<SqlResult<Vec<_>>>()?;
+                            let src_rows: Vec<Vec<_>> = match &where_clause {
+                                Some(crate::sql::SelectWhere::KeyPredicate(key)) =>
+                                    tx.get(src_table.id, key)?.into_iter().collect(),
+                                Some(crate::sql::SelectWhere::JsonPathPredicates(preds)) =>
+                                    crate::sql::apply_where_filter(tx.scan(src_table.id)?, &src_table, preds)?,
+                                None => tx.scan(src_table.id)?,
+                            };
+                            let mut unique_pool: Vec<Vec<_>> = if !table.unique_keys.is_empty() {
+                                tx.scan(table.id)?
+                            } else { Vec::new() };
+                            let mut captured: Vec<Vec<_>> = Vec::new();
+                            let mut inserted_bytes: u64 = 0;
+                            for src_row in src_rows {
+                                let mut fields = BTreeMap::new();
+                                for (name_, pos) in names.iter().zip(&src_positions) {
+                                    if fields.insert(name_.clone(), src_row[*pos].clone()).is_some() {
+                                        return Err(SqlError::Syntax(
+                                            format!("repeated INSERT column {name_}")));
+                                    }
+                                }
+                                let row: Vec<_> = table.columns.iter().map(|column| {
+                                    let v = fields.remove(&column.name)
+                                        .ok_or_else(|| SqlError::Resolution(format!(
+                                            "missing column {}", column.name)))?;
+                                    match (&column.data_type, &v) {
+                                        (crate::DataType::Int32, crate::typed_table::Value::Int64(n)) =>
+                                            Ok(crate::typed_table::Value::Int32((*n).try_into()
+                                                .map_err(|_| SqlError::Type(
+                                                    "INSERT SELECT: value does not fit Int32".into()))?)),
+                                        (crate::DataType::Int64, crate::typed_table::Value::Int32(n)) =>
+                                            Ok(crate::typed_table::Value::Int64(i64::from(*n))),
+                                        _ => Ok(v),
+                                    }
+                                }).collect::<SqlResult<Vec<_>>>()?;
+                                crate::sql::check_row(&table, &row)?;
+                                crate::sql::fk_check_child_row_tx(&self.engine.catalog, &table, &row, tx)?;
+                                if !table.unique_keys.is_empty() {
+                                    crate::unique_check::UniqueConstraintChecker::new(&table)
+                                        .check(&row, unique_pool.iter().cloned())?;
+                                }
+                                inserted_bytes += crate::query_budget::row_bytes(&row);
+                                tx.insert(table.id, &row)?;
+                                if !table.unique_keys.is_empty() {
+                                    unique_pool.push(row.clone());
+                                }
+                                captured.push(row);
+                            }
+                            if let Some(b) = self.budget.as_mut() {
+                                b.charge_rows(captured.len() as u64)?;
+                                b.charge_bytes(inserted_bytes)?;
+                            }
+                            return crate::sql::finish_dml_result_with_table(&table, captured, returning.as_deref());
+                        }
                         p.expect("values")?;
                         // ADR 0220 — accept one or more tuples.
                         let mut tuples: Vec<Vec<crate::sql::Literal>> = Vec::new();

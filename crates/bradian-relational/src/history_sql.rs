@@ -613,6 +613,39 @@ impl<'a> HistorySqlSession<'a> {
     /// Errors abort the transaction unless a savepoint permits explicit recovery.
     /// A failed transaction cannot commit before rollback-to or full rollback.
     pub fn execute(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // ADR 0230 — UNION across SELECT arms.
+        if let Some(parts) = crate::sql::split_top_level_unions(sql) {
+            if parts.len() >= 2 {
+                let mut iter = parts.into_iter();
+                let (_, first_sql) = iter.next().expect("at least one part");
+                let first = self.execute(&first_sql)?;
+                let (columns, mut rows) = match first {
+                    SqlResultSet::Rows { columns, rows } => (columns, rows),
+                    _ => return Err(SqlError::Unsupported(
+                        "UNION requires every arm to be a SELECT".into())),
+                };
+                let mut any_dedup = false;
+                for (all, piece) in iter {
+                    let next = self.execute(&piece)?;
+                    let (next_cols, next_rows) = match next {
+                        SqlResultSet::Rows { columns, rows } => (columns, rows),
+                        _ => return Err(SqlError::Unsupported(
+                            "UNION requires every arm to be a SELECT".into())),
+                    };
+                    if next_cols.len() != columns.len() {
+                        return Err(SqlError::Unsupported(
+                            "UNION arms must have the same column count".into()));
+                    }
+                    rows.extend(next_rows);
+                    if !all { any_dedup = true; }
+                }
+                if any_dedup {
+                    rows = crate::sql::dedup_rows(rows);
+                    crate::sql::sort_distinct_output(&mut rows);
+                }
+                return Ok(SqlResultSet::Rows { columns, rows });
+            }
+        }
         let result = self.execute_inner(sql);
         if result.is_err() {
             if self.active.as_ref().is_some_and(|tx| tx.savepoint_count() > 0) {

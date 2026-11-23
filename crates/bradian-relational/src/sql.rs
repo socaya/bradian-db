@@ -1346,6 +1346,95 @@ pub(crate) fn finish_dml_result_with_table(
     }
 }
 
+/// ADR 0229 — find the next top-level `IN (SELECT` (or
+/// `NOT IN (SELECT`) match in the SQL respecting single-quoted
+/// strings. Returns `Some((in_start, paren_open, select_start))`
+/// pointing at the `IN` keyword, the `(`, and the `S` of
+/// `SELECT`, or `None` when no match remains.
+fn find_in_subquery(sql: &[u8], from: usize) -> Option<(usize, usize)> {
+    let word_boundary = |b: u8| !b.is_ascii_alphanumeric() && b != b'_';
+    let mut i = from;
+    let mut in_quote = false;
+    while i < sql.len() {
+        let b = sql[i];
+        if in_quote {
+            if b == b'\'' { in_quote = false; }
+            i += 1; continue;
+        }
+        if b == b'\'' { in_quote = true; i += 1; continue; }
+        // Look for a word " IN " (case-insensitive).
+        if (i == 0 || word_boundary(sql[i - 1]))
+            && i + 2 <= sql.len()
+            && sql[i..i + 2].eq_ignore_ascii_case(b"IN")
+            && (i + 2 == sql.len() || word_boundary(sql[i + 2]))
+        {
+            let mut after = i + 2;
+            while after < sql.len() && (sql[after] == b' ' || sql[after] == b'\t' || sql[after] == b'\n') { after += 1; }
+            if after < sql.len() && sql[after] == b'(' {
+                let mut k = after + 1;
+                while k < sql.len() && (sql[k] == b' ' || sql[k] == b'\t' || sql[k] == b'\n') { k += 1; }
+                if k + 6 <= sql.len()
+                    && sql[k..k + 6].eq_ignore_ascii_case(b"SELECT")
+                    && (k + 6 == sql.len() || word_boundary(sql[k + 6]))
+                {
+                    return Some((after, k));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// ADR 0229 — find the position of the paren that closes the
+/// one at `open` (which must point AT the `(`).  Returns `None`
+/// when unbalanced.
+fn find_matching_paren(sql: &[u8], open: usize) -> Option<usize> {
+    assert_eq!(sql[open], b'(');
+    let mut depth = 0i32;
+    let mut i = open;
+    let mut in_quote = false;
+    while i < sql.len() {
+        let b = sql[i];
+        if in_quote {
+            if b == b'\'' { in_quote = false; }
+            i += 1; continue;
+        }
+        match b {
+            b'\'' => in_quote = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 { return Some(i); }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// ADR 0229 — serialize a single column of values as a SQL
+/// literal list suitable for an `IN (...)` RHS. Int / Text /
+/// Null supported; other scalar types fail with `Type`.
+fn format_in_list(values: &[Value]) -> SqlResult<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(values.len());
+    for v in values {
+        parts.push(match v {
+            Value::Null => "NULL".to_string(),
+            Value::Int32(n) => n.to_string(),
+            Value::Int64(n) => n.to_string(),
+            Value::Decimal(n) => n.to_string(),
+            Value::Boolean(b) => if *b { "true".into() } else { "false".into() },
+            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            Value::Json(s) => format!("'{}'", s.replace('\'', "''")),
+            Value::Uuid(_) | Value::TimestampTz(_) => return Err(SqlError::Type(
+                "IN (SELECT …) subquery column type not representable as a literal".into())),
+        });
+    }
+    Ok(parts.join(","))
+}
+
 /// ADR 0225 — split a top-level `SELECT … UNION [ALL] SELECT …`
 /// chain into its parts. Returns `None` when the input has no
 /// top-level UNION; `Some(parts)` otherwise. Each part is a
@@ -1505,7 +1594,8 @@ pub(crate) fn parse_having(
         }
         HavingTerm::Aggregate(spec)
     } else {
-        let name = p.word()?;
+        // ADR 0228 — allow `alias.col` in HAVING key references.
+        let name = parse_agg_column(p)?;
         if !group_keys.iter().any(|k| k == &name) {
             return Err(SqlError::Unsupported(
                 "HAVING column must appear in GROUP BY or be an aggregate".into()));
@@ -1528,7 +1618,10 @@ pub(crate) fn parse_group_by(p: &mut Parser, table: &Table) -> SqlResult<Vec<Str
     p.expect("by")?;
     let mut keys = Vec::new();
     loop {
-        let name = p.word()?;
+        // ADR 0228 — allow a two-part `alias.col` key for
+        // joined queries; non-joined calls pass a single-table
+        // schema so dotted names fail `locate` naturally.
+        let name = parse_agg_column(p)?;
         locate(table, &name)?;
         if keys.len() == 16 {
             return Err(SqlError::Unsupported("GROUP BY exceeds 16 columns".into()));
@@ -1656,6 +1749,17 @@ pub(crate) fn evaluate_grouped(
     Ok(SqlResultSet::Rows { columns, rows: output_rows })
 }
 
+/// ADR 0228 — parse an aggregate-argument column name that may
+/// optionally be qualified (`alias.col`).  Reuses the single-word
+/// path otherwise.
+fn parse_agg_column(p: &mut Parser) -> SqlResult<String> {
+    let first = p.word()?;
+    if p.consume_symbol('.') {
+        let second = p.word()?;
+        Ok(format!("{first}.{second}"))
+    } else { Ok(first) }
+}
+
 /// Recognize `COUNT(*)`, `MIN(col)`, `MAX(col)`, or `SUM(col)`
 /// at the head of a SELECT. Returns `Some(spec)` after
 /// consuming the tokens; returns `None` without advancing the
@@ -1668,30 +1772,30 @@ pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
         // non-null extractions.
         let spec = if p.consume_symbol('*') { AggSpec::CountStar }
             else if p.consume_word("distinct") {
-                AggSpec::CountDistinct(p.word()?)
+                AggSpec::CountDistinct(parse_agg_column(p)?)
             } else {
-                AggSpec::CountCol(p.word()?)
+                AggSpec::CountCol(parse_agg_column(p)?)
             };
         p.symbol(')')?;
         spec
     } else if p.consume_word("min") {
         p.symbol('(')?;
-        let column = p.word()?;
+        let column = parse_agg_column(p)?;
         p.symbol(')')?;
         AggSpec::Min(column)
     } else if p.consume_word("max") {
         p.symbol('(')?;
-        let column = p.word()?;
+        let column = parse_agg_column(p)?;
         p.symbol(')')?;
         AggSpec::Max(column)
     } else if p.consume_word("sum") {
         p.symbol('(')?;
-        let column = p.word()?;
+        let column = parse_agg_column(p)?;
         p.symbol(')')?;
         AggSpec::Sum(column)
     } else if p.consume_word("avg") {
         p.symbol('(')?;
-        let column = p.word()?;
+        let column = parse_agg_column(p)?;
         p.symbol(')')?;
         AggSpec::Avg(column)
     } else {
@@ -1891,50 +1995,95 @@ pub(crate) fn split_qualified_column(s: &str) -> (Option<&str>, &str) {
     else { (None, s) }
 }
 
-/// ADR 0226 — resolve an `ON t1.c = t2.c` reference pair into
-/// `(left_column_position, right_column_position)`.  Each side
-/// of ON must be a two-part `[table, column]` and must name
-/// the matching source table.
+/// ADR 0228 — build a synthetic `Table` describing the
+/// composite row shape of a two-table join. Column names are
+/// `alias.col`.  Only the fields needed by
+/// `evaluate_grouped` / `evaluate_aggregate` / `locate` /
+/// `compare_values_for_check` are populated; the rest take
+/// their Default::default() values.
+pub(crate) fn build_composite_table(
+    left: &Table, left_alias: &str,
+    right: &Table, right_alias: &str,
+) -> Table {
+    let mut columns: Vec<Column> = Vec::with_capacity(left.columns.len() + right.columns.len());
+    for c in &left.columns {
+        columns.push(Column {
+            name: format!("{left_alias}.{}", c.name),
+            data_type: c.data_type.clone(),
+            nullable: true,
+        });
+    }
+    for c in &right.columns {
+        columns.push(Column {
+            name: format!("{right_alias}.{}", c.name),
+            data_type: c.data_type.clone(),
+            nullable: true,
+        });
+    }
+    Table {
+        id: left.id,
+        schema: left.schema,
+        name: format!("{left_alias}+{right_alias}"),
+        columns,
+        primary_key: crate::model::PrimaryKey { columns: Vec::new() },
+        unique_keys: Vec::new(),
+        foreign_keys: Vec::new(),
+        column_defaults: Default::default(),
+        column_collations: Default::default(),
+        policies: Default::default(),
+        column_checks: Default::default(),
+    }
+}
+
+/// ADR 0227 — INNER / OUTER / FULL join variant.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum JoinKind { Inner, LeftOuter, RightOuter, FullOuter }
+
+/// ADR 0226 + 0227 — resolve an `ON a.c = b.c` reference pair
+/// into `(left_column_position, right_column_position)`.  Each
+/// side of ON must be a two-part `[alias_or_table, column]`
+/// and must name the matching source table/alias.
 pub(crate) fn join_resolve_on(
-    left: &Table, right: &Table,
+    left: &Table, left_alias: &str,
+    right: &Table, right_alias: &str,
     left_ref: &[String], right_ref: &[String],
 ) -> SqlResult<(usize, usize)> {
     if left_ref.len() != 2 || right_ref.len() != 2 {
         return Err(SqlError::Unsupported(
-            "JOIN ON clause requires `table.col = table.col`".into()));
+            "JOIN ON clause requires `alias.col = alias.col`".into()));
     }
-    let (lref_table, lref_col) = (&left_ref[0], &left_ref[1]);
-    let (rref_table, rref_col) = (&right_ref[0], &right_ref[1]);
-    // Accept either ordering: lref matches left + rref matches right,
-    // or the mirror. Reject ambiguous references.
-    if lref_table == &left.name && rref_table == &right.name {
-        Ok((locate(left, lref_col)?, locate(right, rref_col)?))
-    } else if lref_table == &right.name && rref_table == &left.name {
-        Ok((locate(left, rref_col)?, locate(right, lref_col)?))
+    let (lref_a, lref_c) = (&left_ref[0], &left_ref[1]);
+    let (rref_a, rref_c) = (&right_ref[0], &right_ref[1]);
+    if lref_a == left_alias && rref_a == right_alias {
+        Ok((locate(left, lref_c)?, locate(right, rref_c)?))
+    } else if lref_a == right_alias && rref_a == left_alias {
+        Ok((locate(left, rref_c)?, locate(right, lref_c)?))
     } else {
         Err(SqlError::Resolution(
-            "JOIN ON references do not match the FROM/JOIN tables".into()))
+            "JOIN ON references do not match the FROM/JOIN aliases".into()))
     }
 }
 
-/// ADR 0226 — resolve a qualified column reference against a
-/// two-table join namespace.  Returns `(is_right_side, position,
+/// ADR 0226 + 0227 — resolve a qualified column reference against
+/// a two-table join namespace.  Returns `(is_right_side, position,
 /// column_name)`.
 pub(crate) fn join_resolve_column(
-    left: &Table, right: &Table, reference: &[String],
+    left: &Table, left_alias: &str,
+    right: &Table, right_alias: &str,
+    reference: &[String],
 ) -> SqlResult<(bool, usize, String)> {
     if reference.len() != 2 {
         return Err(SqlError::Unsupported(
-            "JOIN WHERE references must be qualified as `table.col`".into()));
+            "JOIN references must be qualified as `alias.col`".into()));
     }
     let (table, col) = (&reference[0], &reference[1]);
-    if table == &left.name {
+    if table == left_alias {
         Ok((false, locate(left, col)?, col.clone()))
-    } else if table == &right.name {
+    } else if table == right_alias {
         Ok((true, locate(right, col)?, col.clone()))
     } else {
         Err(SqlError::Resolution(format!(
-            "JOIN WHERE references unknown table {table}")))
+            "JOIN references unknown alias {table}")))
     }
 }
 
@@ -3388,6 +3537,12 @@ impl SqlEngine {
         policy: Option<&crate::access_policy::TableAccessPolicy>,
         authz: Option<&bradian_core::AuthorizationContext>,
     ) -> SqlResult<SqlResultSet> {
+        // ADR 0229 — resolve `IN (SELECT …)` subqueries by
+        // executing each eagerly and rewriting the SQL with a
+        // literal list.  This runs BEFORE the UNION splitter so
+        // a subquery inside a UNION arm still gets expanded.
+        let sql = self.resolve_in_subqueries(sql, control)?;
+        let sql = sql.as_str();
         // ADR 0225 — UNION / UNION ALL at the top level. Each
         // arm runs through `execute_impl_single` with its own
         // short-lived mutex guard; the results are combined and
@@ -3438,24 +3593,25 @@ impl SqlEngine {
     /// projected rows.  No aggregates, DISTINCT, ORDER BY, or
     /// ADR 0225 UNION composition — each is a separate ADR.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn execute_inner_join(
         &self,
-        left: &Table,
-        right: &Table,
+        kind: JoinKind,
+        left: &Table, left_alias: &str,
+        right: &Table, right_alias: &str,
         left_ref: &[String],
         right_ref: &[String],
         select_items: &[SelectItem],
         caller_wildcard: bool,
         where_clause: Option<(Vec<String>, Literal)>,
+        group_keys: Vec<String>,
+        having: Option<HavingClause>,
+        composite: &Table,
         _control: &ScanControl,
         mut budget: Option<&mut crate::query_budget::BudgetTracker>,
     ) -> SqlResult<SqlResultSet> {
-        // The operation mutex is already held by the caller
-        // (`execute_impl_single`).  Taking it again would
-        // deadlock on parking_lot's non-reentrant `Mutex`.
-        // Validate ON columns.
         let (left_pos, right_pos) =
-            join_resolve_on(left, right, left_ref, right_ref)?;
+            join_resolve_on(left, left_alias, right, right_alias, left_ref, right_ref)?;
         let left_store = self.table_store(left)?;
         let right_store = self.table_store(right)?;
         let left_rows = left_store.scan()?;
@@ -3466,10 +3622,21 @@ impl SqlEngine {
             b.charge_bytes(crate::query_budget::rows_bytes(&left_rows)
                 + crate::query_budget::rows_bytes(&right_rows))?;
         }
-        // Expand `SELECT *` to every column from left then right.
-        let projections: Vec<(String /* table */, String /* col */)> = if caller_wildcard {
-            left.columns.iter().map(|c| (left.name.clone(), c.name.clone()))
-                .chain(right.columns.iter().map(|c| (right.name.clone(), c.name.clone())))
+        // ADR 0228 — aggregate / GROUP BY path: build composite
+        // rows and dispatch to the single-table evaluator with
+        // the synthetic composite schema.
+        let any_aggregate = select_items.iter().any(|it| it.is_aggregate());
+        if any_aggregate || !group_keys.is_empty() {
+            return self.execute_join_grouped(
+                kind, left, left_alias, right, right_alias,
+                left_pos, right_pos, left_rows, right_rows,
+                select_items, caller_wildcard,
+                where_clause, group_keys, having, composite,
+            );
+        }
+        let projections: Vec<(String, String)> = if caller_wildcard {
+            left.columns.iter().map(|c| (left_alias.to_string(), c.name.clone()))
+                .chain(right.columns.iter().map(|c| (right_alias.to_string(), c.name.clone())))
                 .collect()
         } else {
             select_items.iter().map(|item| match item {
@@ -3483,44 +3650,245 @@ impl SqlEngine {
                     "joined SELECT accepts bare qualified columns only (no aggregates, JSON paths, ORDER BY, …)".into())),
             }).collect::<SqlResult<Vec<_>>>()?
         };
-        // Map each projection to (which_side, column_position).
-        let proj_positions: Vec<(bool /* is_right */, usize)> = projections.iter().map(|(table, col)| {
-            if table == &left.name { Ok((false, locate(left, col)?)) }
-            else if table == &right.name { Ok((true, locate(right, col)?)) }
+        let proj_positions: Vec<(bool, usize)> = projections.iter().map(|(alias, col)| {
+            if alias == left_alias { Ok((false, locate(left, col)?)) }
+            else if alias == right_alias { Ok((true, locate(right, col)?)) }
             else { Err(SqlError::Resolution(format!(
-                "joined SELECT references unknown table {table}"))) }
+                "joined SELECT references unknown alias {alias}"))) }
         }).collect::<SqlResult<Vec<_>>>()?;
-        // Build output columns using `table.col` labels.
         let columns: Vec<String> = projections.iter()
             .map(|(t, c)| format!("{t}.{c}")).collect();
-        // Optional WHERE: single predicate on qualified column.
         let where_filter: Option<(bool, usize, Value)> = match where_clause {
             None => None,
             Some((col_ref, lit)) => {
-                let (side, pos, col) = join_resolve_column(left, right, &col_ref)?;
+                let (side, pos, _) =
+                    join_resolve_column(left, left_alias, right, right_alias, &col_ref)?;
                 let column_def = if side { &right.columns[pos] } else { &left.columns[pos] };
-                let _ = col;
                 Some((side, pos, coerce(&lit, column_def)?))
             }
         };
-        // Nested-loop join.
+        let left_nulls: Vec<Value> = vec![Value::Null; left.columns.len()];
+        let right_nulls: Vec<Value> = vec![Value::Null; right.columns.len()];
         let mut rows: Vec<Vec<Value>> = Vec::new();
-        for lrow in &left_rows {
-            for rrow in &right_rows {
-                if compare_values_for_check(&lrow[left_pos], &rrow[right_pos])
-                    != std::cmp::Ordering::Equal { continue; }
+        let mut left_matched = vec![false; left_rows.len()];
+        let mut right_matched = vec![false; right_rows.len()];
+        let emit = |lrow: &[Value], rrow: &[Value], out: &mut Vec<Vec<Value>>|
+            -> SqlResult<()> {
                 if let Some((side, pos, ref lit)) = where_filter {
                     let v = if side { &rrow[pos] } else { &lrow[pos] };
-                    if compare_values_for_check(v, lit)
-                        != std::cmp::Ordering::Equal { continue; }
+                    if matches!(v, Value::Null)
+                        || compare_values_for_check(v, lit)
+                            != std::cmp::Ordering::Equal
+                    { return Ok(()); }
                 }
-                let out: Vec<Value> = proj_positions.iter().map(|(is_right, pos)|
+                let o: Vec<Value> = proj_positions.iter().map(|(is_right, pos)|
                     if *is_right { rrow[*pos].clone() } else { lrow[*pos].clone() }
                 ).collect();
-                rows.push(out);
+                out.push(o);
+                Ok(())
+            };
+        for (li, lrow) in left_rows.iter().enumerate() {
+            for (ri, rrow) in right_rows.iter().enumerate() {
+                let l = &lrow[left_pos];
+                let r = &rrow[right_pos];
+                if matches!(l, Value::Null) || matches!(r, Value::Null) { continue; }
+                if compare_values_for_check(l, r) != std::cmp::Ordering::Equal { continue; }
+                left_matched[li] = true;
+                right_matched[ri] = true;
+                emit(lrow, rrow, &mut rows)?;
+            }
+        }
+        // ADR 0227 — emit left-side orphans for LEFT/FULL.
+        if matches!(kind, JoinKind::LeftOuter | JoinKind::FullOuter) {
+            for (li, lrow) in left_rows.iter().enumerate() {
+                if !left_matched[li] {
+                    emit(lrow, &right_nulls, &mut rows)?;
+                }
+            }
+        }
+        // ADR 0227 — emit right-side orphans for RIGHT/FULL.
+        if matches!(kind, JoinKind::RightOuter | JoinKind::FullOuter) {
+            for (ri, rrow) in right_rows.iter().enumerate() {
+                if !right_matched[ri] {
+                    emit(&left_nulls, rrow, &mut rows)?;
+                }
             }
         }
         Ok(SqlResultSet::Rows { columns, rows })
+    }
+
+    /// ADR 0228 — build composite rows from a two-table join
+    /// and run them through `evaluate_grouped` /
+    /// `evaluate_aggregate` using a synthetic composite table
+    /// so the same grouping path serves single-table and
+    /// joined queries.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_join_grouped(
+        &self,
+        kind: JoinKind,
+        left: &Table, _left_alias: &str,
+        right: &Table, _right_alias: &str,
+        left_pos: usize, right_pos: usize,
+        left_rows: Vec<Vec<Value>>,
+        right_rows: Vec<Vec<Value>>,
+        select_items: &[SelectItem],
+        _caller_wildcard: bool,
+        where_clause: Option<(Vec<String>, Literal)>,
+        group_keys: Vec<String>,
+        having: Option<HavingClause>,
+        composite: &Table,
+    ) -> SqlResult<SqlResultSet> {
+        // ADR 0228 — translate select_items that referenced
+        // `alias.col` into the composite's `alias.col` column
+        // name (the Projection variant already stores it that
+        // way; only the aggregate variants rebuild their
+        // column reference verbatim).
+        let items: Vec<SelectItem> = select_items.iter().map(|item| match item {
+            SelectItem::Column(Projection::Column(s)) if !s.contains('.') =>
+                Err(SqlError::Unsupported(
+                    "joined SELECT requires qualified column references".into())),
+            _ => Ok(item.clone()),
+        }).collect::<SqlResult<Vec<_>>>()?;
+        // Nested-loop into composite rows.
+        let where_filter: Option<(bool, usize, Value)> = match where_clause {
+            None => None,
+            Some((col_ref, lit)) => {
+                // Need original aliases here — recover from `composite`
+                // column naming. The composite prefix is `{alias}.`.
+                let (alias, col) = match col_ref.as_slice() {
+                    [a, c] => (a.clone(), c.clone()),
+                    _ => return Err(SqlError::Unsupported(
+                        "joined WHERE requires `alias.col` reference".into())),
+                };
+                // Resolve against the raw tables to discover the side.
+                let composite_name = format!("{alias}.{col}");
+                let composite_pos = locate(composite, &composite_name)?;
+                let column_def = &composite.columns[composite_pos];
+                let value = coerce(&lit, column_def)?;
+                let side = composite_pos >= left.columns.len();
+                let pos_in_source = if side {
+                    composite_pos - left.columns.len()
+                } else { composite_pos };
+                Some((side, pos_in_source, value))
+            }
+        };
+        let left_nulls: Vec<Value> = vec![Value::Null; left.columns.len()];
+        let right_nulls: Vec<Value> = vec![Value::Null; right.columns.len()];
+        let mut composite_rows: Vec<Vec<Value>> = Vec::new();
+        let mut left_matched = vec![false; left_rows.len()];
+        let mut right_matched = vec![false; right_rows.len()];
+        let emit = |lrow: &[Value], rrow: &[Value], out: &mut Vec<Vec<Value>>|
+            -> SqlResult<()> {
+                if let Some((side, pos, ref lit)) = where_filter {
+                    let v = if side { &rrow[pos] } else { &lrow[pos] };
+                    if matches!(v, Value::Null)
+                        || compare_values_for_check(v, lit)
+                            != std::cmp::Ordering::Equal
+                    { return Ok(()); }
+                }
+                let mut composite = Vec::with_capacity(lrow.len() + rrow.len());
+                composite.extend_from_slice(lrow);
+                composite.extend_from_slice(rrow);
+                out.push(composite);
+                Ok(())
+            };
+        for (li, lrow) in left_rows.iter().enumerate() {
+            for (ri, rrow) in right_rows.iter().enumerate() {
+                let l = &lrow[left_pos];
+                let r = &rrow[right_pos];
+                if matches!(l, Value::Null) || matches!(r, Value::Null) { continue; }
+                if compare_values_for_check(l, r) != std::cmp::Ordering::Equal { continue; }
+                left_matched[li] = true;
+                right_matched[ri] = true;
+                emit(lrow, rrow, &mut composite_rows)?;
+            }
+        }
+        if matches!(kind, JoinKind::LeftOuter | JoinKind::FullOuter) {
+            for (li, lrow) in left_rows.iter().enumerate() {
+                if !left_matched[li] { emit(lrow, &right_nulls, &mut composite_rows)?; }
+            }
+        }
+        if matches!(kind, JoinKind::RightOuter | JoinKind::FullOuter) {
+            for (ri, rrow) in right_rows.iter().enumerate() {
+                if !right_matched[ri] { emit(&left_nulls, rrow, &mut composite_rows)?; }
+            }
+        }
+        // Grouped shape dispatch.
+        let any_aggregate = items.iter().any(|it| it.is_aggregate());
+        let scalar_aggregate: Option<AggSpec> =
+            if any_aggregate && items.len() == 1 {
+                match &items[0] {
+                    SelectItem::Agg(spec) => Some(spec.clone()),
+                    _ => None,
+                }
+            } else { None };
+        if group_keys.is_empty() {
+            if let Some(spec) = scalar_aggregate {
+                let value = evaluate_aggregate(&spec, composite, &composite_rows)?;
+                return Ok(SqlResultSet::Rows {
+                    columns: vec![spec.result_column().into()],
+                    rows: vec![vec![value]],
+                });
+            }
+            return Err(SqlError::Unsupported(
+                "joined SELECT aggregates require all projections be aggregates or a GROUP BY list".into()));
+        }
+        // Validate: each bare projection must be in the key list.
+        for item in &items {
+            if let SelectItem::Column(Projection::Column(name)) = item {
+                if !group_keys.iter().any(|k| k == name) {
+                    return Err(SqlError::Unsupported(format!(
+                        "projection {name} must appear in GROUP BY")));
+                }
+            }
+        }
+        evaluate_grouped(composite, composite_rows, &group_keys, &items, having.as_ref())
+    }
+
+    /// ADR 0229 — eagerly resolve every top-level
+    /// `IN (SELECT …)` / `NOT IN (SELECT …)` subquery by
+    /// executing it against this engine and rewriting the SQL
+    /// with a literal list. Non-correlated only; the subquery
+    /// must return exactly one column.
+    fn resolve_in_subqueries(
+        &self, sql: &str, control: &ScanControl,
+    ) -> SqlResult<String> {
+        let mut out = sql.to_string();
+        loop {
+            let bytes = out.as_bytes();
+            let Some((paren_open, _select_start)) = find_in_subquery(bytes, 0) else { break };
+            let close = find_matching_paren(bytes, paren_open)
+                .ok_or_else(|| SqlError::Syntax(
+                    "IN (SELECT …) subquery has unbalanced parens".into()))?;
+            let inner = &out[paren_open + 1..close];
+            // Recursive call so nested subqueries resolve too;
+            // the recursion terminates because each pass
+            // replaces one subquery with a literal list.
+            let rs = self.execute_impl(inner, control, None, None, None)?;
+            let values = match rs {
+                SqlResultSet::Rows { columns, rows } => {
+                    if columns.len() != 1 {
+                        return Err(SqlError::Unsupported(
+                            "IN (SELECT …) subquery must return exactly one column".into()));
+                    }
+                    rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect::<Vec<_>>()
+                }
+                _ => return Err(SqlError::Unsupported(
+                    "IN (SELECT …) subquery must be a SELECT".into())),
+            };
+            let list = if values.is_empty() {
+                // Empty subquery → IN with impossible sentinel so
+                // no row matches. Use a NULL literal which the
+                // IN matcher treats as never-match.
+                "NULL".to_string()
+            } else { format_in_list(&values)? };
+            let mut rewritten = String::with_capacity(out.len() + list.len());
+            rewritten.push_str(&out[..paren_open + 1]);
+            rewritten.push_str(&list);
+            rewritten.push_str(&out[close..]);
+            out = rewritten;
+        }
+        Ok(out)
     }
 
     fn execute_impl_single(
@@ -3960,15 +4328,47 @@ impl SqlEngine {
                 p.expect("from")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
-                // ADR 0226 — INNER JOIN detection.  Forks to a
-                // dedicated two-table executor; MVP bounds:
-                // one JOIN, no OUTER / aliases / subqueries,
-                // ON is `t1.c = t2.c`, no aggregates / DISTINCT
-                // / GROUP BY / HAVING / ORDER BY / LIMIT in a
-                // joined query.
-                if p.consume_word("join") {
+                // ADR 0227 — optional table alias and then
+                // [LEFT|RIGHT|FULL [OUTER]] JOIN.
+                let left_alias = {
+                    if p.consume_word("as") { p.word()? }
+                    else if let Some(Token::Word(w)) = p.peek().cloned() {
+                        // Bareword alias allowed when it is not
+                        // one of the SELECT keywords that follow.
+                        let w_low = w.to_ascii_lowercase();
+                        let is_keyword = matches!(w_low.as_str(),
+                            "where" | "group" | "order" | "limit" | "offset"
+                            | "left" | "right" | "full" | "inner" | "join"
+                            | "having" | "union");
+                        if is_keyword { table.name.clone() }
+                        else { p.advance(); w }
+                    } else { table.name.clone() }
+                };
+                let kind = if p.consume_word("left") {
+                    p.consume_word("outer");
+                    Some(JoinKind::LeftOuter)
+                } else if p.consume_word("right") {
+                    p.consume_word("outer");
+                    Some(JoinKind::RightOuter)
+                } else if p.consume_word("full") {
+                    p.consume_word("outer");
+                    Some(JoinKind::FullOuter)
+                } else if p.consume_word("inner") || p.next_is_word("join") {
+                    Some(JoinKind::Inner)
+                } else { None };
+                if let Some(kind) = kind {
+                    p.expect("join")?;
                     let right_name = p.name()?;
                     let right_table = self.resolve(&right_name)?;
+                    let right_alias = {
+                        if p.consume_word("as") { p.word()? }
+                        else if let Some(Token::Word(w)) = p.peek().cloned() {
+                            let w_low = w.to_ascii_lowercase();
+                            let is_keyword = matches!(w_low.as_str(), "on");
+                            if is_keyword { right_table.name.clone() }
+                            else { p.advance(); w }
+                        } else { right_table.name.clone() }
+                    };
                     p.expect("on")?;
                     let left_ref = p.name()?;
                     p.symbol('=')?;
@@ -3980,12 +4380,24 @@ impl SqlEngine {
                         let lit = p.literal()?;
                         Some((col, lit))
                     } else { None };
+                    // ADR 0228 — parse GROUP BY / HAVING against
+                    // a synthetic composite table built from the
+                    // join's aliased columns.
+                    let composite = build_composite_table(
+                        &table, &left_alias, &right_table, &right_alias);
+                    let group_keys = parse_group_by(&mut p, &composite)?;
+                    let having = parse_having(&mut p, &composite, &group_keys)?;
                     p.end()?;
                     return self.execute_inner_join(
-                        &table, &right_table,
+                        kind,
+                        &table, &left_alias,
+                        &right_table, &right_alias,
                         &left_ref, &right_ref,
                         &select_items, caller_wildcard,
-                        where_clause, control, budget,
+                        where_clause,
+                        group_keys, having,
+                        &composite,
+                        control, budget,
                     );
                 }
                 // ADR 0217 — expand `SELECT *` into bare columns.
