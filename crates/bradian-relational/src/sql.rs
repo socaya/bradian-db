@@ -1242,17 +1242,25 @@ pub(crate) enum AggSpec {
     CountCol(String),
     /// ADR 0216 — distinct non-null count of one column.
     CountDistinct(String),
+    /// ADR 0237 — aggregate over a scalar expression.
+    MinExpr(FuncExpr),
+    MaxExpr(FuncExpr),
+    SumExpr(FuncExpr),
+    AvgExpr(FuncExpr),
+    CountColExpr(FuncExpr),
+    CountDistinctExpr(FuncExpr),
 }
 
 impl AggSpec {
     pub(crate) fn result_column(&self) -> &'static str {
         match self {
             AggSpec::CountStar => "count",
-            AggSpec::Min(_) => "min",
-            AggSpec::Max(_) => "max",
-            AggSpec::Sum(_) => "sum",
-            AggSpec::Avg(_) => "avg",
-            AggSpec::CountCol(_) | AggSpec::CountDistinct(_) => "count",
+            AggSpec::Min(_) | AggSpec::MinExpr(_) => "min",
+            AggSpec::Max(_) | AggSpec::MaxExpr(_) => "max",
+            AggSpec::Sum(_) | AggSpec::SumExpr(_) => "sum",
+            AggSpec::Avg(_) | AggSpec::AvgExpr(_) => "avg",
+            AggSpec::CountCol(_) | AggSpec::CountDistinct(_)
+                | AggSpec::CountColExpr(_) | AggSpec::CountDistinctExpr(_) => "count",
         }
     }
 }
@@ -1533,21 +1541,42 @@ pub(crate) fn sort_distinct_output(rows: &mut [Vec<Value>]) {
     });
 }
 
-/// ADR 0232 — argument to a scalar function call. Columns are
-/// stored as raw name (may be dotted for joined queries);
-/// literals materialize as `Value` at parse time.
+/// ADR 0232 + 0234 — argument to a scalar function call.
+/// Columns are stored as raw name (dotted for joined queries);
+/// literals materialize at parse time; nested wraps another
+/// scalar function expression so `UPPER(TRIM(name))` composes.
 #[derive(Clone, Debug)]
 pub(crate) enum FuncArg {
     ColumnRef(String),
     Literal(Value),
+    Nested(Box<FuncExpr>),
 }
 
-/// ADR 0233 — one `WHEN predicate THEN value` arm of a CASE.
+/// ADR 0233 + 0238 — one `WHEN predicate THEN value` arm of a CASE.
+#[derive(Clone, Debug)]
+pub(crate) enum CasePredicate {
+    Compare {
+        column: FuncArg,
+        op: crate::model::CheckOp,
+        literal: Value,
+    },
+    /// ADR 0238 — `expr BETWEEN low AND high` (inclusive).
+    Between {
+        column: FuncArg,
+        low: Value,
+        high: Value,
+    },
+    /// ADR 0238 — negated BETWEEN.
+    NotBetween {
+        column: FuncArg,
+        low: Value,
+        high: Value,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CaseArm {
-    pub(crate) column: FuncArg,
-    pub(crate) op: crate::model::CheckOp,
-    pub(crate) literal: Value,
+    pub(crate) predicate: CasePredicate,
     pub(crate) result: FuncArg,
 }
 
@@ -1573,6 +1602,15 @@ pub(crate) enum FuncExpr {
     Replace { s: FuncArg, from: FuncArg, to: FuncArg },
     /// ADR 0233 — `CASE WHEN p THEN v [WHEN …] [ELSE v] END`.
     Case { arms: Vec<CaseArm>, else_result: Option<FuncArg> },
+    /// ADR 0235 — `CAST(arg AS type)` conversion.
+    Cast { arg: FuncArg, target: DataType },
+    /// ADR 0236 — current wall-clock timestamp in microseconds
+    /// since the Unix epoch, computed per-row (cheap).
+    Now,
+    /// ADR 0236 — add `seconds` to a `TimestampTz` argument.
+    TimestampAdd { ts: FuncArg, seconds: FuncArg },
+    /// ADR 0236 — `(a - b)` in whole seconds.
+    TimestampDiff { a: FuncArg, b: FuncArg },
 }
 
 impl FuncExpr {
@@ -1589,6 +1627,10 @@ impl FuncExpr {
             FuncExpr::Trim(_) => "trim".into(),
             FuncExpr::Replace { .. } => "replace".into(),
             FuncExpr::Case { .. } => "case".into(),
+            FuncExpr::Cast { .. } => "cast".into(),
+            FuncExpr::Now => "now".into(),
+            FuncExpr::TimestampAdd { .. } => "timestamp_add".into(),
+            FuncExpr::TimestampDiff { .. } => "timestamp_diff".into(),
         }
     }
 }
@@ -1615,7 +1657,89 @@ impl SelectItem {
     }
 }
 
-/// ADR 0232 — resolve a FuncArg against a row.
+/// ADR 0233 + 0238 — coerce a CASE-predicate literal into its
+/// `Value` form without a target column context.
+fn coerce_case_literal(lit: Literal) -> SqlResult<Value> {
+    Ok(match lit {
+        Literal::Null => Value::Null,
+        Literal::Bool(b) => Value::Boolean(b),
+        Literal::Text(s) => Value::String(s),
+        Literal::Number(s) => {
+            if let Ok(n) = s.parse::<i64>() { Value::Int64(n) }
+            else { return Err(SqlError::Type(format!(
+                "CASE literal {s} is not a valid numeric"))); }
+        }
+        Literal::Default => return Err(SqlError::Syntax(
+            "DEFAULT is not a CASE comparator".into())),
+    })
+}
+
+/// ADR 0235 — convert a `Value` to a target `DataType`.
+/// NULL stays NULL. Unsupported pairs surface `SqlError::Type`.
+pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
+    if matches!(v, Value::Null) { return Ok(Value::Null); }
+    let invalid = || SqlError::Type(format!(
+        "CAST: cannot convert {v:?} to {target:?}"));
+    Ok(match (target, &v) {
+        (DataType::Boolean, Value::Boolean(_)) => v,
+        (DataType::Boolean, Value::Int32(n)) => Value::Boolean(*n != 0),
+        (DataType::Boolean, Value::Int64(n)) => Value::Boolean(*n != 0),
+        (DataType::Boolean, Value::String(s)) => match s.as_str() {
+            "true" | "1" | "t" | "T" => Value::Boolean(true),
+            "false" | "0" | "f" | "F" => Value::Boolean(false),
+            _ => return Err(invalid()),
+        },
+        (DataType::Int32, Value::Int32(_)) => v,
+        (DataType::Int32, Value::Int64(n)) =>
+            Value::Int32((*n).try_into().map_err(|_| invalid())?),
+        (DataType::Int32, Value::Decimal(n)) =>
+            Value::Int32((*n).try_into().map_err(|_| invalid())?),
+        (DataType::Int32, Value::String(s)) =>
+            Value::Int32(s.parse().map_err(|_| invalid())?),
+        (DataType::Int32, Value::Boolean(b)) =>
+            Value::Int32(if *b { 1 } else { 0 }),
+        (DataType::Int64, Value::Int64(_)) => v,
+        (DataType::Int64, Value::Int32(n)) => Value::Int64(i64::from(*n)),
+        (DataType::Int64, Value::Decimal(n)) =>
+            Value::Int64((*n).try_into().map_err(|_| invalid())?),
+        (DataType::Int64, Value::String(s)) =>
+            Value::Int64(s.parse().map_err(|_| invalid())?),
+        (DataType::Int64, Value::Boolean(b)) =>
+            Value::Int64(if *b { 1 } else { 0 }),
+        (DataType::Text | DataType::Varchar { .. }, Value::String(_)) => v,
+        (DataType::Text | DataType::Varchar { .. }, Value::Int32(n)) =>
+            Value::String(n.to_string()),
+        (DataType::Text | DataType::Varchar { .. }, Value::Int64(n)) =>
+            Value::String(n.to_string()),
+        (DataType::Text | DataType::Varchar { .. }, Value::Decimal(n)) =>
+            Value::String(n.to_string()),
+        (DataType::Text | DataType::Varchar { .. }, Value::Boolean(b)) =>
+            Value::String(if *b { "true".into() } else { "false".into() }),
+        (DataType::Text | DataType::Varchar { .. }, Value::Json(s)) =>
+            Value::String(s.clone()),
+        (DataType::Json, Value::Json(_)) => v,
+        (DataType::Json, Value::String(s)) =>
+            if serde_json::from_str::<serde_json::Value>(s).is_ok() { Value::Json(s.clone()) }
+            else { return Err(invalid()); },
+        _ => return Err(invalid()),
+    })
+}
+
+/// ADR 0235 — parse a type name after `AS` in a CAST.
+fn parse_cast_target(p: &mut Parser) -> SqlResult<DataType> {
+    let name = p.word()?;
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "int" | "integer" | "int4" => DataType::Int32,
+        "bigint" | "int8" => DataType::Int64,
+        "text" => DataType::Text,
+        "boolean" | "bool" => DataType::Boolean,
+        "json" => DataType::Json,
+        _ => return Err(SqlError::Unsupported(format!(
+            "CAST target type {name} is not supported"))),
+    })
+}
+
+/// ADR 0232 + 0234 — resolve a FuncArg against a row.
 fn evaluate_func_arg(arg: &FuncArg, row: &[Value], table: &Table) -> SqlResult<Value> {
     match arg {
         FuncArg::Literal(v) => Ok(v.clone()),
@@ -1623,6 +1747,7 @@ fn evaluate_func_arg(arg: &FuncArg, row: &[Value], table: &Table) -> SqlResult<V
             let pos = locate(table, name)?;
             Ok(row[pos].clone())
         }
+        FuncArg::Nested(fe) => evaluate_func(fe, row, table),
     }
 }
 
@@ -1755,18 +1880,93 @@ pub(crate) fn evaluate_func(fe: &FuncExpr, row: &[Value], table: &Table) -> SqlR
             }
             Ok(Value::String(sv.replace(&fv, &tv)))
         }
+        FuncExpr::Cast { arg, target } => {
+            let v = evaluate_func_arg(arg, row, table)?;
+            cast_value(v, target)
+        }
+        FuncExpr::Now => {
+            let now_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| SqlError::Type("NOW: system clock before epoch".into()))?
+                .as_micros();
+            let us: i64 = now_us.try_into()
+                .map_err(|_| SqlError::Type("NOW: timestamp exceeds i64".into()))?;
+            Ok(Value::TimestampTz(us))
+        }
+        FuncExpr::TimestampAdd { ts, seconds } => {
+            let tv = evaluate_func_arg(ts, row, table)?;
+            let sv = evaluate_func_arg(seconds, row, table)?;
+            if matches!(tv, Value::Null) || matches!(sv, Value::Null) { return Ok(Value::Null); }
+            let us = match tv {
+                Value::TimestampTz(n) => n,
+                other => return Err(SqlError::Type(format!(
+                    "TIMESTAMP_ADD requires a TIMESTAMPTZ target; got {other:?}"))),
+            };
+            let delta_secs = match sv {
+                Value::Int32(n) => i64::from(n),
+                Value::Int64(n) => n,
+                other => return Err(SqlError::Type(format!(
+                    "TIMESTAMP_ADD seconds must be an integer; got {other:?}"))),
+            };
+            let delta_us = delta_secs.checked_mul(1_000_000)
+                .ok_or_else(|| SqlError::Type("TIMESTAMP_ADD: seconds overflow".into()))?;
+            let out = us.checked_add(delta_us)
+                .ok_or_else(|| SqlError::Type("TIMESTAMP_ADD: timestamp overflow".into()))?;
+            Ok(Value::TimestampTz(out))
+        }
+        FuncExpr::TimestampDiff { a, b } => {
+            let av = evaluate_func_arg(a, row, table)?;
+            let bv = evaluate_func_arg(b, row, table)?;
+            if matches!(av, Value::Null) || matches!(bv, Value::Null) { return Ok(Value::Null); }
+            let (ua, ub) = match (&av, &bv) {
+                (Value::TimestampTz(x), Value::TimestampTz(y)) => (*x, *y),
+                _ => return Err(SqlError::Type(
+                    "TIMESTAMP_DIFF requires two TIMESTAMPTZ arguments".into())),
+            };
+            let diff_us = ua.checked_sub(ub)
+                .ok_or_else(|| SqlError::Type("TIMESTAMP_DIFF: overflow".into()))?;
+            Ok(Value::Int64(diff_us / 1_000_000))
+        }
         FuncExpr::Case { arms, else_result } => {
             for arm in arms {
-                let v = evaluate_func_arg(&arm.column, row, table)?;
-                if matches!(v, Value::Null) { continue; }
-                let ord = compare_values_for_check(&v, &arm.literal);
-                let matched = match arm.op {
-                    crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
-                    crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
-                    crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
-                    crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
-                    crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
-                    crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                let matched = match &arm.predicate {
+                    CasePredicate::Compare { column, op, literal } => {
+                        let v = evaluate_func_arg(column, row, table)?;
+                        if matches!(v, Value::Null) { false }
+                        else {
+                            let ord = compare_values_for_check(&v, literal);
+                            match op {
+                                crate::model::CheckOp::Eq => ord == std::cmp::Ordering::Equal,
+                                crate::model::CheckOp::Ne => ord != std::cmp::Ordering::Equal,
+                                crate::model::CheckOp::Lt => ord == std::cmp::Ordering::Less,
+                                crate::model::CheckOp::Le => ord != std::cmp::Ordering::Greater,
+                                crate::model::CheckOp::Gt => ord == std::cmp::Ordering::Greater,
+                                crate::model::CheckOp::Ge => ord != std::cmp::Ordering::Less,
+                            }
+                        }
+                    }
+                    CasePredicate::Between { column, low, high } => {
+                        let v = evaluate_func_arg(column, row, table)?;
+                        if matches!(v, Value::Null)
+                            || matches!(low, Value::Null)
+                            || matches!(high, Value::Null)
+                        { false }
+                        else {
+                            compare_values_for_check(&v, low) != std::cmp::Ordering::Less
+                                && compare_values_for_check(&v, high) != std::cmp::Ordering::Greater
+                        }
+                    }
+                    CasePredicate::NotBetween { column, low, high } => {
+                        let v = evaluate_func_arg(column, row, table)?;
+                        if matches!(v, Value::Null)
+                            || matches!(low, Value::Null)
+                            || matches!(high, Value::Null)
+                        { false }
+                        else {
+                            compare_values_for_check(&v, low) == std::cmp::Ordering::Less
+                                || compare_values_for_check(&v, high) == std::cmp::Ordering::Greater
+                        }
+                    }
                 };
                 if matched { return evaluate_func_arg(&arm.result, row, table); }
             }
@@ -1781,6 +1981,12 @@ pub(crate) fn evaluate_func(fe: &FuncExpr, row: &[Value], table: &Table) -> SqlR
 /// ADR 0232 — parse a FuncArg (column ref or literal) inside
 /// function argument lists.
 fn parse_func_arg(p: &mut Parser) -> SqlResult<FuncArg> {
+    // ADR 0234 — try a nested function first; `consume_func`
+    // returns None without advancing when the next word is
+    // not a function head.
+    if let Some(fe) = consume_func(p)? {
+        return Ok(FuncArg::Nested(Box::new(fe)));
+    }
     if p.next_is_literal() {
         let lit = p.literal()?;
         // Coerce the literal to a Value without a target column.
@@ -1876,28 +2082,65 @@ fn consume_func(p: &mut Parser) -> SqlResult<Option<FuncExpr>> {
         let to = parse_func_arg(p)?;
         p.symbol(')')?;
         Ok(Some(FuncExpr::Replace { s, from, to }))
+    } else if p.consume_word("now") {
+        p.symbol('(')?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Now))
+    } else if p.consume_word("timestamp_add") {
+        p.symbol('(')?;
+        let ts = parse_func_arg(p)?;
+        p.symbol(',')?;
+        let seconds = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::TimestampAdd { ts, seconds }))
+    } else if p.consume_word("timestamp_diff") {
+        p.symbol('(')?;
+        let a = parse_func_arg(p)?;
+        p.symbol(',')?;
+        let b = parse_func_arg(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::TimestampDiff { a, b }))
+    } else if p.consume_word("cast") {
+        p.symbol('(')?;
+        let arg = parse_func_arg(p)?;
+        p.expect("as")?;
+        let target = parse_cast_target(p)?;
+        p.symbol(')')?;
+        Ok(Some(FuncExpr::Cast { arg, target }))
     } else if p.consume_word("case") {
-        // ADR 0233 — CASE WHEN c op lit THEN v [WHEN …] [ELSE v] END.
+        // ADR 0233 + 0238 — WHEN clause admits `col op lit` or
+        // `col [NOT] BETWEEN low AND high`.
         let mut arms = Vec::new();
         while p.consume_word("when") {
             let column = parse_func_arg(p)?;
-            let op = p.word_or_symbol_pair_for_check()?;
-            let literal_lit = p.literal()?;
-            let literal = match literal_lit {
-                Literal::Null => Value::Null,
-                Literal::Bool(b) => Value::Boolean(b),
-                Literal::Text(s) => Value::String(s),
-                Literal::Number(s) => {
-                    if let Ok(n) = s.parse::<i64>() { Value::Int64(n) }
-                    else { return Err(SqlError::Type(format!(
-                        "CASE WHEN literal {s} is not a valid numeric"))); }
+            let predicate = if p.consume_word("between") {
+                let low = coerce_case_literal(p.literal()?)?;
+                if !p.consume_word("and") {
+                    return Err(SqlError::Syntax(
+                        "CASE WHEN … BETWEEN low AND high requires AND".into()));
                 }
-                Literal::Default => return Err(SqlError::Syntax(
-                    "DEFAULT is not a CASE comparator".into())),
+                let high = coerce_case_literal(p.literal()?)?;
+                CasePredicate::Between { column, low, high }
+            } else if p.consume_word("not") {
+                if !p.consume_word("between") {
+                    return Err(SqlError::Unsupported(
+                        "CASE WHEN NOT must be followed by BETWEEN".into()));
+                }
+                let low = coerce_case_literal(p.literal()?)?;
+                if !p.consume_word("and") {
+                    return Err(SqlError::Syntax(
+                        "CASE WHEN … NOT BETWEEN low AND high requires AND".into()));
+                }
+                let high = coerce_case_literal(p.literal()?)?;
+                CasePredicate::NotBetween { column, low, high }
+            } else {
+                let op = p.word_or_symbol_pair_for_check()?;
+                let literal = coerce_case_literal(p.literal()?)?;
+                CasePredicate::Compare { column, op, literal }
             };
             p.expect("then")?;
             let result = parse_func_arg(p)?;
-            arms.push(CaseArm { column, op, literal, result });
+            arms.push(CaseArm { predicate, result });
         }
         if arms.is_empty() {
             return Err(SqlError::Syntax("CASE requires at least one WHEN".into()));
@@ -1954,6 +2197,8 @@ pub(crate) fn parse_having(
         {
             locate(table, c)?;
         }
+        // Expr-form aggregates resolve their columns per-row
+        // via evaluate_func; no catalog check here.
         HavingTerm::Aggregate(spec)
     } else {
         // ADR 0228 — allow `alias.col` in HAVING key references.
@@ -2131,12 +2376,13 @@ fn parse_agg_column(p: &mut Parser) -> SqlResult<String> {
 pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
     let agg = if p.consume_word("count") {
         p.symbol('(')?;
-        // ADR 0216 — COUNT branches: `*` counts rows, `DISTINCT
-        // col` counts distinct non-null values, `col` counts
-        // non-null extractions.
         let spec = if p.consume_symbol('*') { AggSpec::CountStar }
             else if p.consume_word("distinct") {
-                AggSpec::CountDistinct(parse_agg_column(p)?)
+                if let Some(fe) = consume_func(p)? {
+                    AggSpec::CountDistinctExpr(fe)
+                } else { AggSpec::CountDistinct(parse_agg_column(p)?) }
+            } else if let Some(fe) = consume_func(p)? {
+                AggSpec::CountColExpr(fe)
             } else {
                 AggSpec::CountCol(parse_agg_column(p)?)
             };
@@ -2144,24 +2390,32 @@ pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
         spec
     } else if p.consume_word("min") {
         p.symbol('(')?;
-        let column = parse_agg_column(p)?;
+        let spec = if let Some(fe) = consume_func(p)? {
+            AggSpec::MinExpr(fe)
+        } else { AggSpec::Min(parse_agg_column(p)?) };
         p.symbol(')')?;
-        AggSpec::Min(column)
+        spec
     } else if p.consume_word("max") {
         p.symbol('(')?;
-        let column = parse_agg_column(p)?;
+        let spec = if let Some(fe) = consume_func(p)? {
+            AggSpec::MaxExpr(fe)
+        } else { AggSpec::Max(parse_agg_column(p)?) };
         p.symbol(')')?;
-        AggSpec::Max(column)
+        spec
     } else if p.consume_word("sum") {
         p.symbol('(')?;
-        let column = parse_agg_column(p)?;
+        let spec = if let Some(fe) = consume_func(p)? {
+            AggSpec::SumExpr(fe)
+        } else { AggSpec::Sum(parse_agg_column(p)?) };
         p.symbol(')')?;
-        AggSpec::Sum(column)
+        spec
     } else if p.consume_word("avg") {
         p.symbol('(')?;
-        let column = parse_agg_column(p)?;
+        let spec = if let Some(fe) = consume_func(p)? {
+            AggSpec::AvgExpr(fe)
+        } else { AggSpec::Avg(parse_agg_column(p)?) };
         p.symbol(')')?;
-        AggSpec::Avg(column)
+        spec
     } else {
         return Ok(None);
     };
@@ -2268,6 +2522,103 @@ pub(crate) fn evaluate_aggregate(
                 {
                     seen.push(row[position].clone());
                 }
+            }
+            Ok(Value::Int64(seen.len() as i64))
+        }
+        // ADR 0237 — aggregate over scalar expression. Evaluates
+        // the expression per row and feeds the result through
+        // the same MIN / MAX / SUM / AVG / COUNT accumulators.
+        AggSpec::MinExpr(fe) => {
+            let mut best: Option<Value> = None;
+            for row in rows {
+                let v = evaluate_func(fe, row, table)?;
+                if matches!(v, Value::Null) { continue; }
+                best = Some(match best {
+                    None => v,
+                    Some(cur) =>
+                        if compare_values_for_check(&v, &cur) == std::cmp::Ordering::Less
+                            { v } else { cur },
+                });
+            }
+            Ok(best.unwrap_or(Value::Null))
+        }
+        AggSpec::MaxExpr(fe) => {
+            let mut best: Option<Value> = None;
+            for row in rows {
+                let v = evaluate_func(fe, row, table)?;
+                if matches!(v, Value::Null) { continue; }
+                best = Some(match best {
+                    None => v,
+                    Some(cur) =>
+                        if compare_values_for_check(&v, &cur) == std::cmp::Ordering::Greater
+                            { v } else { cur },
+                });
+            }
+            Ok(best.unwrap_or(Value::Null))
+        }
+        AggSpec::SumExpr(fe) => {
+            let mut sum: Option<i128> = None;
+            let mut is_decimal = false;
+            for row in rows {
+                let add = match evaluate_func(fe, row, table)? {
+                    Value::Null => continue,
+                    Value::Int32(n) => i128::from(n),
+                    Value::Int64(n) => i128::from(n),
+                    Value::Decimal(n) => { is_decimal = true; n }
+                    other => return Err(SqlError::Type(format!(
+                        "SUM over expression encountered non-numeric {other:?}"))),
+                };
+                sum = Some(match sum {
+                    None => add,
+                    Some(cur) => cur.checked_add(add)
+                        .ok_or_else(|| SqlError::Type("SUM overflow".into()))?,
+                });
+            }
+            Ok(match sum {
+                None => Value::Null,
+                Some(v) if is_decimal => Value::Decimal(v),
+                Some(v) => Value::Int64(v.try_into()
+                    .map_err(|_| SqlError::Type("SUM result overflow".into()))?),
+            })
+        }
+        AggSpec::AvgExpr(fe) => {
+            let mut sum: i128 = 0;
+            let mut count: i128 = 0;
+            let mut is_decimal = false;
+            for row in rows {
+                let add = match evaluate_func(fe, row, table)? {
+                    Value::Null => continue,
+                    Value::Int32(n) => i128::from(n),
+                    Value::Int64(n) => i128::from(n),
+                    Value::Decimal(n) => { is_decimal = true; n }
+                    other => return Err(SqlError::Type(format!(
+                        "AVG over expression encountered non-numeric {other:?}"))),
+                };
+                sum = sum.checked_add(add)
+                    .ok_or_else(|| SqlError::Type("AVG overflow".into()))?;
+                count += 1;
+            }
+            if count == 0 { return Ok(Value::Null); }
+            let divided = divide_round_half_even(sum, count)?;
+            Ok(if is_decimal { Value::Decimal(divided) }
+                else { Value::Int64(divided.try_into()
+                    .map_err(|_| SqlError::Type("AVG result overflow".into()))?) })
+        }
+        AggSpec::CountColExpr(fe) => {
+            let mut n = 0i64;
+            for row in rows {
+                if !matches!(evaluate_func(fe, row, table)?, Value::Null) { n += 1; }
+            }
+            Ok(Value::Int64(n))
+        }
+        AggSpec::CountDistinctExpr(fe) => {
+            let mut seen: Vec<Value> = Vec::new();
+            for row in rows {
+                let v = evaluate_func(fe, row, table)?;
+                if matches!(v, Value::Null) { continue; }
+                if !seen.iter().any(|existing|
+                    compare_values_for_check(existing, &v) == std::cmp::Ordering::Equal)
+                { seen.push(v); }
             }
             Ok(Value::Int64(seen.len() as i64))
         }
