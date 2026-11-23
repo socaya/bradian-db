@@ -117,7 +117,10 @@ fn fully_qualified_names_are_enforced_and_unknown_objects_fail() {
         "CREATE TABLE invoices (id BIGINT NOT NULL, PRIMARY KEY(id));",
         "DROP TABLE billing.public.invoices;",
         "BEGIN;",
-        "SELECT * FROM billing.public.invoices ORDER BY id",
+        // ADR 0212 made ORDER BY supported on the base engine,
+        // so the earlier canary moved to a shape that is still
+        // genuinely rejected: unqualified table name.
+        "SELECT id FROM invoices ORDER BY id",
     ] {
         assert!(db.execute(sql).is_err(), "unsupported query accepted: {sql}");
     }

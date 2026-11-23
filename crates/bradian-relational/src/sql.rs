@@ -203,14 +203,14 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
             } else {
                 out.push(Token::Arrow);
             }
-        } else if ch.is_ascii_digit() || (ch == '-' && !expressions) {
+        } else if ch.is_ascii_digit() {
+            // ADR 0239 — numeric literals never include a
+            // leading sign at the lexer level; `-5` emerges as
+            // `Symbol('-'), Number("5")` which `Parser::literal`
+            // collapses into `Literal::Number("-5")` while
+            // still letting the arithmetic parser see
+            // `col - 5` as subtraction.
             let mut number = String::new();
-            if ch == '-' {
-                number.push(chars.next().unwrap());
-                if !chars.peek().is_some_and(char::is_ascii_digit) {
-                    return Err(SqlError::Syntax("minus must prefix a numeric literal".into()));
-                }
-            }
             while chars.peek().is_some_and(char::is_ascii_digit) {
                 number.push(chars.next().unwrap());
             }
@@ -225,7 +225,7 @@ fn lex(source: &str, expressions: bool) -> SqlResult<Vec<Token>> {
                 }
             }
             out.push(Token::Number(number));
-        } else if "(),.=;*<>:".contains(ch) || (expressions && "+-/".contains(ch)) {
+        } else if "(),.=;*<>:+-/%".contains(ch) {
             // ADR 0197 — `:` admitted for JSON slice indices
             // (`col -> 0:3`).  It is otherwise never consumed
             // by SQL grammar at this parser level; named-
@@ -1604,6 +1604,8 @@ pub(crate) enum FuncExpr {
     Case { arms: Vec<CaseArm>, else_result: Option<FuncArg> },
     /// ADR 0235 — `CAST(arg AS type)` conversion.
     Cast { arg: FuncArg, target: DataType },
+    /// ADR 0239 — binary arithmetic. `op` is one of `+ - * / %`.
+    BinOp { op: char, lhs: Box<FuncArg>, rhs: Box<FuncArg> },
     /// ADR 0236 — current wall-clock timestamp in microseconds
     /// since the Unix epoch, computed per-row (cheap).
     Now,
@@ -1631,6 +1633,14 @@ impl FuncExpr {
             FuncExpr::Now => "now".into(),
             FuncExpr::TimestampAdd { .. } => "timestamp_add".into(),
             FuncExpr::TimestampDiff { .. } => "timestamp_diff".into(),
+            FuncExpr::BinOp { op, .. } => match op {
+                '+' => "add".into(),
+                '-' => "sub".into(),
+                '*' => "mul".into(),
+                '/' => "div".into(),
+                '%' => "mod".into(),
+                _ => "expr".into(),
+            },
         }
     }
 }
@@ -1672,6 +1682,26 @@ fn coerce_case_literal(lit: Literal) -> SqlResult<Value> {
         Literal::Default => return Err(SqlError::Syntax(
             "DEFAULT is not a CASE comparator".into())),
     })
+}
+
+/// ADR 0239 — coerce two numeric values into an `(i128, i128,
+/// is_decimal)` triple for arithmetic. Integer operands widen
+/// into `i128`; Decimal propagates the fixed-scale flag.  Non-
+/// numeric operands reject with `SqlError::Type`.
+fn numeric_pair(a: &Value, b: &Value) -> SqlResult<(i128, i128, bool)> {
+    let (ai, ad) = numeric_as_i128(a)?;
+    let (bi, bd) = numeric_as_i128(b)?;
+    Ok((ai, bi, ad || bd))
+}
+
+fn numeric_as_i128(v: &Value) -> SqlResult<(i128, bool)> {
+    match v {
+        Value::Int32(n) => Ok((i128::from(*n), false)),
+        Value::Int64(n) => Ok((i128::from(*n), false)),
+        Value::Decimal(n) => Ok((*n, true)),
+        other => Err(SqlError::Type(format!(
+            "arithmetic requires numeric operands; got {other:?}"))),
+    }
 }
 
 /// ADR 0235 — convert a `Value` to a target `DataType`.
@@ -1884,6 +1914,29 @@ pub(crate) fn evaluate_func(fe: &FuncExpr, row: &[Value], table: &Table) -> SqlR
             let v = evaluate_func_arg(arg, row, table)?;
             cast_value(v, target)
         }
+        FuncExpr::BinOp { op, lhs, rhs } => {
+            let lv = evaluate_func_arg(lhs, row, table)?;
+            let rv = evaluate_func_arg(rhs, row, table)?;
+            if matches!(lv, Value::Null) || matches!(rv, Value::Null) { return Ok(Value::Null); }
+            let (li, ri, is_decimal) = numeric_pair(&lv, &rv)?;
+            let out = match op {
+                '+' => li.checked_add(ri).ok_or_else(|| SqlError::Type("arithmetic overflow".into()))?,
+                '-' => li.checked_sub(ri).ok_or_else(|| SqlError::Type("arithmetic overflow".into()))?,
+                '*' => li.checked_mul(ri).ok_or_else(|| SqlError::Type("arithmetic overflow".into()))?,
+                '/' => {
+                    if ri == 0 { return Err(SqlError::Type("division by zero".into())); }
+                    li.checked_div(ri).ok_or_else(|| SqlError::Type("arithmetic overflow".into()))?
+                }
+                '%' => {
+                    if ri == 0 { return Err(SqlError::Type("modulo by zero".into())); }
+                    li.checked_rem(ri).ok_or_else(|| SqlError::Type("arithmetic overflow".into()))?
+                }
+                _ => unreachable!("binop operator validated at parse"),
+            };
+            Ok(if is_decimal { Value::Decimal(out) }
+                else { Value::Int64(out.try_into()
+                    .map_err(|_| SqlError::Type("arithmetic result overflow".into()))?) })
+        }
         FuncExpr::Now => {
             let now_us = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1980,7 +2033,7 @@ pub(crate) fn evaluate_func(fe: &FuncExpr, row: &[Value], table: &Table) -> SqlR
 
 /// ADR 0232 — parse a FuncArg (column ref or literal) inside
 /// function argument lists.
-fn parse_func_arg(p: &mut Parser) -> SqlResult<FuncArg> {
+fn parse_func_primary(p: &mut Parser) -> SqlResult<FuncArg> {
     // ADR 0234 — try a nested function first; `consume_func`
     // returns None without advancing when the next word is
     // not a function head.
@@ -1989,8 +2042,6 @@ fn parse_func_arg(p: &mut Parser) -> SqlResult<FuncArg> {
     }
     if p.next_is_literal() {
         let lit = p.literal()?;
-        // Coerce the literal to a Value without a target column.
-        // For text/number/bool/null we have a direct mapping.
         return Ok(FuncArg::Literal(match lit {
             Literal::Null => Value::Null,
             Literal::Bool(b) => Value::Boolean(b),
@@ -2005,12 +2056,43 @@ fn parse_func_arg(p: &mut Parser) -> SqlResult<FuncArg> {
                 "DEFAULT is not a function argument".into())),
         }));
     }
-    // Column reference (optionally dotted for joined queries).
     let first = p.word()?;
     if p.consume_symbol('.') {
         let second = p.word()?;
         Ok(FuncArg::ColumnRef(format!("{first}.{second}")))
     } else { Ok(FuncArg::ColumnRef(first)) }
+}
+
+/// ADR 0239 — multiplicative precedence tier (`*`, `/`, `%`).
+fn parse_func_multiplicative(p: &mut Parser) -> SqlResult<FuncArg> {
+    let mut lhs = parse_func_primary(p)?;
+    loop {
+        let op = if p.consume_symbol('*') { '*' }
+            else if p.consume_symbol('/') { '/' }
+            else if p.consume_symbol('%') { '%' }
+            else { break };
+        let rhs = parse_func_primary(p)?;
+        lhs = FuncArg::Nested(Box::new(FuncExpr::BinOp {
+            op, lhs: Box::new(lhs), rhs: Box::new(rhs),
+        }));
+    }
+    Ok(lhs)
+}
+
+/// ADR 0239 — additive precedence tier (`+`, `-`), left-
+/// associative over the multiplicative tier.
+fn parse_func_arg(p: &mut Parser) -> SqlResult<FuncArg> {
+    let mut lhs = parse_func_multiplicative(p)?;
+    loop {
+        let op = if p.consume_symbol('+') { '+' }
+            else if p.consume_symbol('-') { '-' }
+            else { break };
+        let rhs = parse_func_multiplicative(p)?;
+        lhs = FuncArg::Nested(Box::new(FuncExpr::BinOp {
+            op, lhs: Box::new(lhs), rhs: Box::new(rhs),
+        }));
+    }
+    Ok(lhs)
 }
 
 /// ADR 0232 — recognize a scalar function head. Returns `Some`
@@ -2160,8 +2242,70 @@ fn consume_func(p: &mut Parser) -> SqlResult<Option<FuncExpr>> {
 /// list; GROUP BY enforcement runs at planning time.
 pub(crate) fn parse_select_item(p: &mut Parser) -> SqlResult<SelectItem> {
     if let Some(spec) = consume_aggregate(p)? { return Ok(SelectItem::Agg(spec)); }
-    if let Some(fe) = consume_func(p)? { return Ok(SelectItem::Func(fe)); }
-    Ok(SelectItem::Column(parse_projection(p)?))
+    if let Some(fe) = consume_func(p)? {
+        let full = parse_arith_tail(p, FuncArg::Nested(Box::new(fe)))?;
+        return Ok(func_arg_as_select_item(full));
+    }
+    // ADR 0239 — bare literal projection: `SELECT 1 + 2 FROM t`.
+    if p.next_is_literal() {
+        let primary = parse_func_primary(p)?;
+        let full = parse_arith_tail(p, primary)?;
+        return Ok(func_arg_as_select_item(full));
+    }
+    let projection = parse_projection(p)?;
+    if peek_is_arith_op(p) {
+        let base = match &projection {
+            Projection::Column(name) => FuncArg::ColumnRef(name.clone()),
+            Projection::JsonPath { .. } => return Err(SqlError::Unsupported(
+                "arithmetic on JSON-path projections is a future extension".into())),
+        };
+        let full = parse_arith_tail(p, base)?;
+        return Ok(func_arg_as_select_item(full));
+    }
+    Ok(SelectItem::Column(projection))
+}
+
+fn peek_is_arith_op(p: &Parser) -> bool {
+    matches!(p.peek(), Some(Token::Symbol('+')) | Some(Token::Symbol('-'))
+        | Some(Token::Symbol('*')) | Some(Token::Symbol('/'))
+        | Some(Token::Symbol('%')))
+}
+
+/// ADR 0239 — given a parsed left-hand primary, consume the
+/// rest of the arithmetic expression at either precedence tier.
+fn parse_arith_tail(p: &mut Parser, lhs: FuncArg) -> SqlResult<FuncArg> {
+    let mut lhs = {
+        let mut cur = lhs;
+        loop {
+            let op = if p.consume_symbol('*') { '*' }
+                else if p.consume_symbol('/') { '/' }
+                else if p.consume_symbol('%') { '%' }
+                else { break };
+            let rhs = parse_func_primary(p)?;
+            cur = FuncArg::Nested(Box::new(FuncExpr::BinOp {
+                op, lhs: Box::new(cur), rhs: Box::new(rhs),
+            }));
+        }
+        cur
+    };
+    loop {
+        let op = if p.consume_symbol('+') { '+' }
+            else if p.consume_symbol('-') { '-' }
+            else { break };
+        let rhs = parse_func_multiplicative(p)?;
+        lhs = FuncArg::Nested(Box::new(FuncExpr::BinOp {
+            op, lhs: Box::new(lhs), rhs: Box::new(rhs),
+        }));
+    }
+    Ok(lhs)
+}
+
+fn func_arg_as_select_item(arg: FuncArg) -> SelectItem {
+    match arg {
+        FuncArg::ColumnRef(name) => SelectItem::Column(Projection::Column(name)),
+        FuncArg::Literal(v) => SelectItem::Func(FuncExpr::Coalesce(vec![FuncArg::Literal(v)])),
+        FuncArg::Nested(fe) => SelectItem::Func(*fe),
+    }
 }
 
 /// ADR 0218 — HAVING clause: a single comparison over a group
@@ -2374,46 +2518,54 @@ fn parse_agg_column(p: &mut Parser) -> SqlResult<String> {
 /// consuming the tokens; returns `None` without advancing the
 /// parser if the next token is not an aggregate keyword.
 pub(crate) fn consume_aggregate(p: &mut Parser) -> SqlResult<Option<AggSpec>> {
+    // ADR 0239 — classify a parsed aggregate arg into either
+    // the backward-compat column-name form or the expression
+    // form. Called after `parse_func_arg` so arithmetic / nested
+    // function args naturally fall into the Expr variant.
+    let classify = |arg: FuncArg,
+                    column: fn(String) -> AggSpec,
+                    expr: fn(FuncExpr) -> AggSpec| -> SqlResult<AggSpec> {
+        Ok(match arg {
+            FuncArg::ColumnRef(name) => column(name),
+            FuncArg::Nested(fe) => expr(*fe),
+            FuncArg::Literal(_) => return Err(SqlError::Unsupported(
+                "aggregate argument cannot be a bare literal".into())),
+        })
+    };
     let agg = if p.consume_word("count") {
         p.symbol('(')?;
         let spec = if p.consume_symbol('*') { AggSpec::CountStar }
             else if p.consume_word("distinct") {
-                if let Some(fe) = consume_func(p)? {
-                    AggSpec::CountDistinctExpr(fe)
-                } else { AggSpec::CountDistinct(parse_agg_column(p)?) }
-            } else if let Some(fe) = consume_func(p)? {
-                AggSpec::CountColExpr(fe)
+                let arg = parse_func_arg(p)?;
+                classify(arg, AggSpec::CountDistinct, AggSpec::CountDistinctExpr)?
             } else {
-                AggSpec::CountCol(parse_agg_column(p)?)
+                let arg = parse_func_arg(p)?;
+                classify(arg, AggSpec::CountCol, AggSpec::CountColExpr)?
             };
         p.symbol(')')?;
         spec
     } else if p.consume_word("min") {
         p.symbol('(')?;
-        let spec = if let Some(fe) = consume_func(p)? {
-            AggSpec::MinExpr(fe)
-        } else { AggSpec::Min(parse_agg_column(p)?) };
+        let arg = parse_func_arg(p)?;
+        let spec = classify(arg, AggSpec::Min, AggSpec::MinExpr)?;
         p.symbol(')')?;
         spec
     } else if p.consume_word("max") {
         p.symbol('(')?;
-        let spec = if let Some(fe) = consume_func(p)? {
-            AggSpec::MaxExpr(fe)
-        } else { AggSpec::Max(parse_agg_column(p)?) };
+        let arg = parse_func_arg(p)?;
+        let spec = classify(arg, AggSpec::Max, AggSpec::MaxExpr)?;
         p.symbol(')')?;
         spec
     } else if p.consume_word("sum") {
         p.symbol('(')?;
-        let spec = if let Some(fe) = consume_func(p)? {
-            AggSpec::SumExpr(fe)
-        } else { AggSpec::Sum(parse_agg_column(p)?) };
+        let arg = parse_func_arg(p)?;
+        let spec = classify(arg, AggSpec::Sum, AggSpec::SumExpr)?;
         p.symbol(')')?;
         spec
     } else if p.consume_word("avg") {
         p.symbol('(')?;
-        let spec = if let Some(fe) = consume_func(p)? {
-            AggSpec::AvgExpr(fe)
-        } else { AggSpec::Avg(parse_agg_column(p)?) };
+        let arg = parse_func_arg(p)?;
+        let spec = classify(arg, AggSpec::Avg, AggSpec::AvgExpr)?;
         p.symbol(')')?;
         spec
     } else {
