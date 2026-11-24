@@ -1459,6 +1459,92 @@ fn format_in_list(values: &[Value]) -> SqlResult<String> {
 /// top-level UNION; `Some(parts)` otherwise. Each part is a
 /// tuple of `(preceded_by_union_all, sql_fragment)`. The first
 /// part's boolean is always `false` (no preceding separator).
+/// ADR 0275 — set operator at a top-level split point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetOp {
+    /// `UNION` — merge + distinct.
+    Union,
+    /// `UNION ALL` — merge keeping duplicates.
+    UnionAll,
+    /// `INTERSECT` — keep rows present in all arms (distinct).
+    Intersect,
+    /// `EXCEPT` — keep rows in the first arm not in subsequent arms (distinct).
+    Except,
+}
+
+/// ADR 0275 — split a SQL string at top-level set operators.
+/// Returns `(op_before, arm)` pairs where `op_before` is the
+/// operator that led to this arm (ignored for the first arm).
+pub(crate) fn split_top_level_set_ops(sql: &str) -> Option<Vec<(SetOp, String)>> {
+    let bytes = sql.as_bytes();
+    let word_boundary = |b: u8| !b.is_ascii_alphanumeric() && b != b'_';
+    let mut separators: Vec<(SetOp, usize, usize)> = Vec::new();
+    let mut i = 0;
+    let mut in_quote = false;
+    let mut paren_depth = 0u32;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_quote {
+            if b == b'\'' { in_quote = false; }
+            i += 1; continue;
+        }
+        match b {
+            b'\'' => { in_quote = true; i += 1; continue; }
+            b'(' => { paren_depth += 1; i += 1; continue; }
+            b')' => { paren_depth = paren_depth.saturating_sub(1); i += 1; continue; }
+            _ => {}
+        }
+        if paren_depth == 0 && (i == 0 || word_boundary(bytes[i - 1])) {
+            let detect = |kw: &[u8]| -> Option<usize> {
+                if i + kw.len() <= bytes.len()
+                    && bytes[i..i + kw.len()].eq_ignore_ascii_case(kw)
+                    && (i + kw.len() == bytes.len() || word_boundary(bytes[i + kw.len()]))
+                { Some(i + kw.len()) } else { None }
+            };
+            if let Some(after_union) = detect(b"UNION") {
+                // Optional ALL.
+                let mut after = after_union;
+                while after < bytes.len() && (bytes[after] == b' ' || bytes[after] == b'\t' || bytes[after] == b'\n') {
+                    after += 1;
+                }
+                let op = if after + 3 <= bytes.len()
+                    && bytes[after..after + 3].eq_ignore_ascii_case(b"ALL")
+                    && (after + 3 == bytes.len() || word_boundary(bytes[after + 3]))
+                {
+                    let end = after + 3;
+                    separators.push((SetOp::UnionAll, i, end));
+                    i = end;
+                    continue;
+                } else { SetOp::Union };
+                separators.push((op, i, after_union));
+                i = after_union;
+                continue;
+            }
+            if let Some(after) = detect(b"INTERSECT") {
+                separators.push((SetOp::Intersect, i, after));
+                i = after;
+                continue;
+            }
+            if let Some(after) = detect(b"EXCEPT") {
+                separators.push((SetOp::Except, i, after));
+                i = after;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if separators.is_empty() { return None; }
+    let mut arms: Vec<(SetOp, String)> = Vec::with_capacity(separators.len() + 1);
+    let mut start = 0;
+    arms.push((SetOp::Union, sql[start..separators[0].1].trim().to_string()));
+    for (idx, (op, _begin, end)) in separators.iter().enumerate() {
+        start = *end;
+        let next_begin = separators.get(idx + 1).map(|(_, b, _)| *b).unwrap_or(sql.len());
+        arms.push((*op, sql[start..next_begin].trim().to_string()));
+    }
+    Some(arms)
+}
+
 pub(crate) fn split_top_level_unions(sql: &str) -> Option<Vec<(bool, String)>> {
     let bytes = sql.as_bytes();
     let mut separators: Vec<(bool, usize, usize)> = Vec::new();
@@ -4942,6 +5028,17 @@ impl SqlEngine {
         // a subquery inside a UNION arm still gets expanded.
         let sql = self.resolve_in_subqueries(sql, control)?;
         let sql = sql.as_str();
+        // ADR 0275 — INTERSECT / EXCEPT at the top level. Only
+        // dispatch to the extended handler when a non-UNION
+        // separator is present, so UNION preserves its exact
+        // ADR 0225 behavior.
+        if let Some(parts) = split_top_level_set_ops(sql) {
+            let has_non_union = parts.iter().skip(1)
+                .any(|(op, _)| !matches!(op, SetOp::Union | SetOp::UnionAll));
+            if has_non_union && parts.len() >= 2 {
+                return self.execute_set_ops(&parts, control, budget, policy, authz);
+            }
+        }
         // ADR 0225 — UNION / UNION ALL at the top level. Each
         // arm runs through `execute_impl_single` with its own
         // short-lived mutex guard; the results are combined and
@@ -4983,6 +5080,83 @@ impl SqlEngine {
             }
         }
         self.execute_impl_single(sql, control, budget, policy, authz)
+    }
+
+    /// ADR 0275 — execute a top-level set-operator pipeline
+    /// (UNION / UNION ALL / INTERSECT / EXCEPT). Left-associative:
+    /// result = arm0; for each subsequent arm, apply the
+    /// operator against the running accumulator.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_set_ops(
+        &self,
+        parts: &[(SetOp, String)],
+        control: &ScanControl,
+        mut budget: Option<&mut crate::query_budget::BudgetTracker>,
+        policy: Option<&crate::access_policy::TableAccessPolicy>,
+        authz: Option<&bradian_core::AuthorizationContext>,
+    ) -> SqlResult<SqlResultSet> {
+        let mut iter = parts.iter();
+        let (_, first_sql) = iter.next().expect("at least one arm");
+        let first = self.execute_impl_single(
+            first_sql, control, budget.as_deref_mut(), policy, authz)?;
+        let (columns, mut rows) = match first {
+            SqlResultSet::Rows { columns, rows } => (columns, rows),
+            _ => return Err(SqlError::Unsupported(
+                "set operator requires every arm to be a SELECT".into())),
+        };
+        let column_count = columns.len();
+        for (op, arm_sql) in iter {
+            let next = self.execute_impl_single(
+                arm_sql, control, budget.as_deref_mut(), policy, authz)?;
+            let next_rows = match next {
+                SqlResultSet::Rows { columns: nc, rows } => {
+                    if nc.len() != column_count {
+                        return Err(SqlError::Unsupported(
+                            "set-operator arms must have the same column count".into()));
+                    }
+                    rows
+                }
+                _ => return Err(SqlError::Unsupported(
+                    "set operator requires every arm to be a SELECT".into())),
+            };
+            rows = match op {
+                SetOp::UnionAll => {
+                    let mut out = rows;
+                    out.extend(next_rows);
+                    out
+                }
+                SetOp::Union => {
+                    let mut out = rows;
+                    out.extend(next_rows);
+                    let out = dedup_rows(out);
+                    let mut out = out;
+                    sort_distinct_output(&mut out);
+                    out
+                }
+                SetOp::Intersect => {
+                    // O(n*m) membership — acceptable for the
+                    // MVP; a future slice can sort+merge or
+                    // add Hash to Value.
+                    let right = next_rows;
+                    let mut filtered: Vec<Vec<Value>> = rows.into_iter()
+                        .filter(|r| right.iter().any(|q| q == r))
+                        .collect();
+                    filtered = dedup_rows(filtered);
+                    sort_distinct_output(&mut filtered);
+                    filtered
+                }
+                SetOp::Except => {
+                    let right = next_rows;
+                    let mut filtered: Vec<Vec<Value>> = rows.into_iter()
+                        .filter(|r| !right.iter().any(|q| q == r))
+                        .collect();
+                    filtered = dedup_rows(filtered);
+                    sort_distinct_output(&mut filtered);
+                    filtered
+                }
+            };
+        }
+        Ok(SqlResultSet::Rows { columns, rows })
     }
 
     /// ADR 0226 — execute a simple INNER JOIN between two tables.
