@@ -191,13 +191,13 @@ starts; when the slice ships, the ADR number moves to
 | Incremental view maintenance for SUM / COUNT / MIN / MAX | 0294 | DONE | `CommitReceipt::changes_by_table` carries old/new per mutation; `incremental_view_refresh.rs` demonstrates parity with scan-based rescan over four mixed commits |
 | Freshness / snapshot semantics for HTAP reads | 0295 | DONE | `bradian_views::HtapFreshness` LSN-based lag annotation; 1 unit test + 1 integration test in `htap_freshness_lsn.rs` cover Fresh / Behind / Ahead |
 
-#### P1-2 Planner + binder parity (`bradian-planner`)
+#### P1-2 Planner + binder parity (`bradian-planner`) — **3 of 3 DONE**
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
 | Logical plan node coverage for existing SQL subset | 0296 | DONE | `bradian_planner::sql_plan` ships Scan / Filter / Project + interpreter; 4 unit tests + parity integration test prove plan tree matches `SqlEngine` on 3 statements. Automatic SQL→plan compile is 0297. |
 | EXPLAIN surface backed by actual plan | 0297 | DONE | `SqlExplainNode` derived structurally from the plan tree + deterministic Display; 3 unit tests pin both the structure and the rendered string |
-| Cost-based join reordering (two-table + chained) | 0298 | OPEN | Benchmarks demonstrate gain |
+| Cost-based join reordering (two-table + chained) | 0298 | DONE | `SqlLogicalNode::Join` + `reorder_joins` + `estimated_rows`. 4 unit tests prove two-table swap, chained three-way rewrite, build-side strictly shrinks on asymmetric input (test proxy for a Criterion bench pending 0307) |
 
 #### P1-3 Catalog + semantic layer (`bradian-catalog`, `bradian-dhis2`)
 

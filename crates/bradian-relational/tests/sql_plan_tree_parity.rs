@@ -11,7 +11,7 @@
 //! ADR 0296 Decision).
 
 use bradian_core::{Column as CoreColumn, LogicalType, Schema as CoreSchema, Value as CoreValue};
-use bradian_planner::sql_plan::{
+use bradian_planner::sql_plan::{SqlInputs, 
     execute, FilterPredicate, SqlLogicalNode, SqlRowSet,
 };
 use bradian_relational::sql::{SqlEngine, SqlResultSet};
@@ -94,7 +94,7 @@ fn plan_tree_matches_sql_engine_for_narrow_subset() {
         source: "t.public.items".into(),
         column_names: vec!["id".into(), "qty".into(), "label".into()],
     };
-    let plan_out = execute(&node, SqlRowSet { schema: &schema, rows: &full }).unwrap();
+    let plan_out = execute(&node, &SqlInputs::single("t.public.items", SqlRowSet { schema: &schema, rows: &full })).unwrap();
     assert_eq!(sort_by_id(plan_out.rows.clone()),
                sort_by_id(direct_rows(&db,
                    "SELECT id, qty, label FROM t.public.items")));
@@ -115,7 +115,7 @@ fn plan_tree_matches_sql_engine_for_narrow_subset() {
         }),
         keep: vec!["id".into(), "qty".into()],
     };
-    let plan_out = execute(&node, SqlRowSet { schema: &schema, rows: &full }).unwrap();
+    let plan_out = execute(&node, &SqlInputs::single("t.public.items", SqlRowSet { schema: &schema, rows: &full })).unwrap();
     // Direct path: SqlEngine does not have ORDER BY on this
     // subset, so compare as a sorted set.
     let direct = direct_rows(&db,
@@ -136,7 +136,7 @@ fn plan_tree_matches_sql_engine_for_narrow_subset() {
         }),
         keep: vec!["id".into()],
     };
-    let plan_out = execute(&node, SqlRowSet { schema: &schema, rows: &full }).unwrap();
+    let plan_out = execute(&node, &SqlInputs::single("t.public.items", SqlRowSet { schema: &schema, rows: &full })).unwrap();
     let direct = direct_rows(&db,
         "SELECT id FROM t.public.items WHERE qty > 15");
     assert_eq!(sort_by_id(plan_out.rows), sort_by_id(direct));
