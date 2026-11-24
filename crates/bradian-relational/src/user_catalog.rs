@@ -150,7 +150,7 @@ impl UserCatalog {
     pub fn set_active(&mut self, name: &str, active: bool) -> UserCatalogResult<()> {
         let name = validate_name(name)?;
         let record = self.users.get_mut(&name)
-            .ok_or_else(|| UserCatalogError::NotFound(name))?;
+            .ok_or(UserCatalogError::NotFound(name))?;
         record.active = active;
         Ok(())
     }
@@ -190,4 +190,40 @@ impl UserCatalog {
     /// How many users are registered.
     pub fn len(&self) -> usize { self.users.len() }
     pub fn is_empty(&self) -> bool { self.users.is_empty() }
+
+    /// ADR 0248 — insert a user with an already-hashed PHC
+    /// string. Journal replay uses this so re-hashing is not
+    /// paid per boot. Rejects invalid names, duplicates, and
+    /// empty hashes. Does NOT verify the hash shape — that is
+    /// the caller's (or `verify_phc`'s) responsibility.
+    pub(crate) fn insert_hashed(
+        &mut self, name: &str, password_hash: &str, active: bool,
+    ) -> UserCatalogResult<()> {
+        let name = validate_name(name)?;
+        if password_hash.is_empty() {
+            return Err(UserCatalogError::Hashing("empty hash".into()));
+        }
+        if self.users.contains_key(&name) {
+            return Err(UserCatalogError::Duplicate(name));
+        }
+        self.users.insert(name.clone(), UserRecord {
+            name, password_hash: password_hash.to_owned(), active,
+        });
+        Ok(())
+    }
+
+    /// ADR 0248 — replace the stored hash for a user without
+    /// re-hashing. Rejects unknown names and empty hashes.
+    pub(crate) fn replace_hash(&mut self, name: &str, password_hash: &str)
+        -> UserCatalogResult<()>
+    {
+        let name = validate_name(name)?;
+        if password_hash.is_empty() {
+            return Err(UserCatalogError::Hashing("empty hash".into()));
+        }
+        let record = self.users.get_mut(&name)
+            .ok_or(UserCatalogError::NotFound(name))?;
+        record.password_hash = password_hash.to_owned();
+        Ok(())
+    }
 }

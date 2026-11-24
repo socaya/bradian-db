@@ -2,7 +2,7 @@
 
 use bradian_relational::domain_sql::DomainSqlEngine;
 use bradian_relational::mvcc_sql::MvccSqlEngine;
-use bradian_relational::sql::{SqlEngine, SqlError, SqlResultSet};
+use bradian_relational::sql::{SqlEngine, SqlResultSet};
 use bradian_relational::typed_table::Value;
 use tempfile::tempdir;
 

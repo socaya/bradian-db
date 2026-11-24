@@ -27,6 +27,8 @@ pub mod persistent_catalog;
 /// ADR 0247 — in-memory user catalog with argon2id password
 /// hashing. P0-4 foundation; no SQL grammar or persistence yet.
 pub mod user_catalog;
+/// ADR 0248 — WAL-backed, replay-validated UserCatalog journal.
+pub mod persistent_user_catalog;
 pub mod sql;
 pub mod transaction_domain;
 pub mod domain_sql;
