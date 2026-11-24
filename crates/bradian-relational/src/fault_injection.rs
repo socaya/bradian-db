@@ -59,7 +59,7 @@ impl FaultPolicy for FailAfterNWrites {
         match left {
             Ok(1) => {
                 self.fired.store(true, Ordering::SeqCst);
-                Err(io::Error::new(io::ErrorKind::Other, "simulated write fault"))
+                Err(io::Error::other("simulated write fault"))
             }
             _ => Ok(()),
         }

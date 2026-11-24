@@ -7121,11 +7121,8 @@ fn extract_select_table_targets(sql: &str) -> Vec<Vec<String>> {
         if p.peek().is_none() { return targets; }
         p.advance();
     }
-    loop {
-        match p.name() {
-            Ok(n) => targets.push(n),
-            Err(_) => break,
-        }
+    while let Ok(n) = p.name() {
+        targets.push(n);
         let _ = p.consume_word("as");
         if let Some(Token::Word(w)) = p.peek() {
             let w_low = w.to_ascii_lowercase();
@@ -7197,11 +7194,9 @@ fn classify_single_table_statement(sql: &str)
             let parts = p.name().ok()?;
             return Some((Capability::Ddl, ObjectCapability::Alter, parts));
         }
-    } else if p.consume_word("drop") {
-        if p.consume_word("table") {
-            let parts = p.name().ok()?;
-            return Some((Capability::Ddl, ObjectCapability::Drop, parts));
-        }
+    } else if p.consume_word("drop") && p.consume_word("table") {
+        let parts = p.name().ok()?;
+        return Some((Capability::Ddl, ObjectCapability::Drop, parts));
     }
     None
 }

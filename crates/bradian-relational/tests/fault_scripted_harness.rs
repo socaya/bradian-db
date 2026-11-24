@@ -154,7 +154,7 @@ fn scripted_workload_byte_flip() {
         let target = scenario.path().join(&target_name);
         let len = file_len(&target).unwrap();
         if len < 4 { continue; }
-        let offset = (seed as u64) % len;
+        let offset = seed % len;
         flip_byte_at(&target, offset).unwrap();
         assert_reopen_clean(scenario.path(), &acked);
     }

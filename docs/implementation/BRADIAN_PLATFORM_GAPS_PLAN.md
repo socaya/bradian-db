@@ -142,7 +142,7 @@ starts; when the slice ships, the ADR number moves to
 | INNER / LEFT JOIN (first slice) | 0273 | DONE | verification |
 | `WITH` CTEs (non-recursive) | 0274 | DONE | 7 tests, narrow scope |
 | UNION / INTERSECT / EXCEPT | 0275 | DONE | 5 tests |
-| Full documented isolation qualification (ANSI serializable schedules) | 0276 | DEFERRED | Infrastructure — design note in ADR 0271-0274-0276-0277 |
+| In-tree ANSI isolation schedule corpus | 0276 | DONE | 8 schedule tests in `tests/isolation_schedules.rs` + reference doc `BRADIAN_ISOLATION_SCHEDULES.md`. External SQL-conformance suite (0277) remains infra |
 | External SQL-92/99/2016 compliance suite | 0277 | DEFERRED | Infrastructure — needs reference suite integration |
 
 #### P0-4 Enterprise access — **12 of 14 DONE**
