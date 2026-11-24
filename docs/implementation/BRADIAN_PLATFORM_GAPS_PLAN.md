@@ -237,7 +237,7 @@ starts; when the slice ships, the ADR number moves to
 | Studio UI backing real SQL sessions | 0314 | SKELETON | `bradian_serving::sql_session::SessionRegistry` with open/get/close; 2 unit tests. HTTP routes + idle expiry + SQL-statement binding are follow-ups. |
 | DHIS2 integration deployment path | 0315 | SKELETON | `bradian_dhis2::deployment::DeploymentManifest` + `load_manifest_json` with shape validation; 2 unit tests. Parse only — no HTTP, no apply, no upgrade/rollback, no systemd/docker. |
 | Wire protocol for relational sessions + reference driver | 0316 | SKELETON | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
-| PITR / incremental archive / offsite backup | 0317 | OPEN | `bradian-relational` + `bradian-storage` |
+| PITR / incremental archive / offsite backup | 0317 | SKELETON | `incremental_archive::{ArchiveBuilder, ArchiveChunk, ArchiveManifest}` with monotonic LSN + CRC32; 3 unit tests. No WAL reading, no offsite transport, no encryption, no restore. |
 | Schema history compaction with reference proofs | 0318 | OPEN | `bradian-relational` |
 | External reproducibility + production certification | 0319 | OPEN | Gate 9 package |
 

@@ -61,6 +61,8 @@ pub mod mutable_page;
 pub mod page_buffer;
 pub mod unique_check;
 pub mod pitr;
+/// ADR 0317 — PITR incremental archive skeleton.
+pub mod incremental_archive;
 pub mod collation;
 pub mod audit_log;
 pub mod audit_chain;
