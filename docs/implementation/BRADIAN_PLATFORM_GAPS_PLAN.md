@@ -224,28 +224,33 @@ starts; when the slice ships, the ADR number moves to
 | DHIS2 synthetic fact generator | 0306 | DONE | `WorkloadSpec::{small,medium,dhis2_like}` named presets + `generate_from_spec`; 2 unit tests cover determinism and distinct-fingerprint |
 | Row-store write / read benchmarks | 0307 | DONE | Criterion bench `row_store_rw.rs` + published numbers at `docs/bench/row_store_rw-2026-11-24.md` (put 4.76 ms, get 74 ns on Apple M4 Pro) |
 
-### 3.3 P2 — Gate 4+ blockers — **12 of 12 SKELETONS shipped**
+### 3.3 P2 — Gate 4+ blockers
 
-Every P2 slice carries a typed public surface + honest-scope ADR +
-invariant tests. **None** of these slices claims a production
-implementation; each is a stable staging point for future Gate 3+
-depth work. See individual rows for the honest scope limits.
+ADRs 0308–0319 shipped typed public surfaces + invariant tests
+during the 2026-11-24 pass but DO NOT yet constitute real
+implementations. The surfaces remain in the tree for continuity,
+but every slice below is OPEN — each needs a follow-up that
+promotes the surface to a real implementation.
+
+Per feedback 2026-11-24: skeletons are not an acceptable shipping
+status. The next pass narrows each slice to something implementable
+end-to-end rather than shipping a stub of the full feature.
 
 
 | Slice | ADR | Status | Area |
 |-------|-----|--------|------|
-| Mutable physical page storage (WAL-protected dirty pages, buffer manager) | 0308 | SKELETON | `page_buffer` module above `mutable_page` allocator (ADR 0096). In-memory backing; LSN-fence + flush + checkpoint invariants exercised by 3 unit tests. Disk backing + WAL protection + LRU replacement remain follow-ups. |
-| Consensus-backed replication | 0309 | SKELETON | `consensus` module exposes `ConsensusGroup` trait + single-replica `InMemoryConsensusGroup` stub; 2 unit tests. Not safe for multi-node use. |
-| Distributed commit + global snapshot | 0310 | SKELETON | `distributed_commit` module with `DistributedCommit` trait + `InMemoryTwoPhaseCommit` stub; 3 unit tests. Single-process only. |
-| Shard placement + fencing | 0311 | SKELETON | `shard_placement::PlacementMap` with per-shard monotone fence tokens; 2 unit tests. In-memory only; no durable manifest, no reconfig protocol. |
-| Rebalancing | 0312 | SKELETON | `rebalancing::RebalancePlan::{diff,apply_to}`; 2 unit tests. Pure planning + in-memory apply; no data movement, no catch-up, no handoff. |
-| Federation (site autonomy) | 0313 | SKELETON | `federation::FederationRegistry` + `TrustLevel` + `ConflictResolution` resolver; 2 unit tests. In-memory only; no RPC, no clock ordering. |
-| Studio UI backing real SQL sessions | 0314 | SKELETON | `bradian_serving::sql_session::SessionRegistry` with open/get/close; 2 unit tests. HTTP routes + idle expiry + SQL-statement binding are follow-ups. |
-| DHIS2 integration deployment path | 0315 | SKELETON | `bradian_dhis2::deployment::DeploymentManifest` + `load_manifest_json` with shape validation; 2 unit tests. Parse only — no HTTP, no apply, no upgrade/rollback, no systemd/docker. |
-| Wire protocol for relational sessions + reference driver | 0316 | SKELETON | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
-| PITR / incremental archive / offsite backup | 0317 | SKELETON | `incremental_archive::{ArchiveBuilder, ArchiveChunk, ArchiveManifest}` with monotonic LSN + CRC32; 3 unit tests. No WAL reading, no offsite transport, no encryption, no restore. |
-| Schema history compaction with reference proofs | 0318 | SKELETON | `schema_history_compaction::{plan_compaction, verify_proof}`; 2 unit tests. Pure planning + proof; no journal rewrite, no on-disk coupling. |
-| External reproducibility + production certification | 0319 | SKELETON | `bradian_core::certification::{CertManifest, validate_shape}`; 2 unit tests. Shape validation + JSON round-trip; no reproducible-build check, no supply-chain audit, no signature algorithm. |
+| Mutable physical page storage (WAL-protected dirty pages, buffer manager) | 0308 | OPEN | `page_buffer` module above `mutable_page` allocator (ADR 0096). In-memory backing; LSN-fence + flush + checkpoint invariants exercised by 3 unit tests. Disk backing + WAL protection + LRU replacement remain follow-ups. |
+| Consensus-backed replication | 0309 | OPEN | `consensus` module exposes `ConsensusGroup` trait + single-replica `InMemoryConsensusGroup` stub; 2 unit tests. Not safe for multi-node use. |
+| Distributed commit + global snapshot | 0310 | OPEN | `distributed_commit` module with `DistributedCommit` trait + `InMemoryTwoPhaseCommit` stub; 3 unit tests. Single-process only. |
+| Shard placement + fencing | 0311 | OPEN | `shard_placement::PlacementMap` with per-shard monotone fence tokens; 2 unit tests. In-memory only; no durable manifest, no reconfig protocol. |
+| Rebalancing | 0312 | OPEN | `rebalancing::RebalancePlan::{diff,apply_to}`; 2 unit tests. Pure planning + in-memory apply; no data movement, no catch-up, no handoff. |
+| Federation (site autonomy) | 0313 | OPEN | `federation::FederationRegistry` + `TrustLevel` + `ConflictResolution` resolver; 2 unit tests. In-memory only; no RPC, no clock ordering. |
+| Studio UI backing real SQL sessions | 0314 | OPEN | `bradian_serving::sql_session::SessionRegistry` with open/get/close; 2 unit tests. HTTP routes + idle expiry + SQL-statement binding are follow-ups. |
+| DHIS2 integration deployment path | 0315 | OPEN | `bradian_dhis2::deployment::DeploymentManifest` + `load_manifest_json` with shape validation; 2 unit tests. Parse only — no HTTP, no apply, no upgrade/rollback, no systemd/docker. |
+| Wire protocol for relational sessions + reference driver | 0316 | OPEN | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
+| PITR / incremental archive / offsite backup | 0317 | DONE | Byte-offset WAL archive: `write_from_wal` / `verify` / `apply_to_wal`; chunked + fsync'd; corruption + misalignment fail closed; 6 unit tests including real RowStore round-trip (full + incremental → fresh dir → reopen → every row + `last_lsn` match). Offsite transport + encryption are follow-ups. |
+| Schema history compaction with reference proofs | 0318 | OPEN | `schema_history_compaction::{plan_compaction, verify_proof}`; 2 unit tests. Pure planning + proof; no journal rewrite, no on-disk coupling. |
+| External reproducibility + production certification | 0319 | OPEN | `bradian_core::certification::{CertManifest, validate_shape}`; 2 unit tests. Shape validation + JSON round-trip; no reproducible-build check, no supply-chain audit, no signature algorithm. |
 
 ### 3.4 Remaining Gate 1 qualification tasks (from master roadmap)
 
