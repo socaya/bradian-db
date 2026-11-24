@@ -4329,6 +4329,27 @@ impl SqlEngine {
         Ok(())
     }
 
+    /// ADR 0250 — verify credentials, derive a principal, and
+    /// run `callback` against an `AuthenticatedSession`. Every
+    /// `execute` on that session goes through `execute_as` so
+    /// capability checks fire before the statement runs.
+    ///
+    /// Until ADR 0251 wires a GRANT/role model, authenticated
+    /// users receive full administrator capabilities. The next
+    /// slice narrows this.
+    pub fn with_authenticated_session<R>(
+        &self, user: &str, password: &str,
+        callback: impl FnOnce(&AuthenticatedSession<'_>) -> SqlResult<R>,
+    ) -> SqlResult<R> {
+        self.users.verify_password(user, password)?;
+        let snapshot = self.users.snapshot();
+        let record = snapshot.get(user)
+            .ok_or_else(|| SqlError::Resolution(format!("user {user} not found after verify")))?;
+        let authz = bradian_core::AuthorizationContext::administrator(record.name.clone());
+        let session = AuthenticatedSession { engine: self, authz };
+        callback(&session)
+    }
+
     /// ADR 0249 — snapshot the current user catalog. Useful
     /// for tests and diagnostics; does not reveal plaintext.
     pub fn user_catalog_snapshot(&self) -> crate::user_catalog::UserCatalog {
@@ -6016,6 +6037,34 @@ impl SqlEngine {
     }
 }
 
+
+/// ADR 0250 — a SqlEngine wrapper bound to a principal.
+/// Every `execute` applies the principal's AuthorizationContext
+/// before dispatching through the underlying engine. The
+/// principal is immutable for the lifetime of the session —
+/// callers wanting a different identity must open a new
+/// session via `SqlEngine::with_authenticated_session`.
+pub struct AuthenticatedSession<'a> {
+    engine: &'a SqlEngine,
+    authz: bradian_core::AuthorizationContext,
+}
+
+impl<'a> AuthenticatedSession<'a> {
+    /// The verified principal for this session.
+    pub fn principal(&self) -> &str { self.authz.principal_id() }
+
+    /// The capability bundle the principal may exercise.
+    pub fn capabilities(&self) -> &[bradian_core::Capability] {
+        self.authz.capabilities()
+    }
+
+    /// Run a SQL statement through the principal's authz
+    /// context. A missing capability fast-fails as
+    /// `SqlError::Authz` before the parser runs.
+    pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
+        self.engine.execute_as(&self.authz, sql)
+    }
+}
 
 /// A scoped SQL transaction session for one fully qualified native table.
 /// BEGIN creates a consistent G13 snapshot; DML is staged until COMMIT.
