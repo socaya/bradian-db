@@ -37,8 +37,31 @@ pub enum LocalAccessError {
     /// users traverse / replace path components.
     #[error("ancestor path {path:?} is untrusted (mode {mode:o}); a malicious user with write access to an ancestor can replace the private root")]
     UntrustedAncestor { path: std::path::PathBuf, mode: u32 },
+    /// ADR 0321 — the directory has an extended POSIX ACL
+    /// (via `system.posix_acl_access` xattr on Linux) which
+    /// may grant access beyond the owner. Under
+    /// `AclPolicy::StrictReject` this is rejected because
+    /// the base mode-0o700 check alone no longer suffices.
+    #[error("root {path:?} has an extended POSIX ACL; strict policy rejects")]
+    ExtendedAcl { path: std::path::PathBuf },
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+/// ADR 0321 — POSIX ACL inspection policy. Controls whether
+/// `ensure_private_root_with_acl` rejects a directory that
+/// carries an extended POSIX ACL beyond the base mode bits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AclPolicy {
+    /// Pre-ADR-0321 behaviour: skip ACL inspection. Callers
+    /// that don't care about ACLs keep the mode-only check.
+    #[default]
+    Ignore,
+    /// Reject if the root carries a `system.posix_acl_access`
+    /// xattr (Linux). Non-Linux platforms fall through to
+    /// Ignore since the check is OS-specific — documented
+    /// honestly, not silently pretended.
+    StrictReject,
 }
 
 /// ADR 0109 — parent-path trust policy. Controls how
@@ -95,6 +118,60 @@ pub fn ensure_private_root_owned_by(path: &Path, policy: PrivateRootPolicy, expe
     { unix::ensure_private_root_owned_by(path, policy, expected_uid) }
     #[cfg(not(unix))]
     { Err(LocalAccessError::Unsupported) }
+}
+
+/// ADR 0321 — enforce the private-root invariants AND
+/// reject if the root carries an extended POSIX ACL
+/// (Linux: `system.posix_acl_access` xattr). Under
+/// `AclPolicy::Ignore` this degrades to `ensure_private_root`.
+/// On non-Linux platforms the check is a no-op regardless
+/// of policy — the OS-specific ACL surface is documented
+/// in the Platform Gaps Plan rather than silently skipped.
+pub fn ensure_private_root_with_acl(
+    path: &Path,
+    policy: PrivateRootPolicy,
+    acl_policy: AclPolicy,
+) -> Result<(), LocalAccessError> {
+    ensure_private_root(path, policy)?;
+    check_posix_acl(path, acl_policy)
+}
+
+/// ADR 0321 — standalone ACL inspection helper so callers
+/// can audit without re-running the private-root check.
+#[cfg_attr(not(all(unix, target_os = "linux")), allow(unused_variables))]
+pub fn check_posix_acl(path: &Path, policy: AclPolicy) -> Result<(), LocalAccessError> {
+    if matches!(policy, AclPolicy::Ignore) { return Ok(()); }
+    #[cfg(all(unix, target_os = "linux"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| LocalAccessError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput, "path contains NUL byte")))?;
+        let attr = CString::new("system.posix_acl_access").unwrap();
+        // SAFETY: libc::getxattr with a non-null path, non-null
+        // name, zero-size buffer and null value pointer is a
+        // POSIX syscall that only returns metadata about
+        // whether the attribute exists. No preconditions on
+        // alignment or lifetime beyond the CString pointers
+        // we hold for the call.
+        #[allow(unsafe_code)]
+        let rc = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(), attr.as_ptr(),
+                std::ptr::null_mut(), 0,
+            )
+        };
+        if rc >= 0 {
+            return Err(LocalAccessError::ExtendedAcl {
+                path: path.to_path_buf(),
+            });
+        }
+        // getxattr returns -1 on ENODATA (no ACL present) OR
+        // ENOTSUP (xattrs unsupported on this filesystem).
+        // Both are acceptable — treat as "no extended ACL".
+    }
+    Ok(())
 }
 
 /// ADR 0109 — enforce the private-root invariants AND walk
