@@ -3264,9 +3264,14 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
         return Ok(SelectWhere::JsonPathPredicates(tree));
     }
     let _column_name = p.word()?;
+    // ADR 0244 — a bare column followed by `IS` dispatches to
+    // the tree parser so `WHERE scalar_col IS [NOT] NULL` and
+    // `IS [NOT] DISTINCT FROM lit` work on non-JSON columns.
+    // Any other token (= / AND / COMMA) stays on the PK path.
     let is_json_path = matches!(p.peek(),
         Some(Token::Arrow) | Some(Token::ArrowText)
-        | Some(Token::Hash) | Some(Token::HashText));
+        | Some(Token::Hash) | Some(Token::HashText))
+        || p.next_is_word("is");
     if is_json_path {
         p.restore_pos(saved);
         let tree = parse_where_expr(p, table)?;
@@ -3354,10 +3359,12 @@ fn parse_where_primary(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
 fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicate> {
     let column_name = p.word()?;
     let projection = parse_projection_tail(p, column_name)?;
-    locate(table, projection.source_column())?;
+    let col_idx = locate(table, projection.source_column())?;
+    let is_bare = matches!(&projection, Projection::Column(_));
     let as_text = match &projection {
-        Projection::Column(_) => return Err(SqlError::Unsupported(
-            "WHERE predicate requires a JSON path chain on the column".into())),
+        // ADR 0244 — bare columns only reach this point via the
+        // `is` dispatcher; other matchers reject them below.
+        Projection::Column(_) => false,
         Projection::JsonPath { as_text, .. } => *as_text,
     };
     let matcher = if p.consume_word("in") {
@@ -3379,13 +3386,25 @@ fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicat
         } else if p.consume_word("distinct") {
             p.expect("from")?;
             let literal = p.literal()?;
-            let value = coerce_where_literal(&literal, as_text)?;
+            // ADR 0244 — scalar columns coerce via their declared
+            // type; JSON paths use as_text-aware JSON coercion.
+            let value = if is_bare {
+                coerce(&literal, &table.columns[col_idx])?
+            } else {
+                coerce_where_literal(&literal, as_text)?
+            };
             if negated { JsonMatcher::IsNotDistinctFrom { literal: value } }
             else { JsonMatcher::IsDistinctFrom { literal: value } }
         } else {
             return Err(SqlError::Unsupported(
                 "IS supports [NOT] NULL and [NOT] DISTINCT FROM".into()));
         }
+    } else if is_bare {
+        // ADR 0244 — other matchers on a bare column are still
+        // unsupported (LIKE / IN / BETWEEN / scalar compare on
+        // non-JSON columns remain future slices).
+        return Err(SqlError::Unsupported(
+            "bare-column WHERE supports IS [NOT] NULL and IS [NOT] DISTINCT FROM; other predicates require a JSON path chain".into()));
     } else if p.consume_word("not") {
         if p.consume_word("in") {
             JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
