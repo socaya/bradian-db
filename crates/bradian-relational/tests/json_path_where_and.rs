@@ -110,13 +110,15 @@ fn and_on_delete_applies_to_both() {
 }
 
 #[test]
-fn and_followed_by_pk_rejected() {
+fn json_path_and_bare_column_eq_mix_works() {
+    // ADR 0246 — mixing a JSON-path predicate with a bare-column
+    // `=` predicate is valid and returns rows matching both.
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
-    let err = db.execute(
+    let got = ids(db.execute(
         "SELECT id FROM t.public.docs WHERE body ->> 'status' = 'open' AND id = 1"
-    ).unwrap_err();
-    assert!(matches!(err, SqlError::Unsupported(_)));
+    ).unwrap());
+    assert_eq!(got, vec![1]);
 }
 
 #[test]

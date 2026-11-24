@@ -3276,12 +3276,20 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
         Some(Token::Symbol('<')) | Some(Token::Symbol('>')));
     let next_is_eq_on_non_pk =
         matches!(p.peek(), Some(Token::Symbol('='))) && !is_pk_column;
+    // ADR 0246 — bare-column IN / NOT / LIKE / ILIKE / BETWEEN
+    // also dispatch to the tree parser.
+    let next_is_matcher_keyword = p.next_is_word("in")
+        || p.next_is_word("not")
+        || p.next_is_word("like")
+        || p.next_is_word("ilike")
+        || p.next_is_word("between");
     let is_json_path = matches!(p.peek(),
         Some(Token::Arrow) | Some(Token::ArrowText)
         | Some(Token::Hash) | Some(Token::HashText))
         || p.next_is_word("is")
         || next_is_lt_or_gt
-        || next_is_eq_on_non_pk;
+        || next_is_eq_on_non_pk
+        || next_is_matcher_keyword;
     if is_json_path {
         p.restore_pos(saved);
         let tree = parse_where_expr(p, table)?;
@@ -3377,31 +3385,34 @@ fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicat
         Projection::Column(_) => false,
         Projection::JsonPath { as_text, .. } => *as_text,
     };
-    // ADR 0245 — bare-column IN / LIKE / ILIKE / BETWEEN /
-    // NOT-<those> remain unsupported. Keep them rejected
-    // explicitly before the matcher dispatch tries them.
-    if is_bare {
-        let next = p.peek();
-        let blocked = matches!(next, Some(Token::Word(w))
-            if ["in","like","ilike","between","not"].iter()
-                .any(|kw| w.eq_ignore_ascii_case(kw)));
-        if blocked {
-            return Err(SqlError::Unsupported(
-                "bare-column WHERE supports =, !=, <, <=, >, >=, IS [NOT] NULL, and IS [NOT] DISTINCT FROM; LIKE / IN / BETWEEN still require a JSON path chain".into()));
-        }
-    }
+    // ADR 0246 — bare-column RHS uses `coerce(lit, column)`
+    // across every matcher; JSON-path RHS keeps as_text-aware
+    // coercion. LIKE / ILIKE also require a text bare column.
+    let column_ref = if is_bare { Some(&table.columns[col_idx]) } else { None };
+    let check_text_column = |keyword: &'static str| -> SqlResult<()> {
+        if let Some(col) = column_ref {
+            match col.data_type {
+                DataType::Text | DataType::Varchar { .. } => Ok(()),
+                _ => Err(SqlError::Type(format!(
+                    "{keyword} requires a text column; {} is {:?}",
+                    col.name, col.data_type))),
+            }
+        } else { Ok(()) }
+    };
     let matcher = if p.consume_word("in") {
-        JsonMatcher::In { literals: parse_literal_list(p, as_text)? }
+        JsonMatcher::In { literals: parse_literal_list(p, column_ref, as_text)? }
     } else if p.consume_word("like") {
+        check_text_column("LIKE")?;
         let pattern = parse_like_pattern(p)?;
         let escape = parse_optional_escape(p)?;
         JsonMatcher::Like { pattern, escape }
     } else if p.consume_word("ilike") {
+        check_text_column("ILIKE")?;
         let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
         let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
         JsonMatcher::Ilike { pattern_lower: pattern, escape }
     } else if p.consume_word("between") {
-        parse_between_tail(p, as_text, /*negated=*/false)?
+        parse_between_tail(p, column_ref, as_text, /*negated=*/false)?
     } else if p.consume_word("is") {
         let negated = p.consume_word("not");
         if p.consume_word("null") {
@@ -3409,13 +3420,7 @@ fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicat
         } else if p.consume_word("distinct") {
             p.expect("from")?;
             let literal = p.literal()?;
-            // ADR 0244 — scalar columns coerce via their declared
-            // type; JSON paths use as_text-aware JSON coercion.
-            let value = if is_bare {
-                coerce(&literal, &table.columns[col_idx])?
-            } else {
-                coerce_where_literal(&literal, as_text)?
-            };
+            let value = coerce_rhs_literal(&literal, column_ref, as_text)?;
             if negated { JsonMatcher::IsNotDistinctFrom { literal: value } }
             else { JsonMatcher::IsDistinctFrom { literal: value } }
         } else {
@@ -3424,32 +3429,27 @@ fn parse_json_predicate(p: &mut Parser, table: &Table) -> SqlResult<JsonPredicat
         }
     } else if p.consume_word("not") {
         if p.consume_word("in") {
-            JsonMatcher::NotIn { literals: parse_literal_list(p, as_text)? }
+            JsonMatcher::NotIn { literals: parse_literal_list(p, column_ref, as_text)? }
         } else if p.consume_word("between") {
-            parse_between_tail(p, as_text, /*negated=*/true)?
+            parse_between_tail(p, column_ref, as_text, /*negated=*/true)?
         } else if p.consume_word("like") {
+            check_text_column("NOT LIKE")?;
             let pattern = parse_like_pattern(p)?;
             let escape = parse_optional_escape(p)?;
             JsonMatcher::NotLike { pattern, escape }
         } else if p.consume_word("ilike") {
+            check_text_column("NOT ILIKE")?;
             let pattern = parse_like_pattern(p)?.to_ascii_lowercase();
             let escape = parse_optional_escape(p)?.map(|c| c.to_ascii_lowercase());
             JsonMatcher::NotIlike { pattern_lower: pattern, escape }
         } else {
             return Err(SqlError::Unsupported(
-                "NOT must be followed by IN, BETWEEN, LIKE, or ILIKE after a JSON-path predicate (or placed as a boolean prefix)".into()));
+                "NOT must be followed by IN, BETWEEN, LIKE, or ILIKE after a predicate (or placed as a boolean prefix)".into()));
         }
     } else {
         let op = p.word_or_symbol_pair_for_check()?;
         let literal = p.literal()?;
-        // ADR 0245 — bare columns coerce the RHS via the
-        // declared column type; JSON paths use the existing
-        // as_text-aware JSON coercion.
-        let value = if is_bare {
-            coerce(&literal, &table.columns[col_idx])?
-        } else {
-            coerce_where_literal(&literal, as_text)?
-        };
+        let value = coerce_rhs_literal(&literal, column_ref, as_text)?;
         JsonMatcher::Compare { op, literal: value }
     };
     Ok(JsonPredicate { projection, matcher })
@@ -3545,20 +3545,36 @@ fn like_source(value: &Value) -> Option<String> {
     }
 }
 
+/// ADR 0246 — coerce a WHERE-RHS literal through the correct
+/// path. Bare non-JSON columns coerce via the declared column
+/// type (`coerce(lit, column)`); JSON paths keep the existing
+/// as_text-aware JSON coercion.
+fn coerce_rhs_literal(
+    lit: &Literal, column: Option<&Column>, as_text: bool,
+) -> SqlResult<Value> {
+    match column {
+        Some(col) => coerce(lit, col),
+        None => coerce_where_literal(lit, as_text),
+    }
+}
+
 /// ADR 0208 — parse `low AND high` as the RHS of a BETWEEN /
 /// NOT BETWEEN predicate. The `AND` here is a grammar keyword,
 /// not a DNF separator.  Inclusive on both ends. `low > high`
 /// is rejected at parse (empty range would be surprising to
-/// readers).
-fn parse_between_tail(p: &mut Parser, as_text: bool, negated: bool) -> SqlResult<JsonMatcher> {
+/// readers). ADR 0246 — accepts a bare-column handle so
+/// low/high coerce via the column's declared type.
+fn parse_between_tail(
+    p: &mut Parser, column: Option<&Column>, as_text: bool, negated: bool,
+) -> SqlResult<JsonMatcher> {
     let low_lit = p.literal()?;
-    let low = coerce_where_literal(&low_lit, as_text)?;
+    let low = coerce_rhs_literal(&low_lit, column, as_text)?;
     if !p.consume_word("and") {
         return Err(SqlError::Syntax(
             "BETWEEN requires `AND` between low and high".into()));
     }
     let high_lit = p.literal()?;
-    let high = coerce_where_literal(&high_lit, as_text)?;
+    let high = coerce_rhs_literal(&high_lit, column, as_text)?;
     if !matches!(low, Value::Null) && !matches!(high, Value::Null)
         && compare_values_for_check(&low, &high) == std::cmp::Ordering::Greater
     {
@@ -3573,15 +3589,17 @@ fn parse_between_tail(p: &mut Parser, as_text: bool, negated: bool) -> SqlResult
 }
 
 /// ADR 0206 — parse `( lit, lit, … )` as the RHS of an IN /
-/// NOT IN predicate. Coerces each literal with the same
-/// `as_text` convention as a scalar JSON-path predicate. At
-/// least one value is required.
-fn parse_literal_list(p: &mut Parser, as_text: bool) -> SqlResult<Vec<Value>> {
+/// NOT IN predicate. ADR 0246 — accepts a bare-column handle
+/// so each literal coerces via the column's declared type.
+/// At least one value is required.
+fn parse_literal_list(
+    p: &mut Parser, column: Option<&Column>, as_text: bool,
+) -> SqlResult<Vec<Value>> {
     p.symbol('(')?;
     let mut values = Vec::new();
     loop {
         let literal = p.literal()?;
-        values.push(coerce_where_literal(&literal, as_text)?);
+        values.push(coerce_rhs_literal(&literal, column, as_text)?);
         if !p.consume_symbol(',') { break; }
     }
     p.symbol(')')?;
