@@ -187,7 +187,7 @@ starts; when the slice ships, the ADR number moves to
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
 | Vectorized SELECT path alongside the row path | 0292 | DONE | Parity test `vectorized_scan_parity.rs` — RowStore scan → `RecordBatchBuilder` → `parallel_filter_aggregate` matches scalar oracle; `bradian-runtime` is a dev-dep until 0293 promotes it |
-| Columnar segment write path from commit | 0293 | OPEN | Column projection after COMMIT in a shared-domain SQL commit |
+| Columnar segment write path from commit | 0293 | DONE | `MultiTableTransaction::commit_with_receipt` returns per-table upsert post-images; 3 tests in `commit_column_projection.rs` demonstrate RecordBatch projection parity |
 | Incremental view maintenance for SUM / COUNT / MIN / MAX | 0294 | OPEN | Retraction + refresh on commit |
 | Freshness / snapshot semantics for HTAP reads | 0295 | OPEN | Explicit lag annotation |
 

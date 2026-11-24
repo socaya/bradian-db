@@ -354,23 +354,49 @@ impl MultiTableTransaction<'_> {
     /// A global LSN conflict prevents stale-snapshot commits; a failed WAL
     /// write poisons the domain until ordinary crash recovery.
     pub fn commit(self) -> DomainResult<u64> {
-        if self.changes.is_empty() { return Ok(self.base_lsn); }
+        Ok(self.commit_with_receipt()?.lsn)
+    }
+
+    /// ADR 0293 — same durability contract as `commit`, but
+    /// return a `CommitReceipt` describing the per-table
+    /// post-image rows that were just persisted. Enables the
+    /// columnar side to project committed rows synchronously
+    /// without re-scanning the store.
+    pub fn commit_with_receipt(self) -> DomainResult<CommitReceipt> {
+        if self.changes.is_empty() {
+            return Ok(CommitReceipt { lsn: self.base_lsn, upserts_by_table: BTreeMap::new() });
+        }
         let mut ops = Vec::with_capacity(self.changes.len());
+        let mut upserts_by_table: BTreeMap<TableId, Vec<Vec<Value>>> = BTreeMap::new();
         for (key, value) in self.changes {
+            let table_id = row_table_id(&key)?;
             match value {
                 Some(row) => {
-                    let table_id = row_table_id(&key)?;
                     let table = self.definitions.get(&table_id).ok_or(DomainError::UnknownTable(table_id.0))?;
                     let bytes = encode_row(&table.table, &row)?;
+                    upserts_by_table.entry(table_id).or_default().push(row);
                     ops.push(RowMutation::Put { key, value: bytes });
                 }
                 None => ops.push(RowMutation::Delete { key }),
             }
         }
         match self.domain.storage.commit_batch(Some(self.base_lsn), &ops) {
-            Ok(lsn) => Ok(lsn),
+            Ok(lsn) => Ok(CommitReceipt { lsn, upserts_by_table }),
             Err(StoreError::Conflict { .. }) => Err(DomainError::Conflict),
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// ADR 0293 — per-commit receipt enabling synchronous
+/// column projection after a shared-domain commit.
+///
+/// Honest scope: this slice emits UPSERT post-image rows
+/// only. Delete-side tombstones for the columnar / view
+/// consumers are deferred to ADR 0294 (incremental view
+/// maintenance).
+#[derive(Debug, Clone)]
+pub struct CommitReceipt {
+    pub lsn: u64,
+    pub upserts_by_table: BTreeMap<TableId, Vec<Vec<Value>>>,
 }
