@@ -37,3 +37,7 @@ harness = false
 [[bench]]
 name = "bace_sweep"
 harness = false
+
+[[bench]]
+name = "row_store_rw"
+harness = false

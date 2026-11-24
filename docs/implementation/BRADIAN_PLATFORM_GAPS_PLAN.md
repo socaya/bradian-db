@@ -216,13 +216,13 @@ starts; when the slice ships, the ADR number moves to
 | Arrow IPC adapter | 0304 | DONE (Bradian-native) | `ipc::write_ipc/read_ipc` with `BRCH\x01` magic + bincode body; 4 unit tests cover empty/typed round-trip, magic-mismatch rejection, width-mismatch rejection. Apache Arrow wire compatibility remains a feature-gated follow-up |
 | SQL CDC adapter (Postgres logical replication, pull-only) | 0305 | DONE | `SqlCdcCredentials::try_new` refuses readonly=false; `CursorStore` with atomic rename; `BoundedCdcPuller` loads/persists LSN + does not regress; 4 unit tests. Live Postgres transport remains a feature-gated follow-up |
 
-#### P1-5 Benchmarks (`bradian-benchmark`)
+#### P1-5 Benchmarks (`bradian-benchmark`) — **2 of 2 DONE (+ Criterion scaffold)**
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
 | Criterion harness skeleton | — | PARTIAL | Already scaffolded |
 | DHIS2 synthetic fact generator | 0306 | DONE | `WorkloadSpec::{small,medium,dhis2_like}` named presets + `generate_from_spec`; 2 unit tests cover determinism and distinct-fingerprint |
-| Row-store write / read benchmarks | 0307 | OPEN | Publishes numbers in `docs/` |
+| Row-store write / read benchmarks | 0307 | DONE | Criterion bench `row_store_rw.rs` + published numbers at `docs/bench/row_store_rw-2026-11-24.md` (put 4.76 ms, get 74 ns on Apple M4 Pro) |
 
 ### 3.3 P2 — Gate 4+ blockers
 
