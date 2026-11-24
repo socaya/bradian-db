@@ -23,6 +23,8 @@ tracing      = { workspace = true }
 parking_lot  = { workspace = true }
 ahash        = { workspace = true }
 blake3       = { workspace = true }
+# ADR 0309 — CRC32 over each durable consensus log record.
+crc32fast    = { workspace = true }
 
 [dev-dependencies]
 tempfile     = { workspace = true }

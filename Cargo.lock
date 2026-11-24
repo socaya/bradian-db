@@ -414,6 +414,7 @@ dependencies = [
  "bradian-runtime",
  "bradian-security",
  "bradian-storage",
+ "crc32fast",
  "parking_lot",
  "serde",
  "serde_json",
