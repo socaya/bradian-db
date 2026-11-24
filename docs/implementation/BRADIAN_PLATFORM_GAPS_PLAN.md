@@ -210,7 +210,7 @@ starts; when the slice ships, the ADR number moves to
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
-| Canonical change-log schema | 0301 | OPEN | Idempotent ingest key + replay |
+| Canonical change-log schema | 0301 | DONE | Opt-in `with_idempotent_dedup`; `Outcome::DuplicateChangeId` + `IngestReport::duplicates`; 4 unit tests cover single replay, full batch replay, mixed batch, and the dedup-disabled default. In-memory index; durable survival of restart is Gate 3+ |
 | CSV adapter | 0302 | OPEN | Streaming; type inference; errors surfaced |
 | JSON Lines adapter | 0303 | OPEN | Same |
 | Arrow IPC adapter | 0304 | OPEN | Batch round-trip |

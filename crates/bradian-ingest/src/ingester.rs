@@ -1,7 +1,13 @@
 //! Idempotent ingestion: apply canonical changes to a `Partition` with version fencing and
 //! quarantine for invalid payloads.
+//!
+//! ADR 0301 — the ingester can be configured for explicit
+//! change-ID dedup via `with_idempotent_dedup`. The index
+//! is in-memory and process-local; a durable index so
+//! idempotency survives restart is a Gate 3+ follow-up.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use bradian_core::{BradianError, BradianResult, Value};
 use bradian_storage::Partition;
@@ -16,6 +22,11 @@ pub struct IngestReport {
     pub dropped_stale: u64,
     pub deletes: u64,
     pub quarantined: u64,
+    /// ADR 0301 — changes refused because their `change_id`
+    /// was already applied through this ingester. Always
+    /// zero unless `with_idempotent_dedup` is enabled.
+    #[serde(default)]
+    pub duplicates: u64,
 }
 
 #[derive(Debug)]
@@ -30,6 +41,10 @@ pub struct Ingester {
     /// fails the whole batch closed with [`BradianError::invalid_value`] when `n` is exceeded,
     /// so the caller can retry smaller without partial-application ambiguity.
     max_batch_size: Option<usize>,
+    /// ADR 0301 — opt-in in-memory change-ID dedup. `None`
+    /// preserves pre-0301 behaviour; `Some` activates
+    /// idempotent replay for the lifetime of this process.
+    seen_change_ids: Option<Mutex<HashSet<String>>>,
 }
 
 impl Ingester {
@@ -43,6 +58,7 @@ impl Ingester {
             quarantine,
             primary_key,
             max_batch_size: None,
+            seen_change_ids: None,
         }
     }
 
@@ -54,7 +70,29 @@ impl Ingester {
         self
     }
 
+    /// ADR 0301 — enable in-memory change-ID dedup. A
+    /// change whose `change_id` was already applied
+    /// through this ingester is refused with
+    /// `Outcome::DuplicateChangeId` BEFORE any partition
+    /// or quarantine side effect.
+    pub fn with_idempotent_dedup(mut self) -> Self {
+        self.seen_change_ids = Some(Mutex::new(HashSet::new()));
+        self
+    }
+
+    /// Returns `true` if the change_id is already known
+    /// (dedup disabled always returns false). Records the
+    /// id if it is new.
+    fn record_or_duplicate(&self, change_id: &str) -> bool {
+        let Some(set) = &self.seen_change_ids else { return false; };
+        let mut g = set.lock().expect("ingester dedup mutex poisoned");
+        !g.insert(change_id.to_owned())
+    }
+
     pub fn apply(&self, change: &Change) -> BradianResult<Outcome> {
+        if self.record_or_duplicate(&change.change_id) {
+            return Ok(Outcome::DuplicateChangeId);
+        }
         match change.operation {
             Operation::Upsert => {
                 let schema = self.partition.schema();
@@ -93,6 +131,7 @@ impl Ingester {
                 Ok(Outcome::Deleted) => report.deletes += 1,
                 Ok(Outcome::Stale) => report.dropped_stale += 1,
                 Ok(Outcome::Quarantined) => report.quarantined += 1,
+                Ok(Outcome::DuplicateChangeId) => report.duplicates += 1,
                 Err(e) => {
                     tracing::warn!(change_id = %c.change_id, error = %e, "ingest error -> quarantine");
                     self.quarantine_change(c, &e)?;
@@ -152,6 +191,9 @@ pub enum Outcome {
     Deleted,
     Stale,
     Quarantined,
+    /// ADR 0301 — refused because the change-ID was already
+    /// applied through this ingester (dedup enabled).
+    DuplicateChangeId,
 }
 
 #[cfg(test)]
@@ -331,6 +373,79 @@ mod tests {
                 "value": 1.0,
             }),
         }
+    }
+
+    // ADR 0301 — idempotent replay via change-ID dedup.
+
+    #[test]
+    fn replayed_change_id_is_deduped_without_side_effect_when_dedup_enabled() {
+        let dir = tempdir().unwrap();
+        let part = open(dir.path());
+        let q = QuarantineLog::open(dir.path()).unwrap();
+        let ing = Ingester::new(part.clone(), q,
+            vec!["ou".into(), "period".into(), "de".into()])
+            .with_idempotent_dedup();
+        let c = mk_change("abc", 1);
+        assert_eq!(ing.apply(&c).unwrap(), Outcome::Accepted);
+        // Second application must be refused BEFORE any side
+        // effect on the partition or the quarantine.
+        assert_eq!(ing.apply(&c).unwrap(), Outcome::DuplicateChangeId);
+    }
+
+    #[test]
+    fn replay_batch_reports_duplicates_and_no_side_effects_after_first_apply() {
+        let dir = tempdir().unwrap();
+        let part = open(dir.path());
+        let q = QuarantineLog::open(dir.path()).unwrap();
+        let ing = Ingester::new(part.clone(), q,
+            vec!["ou".into(), "period".into(), "de".into()])
+            .with_idempotent_dedup();
+        let batch: Vec<Change> = (0..10)
+            .map(|i| mk_change(&format!("c{i}"), i + 1))
+            .collect();
+        let first  = ing.apply_batch(&batch).unwrap();
+        let second = ing.apply_batch(&batch).unwrap();
+        assert_eq!(first.accepted,  10);
+        assert_eq!(first.duplicates,  0);
+        assert_eq!(second.accepted,    0);
+        assert_eq!(second.duplicates, 10);
+    }
+
+    #[test]
+    fn mixed_batch_counts_new_and_duplicate_change_ids_separately() {
+        let dir = tempdir().unwrap();
+        let part = open(dir.path());
+        let q = QuarantineLog::open(dir.path()).unwrap();
+        let ing = Ingester::new(part.clone(), q,
+            vec!["ou".into(), "period".into(), "de".into()])
+            .with_idempotent_dedup();
+        // Seed three known change-ids.
+        let seeded = vec![mk_change("c1", 1), mk_change("c2", 2), mk_change("c3", 3)];
+        let r1 = ing.apply_batch(&seeded).unwrap();
+        assert_eq!(r1.accepted, 3);
+        // Mixed: two already-seen, two new.
+        let mixed = vec![mk_change("c2", 2), mk_change("c4", 4),
+                         mk_change("c1", 1), mk_change("c5", 5)];
+        let r2 = ing.apply_batch(&mixed).unwrap();
+        assert_eq!(r2.accepted,   2);
+        assert_eq!(r2.duplicates, 2);
+    }
+
+    #[test]
+    fn dedup_disabled_by_default_preserves_prior_behaviour() {
+        // Without `with_idempotent_dedup`, the ingester
+        // never reports `DuplicateChangeId` — the same
+        // change_id applied twice is just "second apply" at
+        // the partition level (version fencing handles it).
+        let dir = tempdir().unwrap();
+        let part = open(dir.path());
+        let q = QuarantineLog::open(dir.path()).unwrap();
+        let ing = Ingester::new(part.clone(), q,
+            vec!["ou".into(), "period".into(), "de".into()]);
+        let c = mk_change("abc", 1);
+        assert_eq!(ing.apply(&c).unwrap(), Outcome::Accepted);
+        assert_eq!(ing.apply(&c).unwrap(), Outcome::Accepted,
+            "dedup-disabled ingester must not emit DuplicateChangeId");
     }
 
     #[test]
