@@ -13,12 +13,15 @@
 
 pub mod dag;
 pub mod freshness;
+/// ADR 0295 — LSN-based HTAP freshness.
+pub mod htap_freshness;
 pub mod incremental;
 pub mod materialize;
 pub mod view;
 
 pub use dag::{DependencyDag, NodeId};
 pub use freshness::{FreshnessStamp, Staleness};
+pub use htap_freshness::{HtapFreshness, HtapStaleness};
 pub use incremental::{AggCell, AggKind, IncrementalAggregate};
 pub use materialize::{
     materialize_aggregate_indicator, materialize_enrollment_program_indicator,
