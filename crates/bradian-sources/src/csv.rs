@@ -7,6 +7,8 @@
 //! The reader is pure Rust (no `csv` crate dependency) so the audit surface stays small.
 //! Downstream callers who need sharded parallel ingestion can wrap this iterator in rayon.
 
+use std::io::{BufRead, BufReader, Read};
+
 use bradian_core::{BradianError, BradianResult};
 use bradian_ingest::Change;
 
@@ -144,6 +146,140 @@ where
     Ok(out)
 }
 
+/// ADR 0302 — streaming CSV reader. Parses one row at a
+/// time from any `Read`; holds only the current row in
+/// memory (plus a small line buffer). A `Some(header)`
+/// is consumed before the first `next()` returns a data
+/// row.
+pub struct CsvStream<R: Read> {
+    reader:  BufReader<R>,
+    options: CsvOptions,
+    header:  Option<Vec<String>>,
+    header_consumed: bool,
+    done:    bool,
+    /// Line buffer; reused across rows.
+    line:    String,
+}
+
+impl<R: Read> CsvStream<R> {
+    pub fn new(reader: R, options: CsvOptions) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            options, header: None, header_consumed: false,
+            done: false, line: String::new(),
+        }
+    }
+
+    pub fn header(&mut self) -> BradianResult<Option<&[String]>> {
+        if !self.header_consumed && self.options.has_header {
+            self.consume_header()?;
+        }
+        Ok(self.header.as_deref())
+    }
+
+    fn consume_header(&mut self) -> BradianResult<()> {
+        self.header_consumed = true;
+        if let Some(row) = self.read_next_logical_row()? {
+            self.header = Some(row);
+        }
+        Ok(())
+    }
+
+    /// Read one logical row, honouring multi-line quoted
+    /// fields. Returns `None` at EOF.
+    fn read_next_logical_row(&mut self) -> BradianResult<Option<Vec<String>>> {
+        if self.done { return Ok(None); }
+        let mut accumulated = String::new();
+        loop {
+            self.line.clear();
+            let n = self.reader.read_line(&mut self.line).map_err(|e|
+                BradianError::invalid_value(format!("csv read: {e}")))?;
+            if n == 0 {
+                self.done = true;
+                if accumulated.is_empty() { return Ok(None); }
+                break;
+            }
+            accumulated.push_str(&self.line);
+            if is_balanced(&accumulated, self.options.quote as char) { break; }
+        }
+        // Reuse the batch parser on this single row (it's
+        // tiny; no need for a second state machine). Force
+        // no-header so the parser doesn't eat our one row.
+        let mut opts = self.options.clone();
+        opts.has_header = false;
+        let (_hdr, mut rows) = read_csv_bytes(accumulated.as_bytes(), &opts)?;
+        if rows.is_empty() { return Ok(None); }
+        Ok(Some(rows.remove(0)))
+    }
+}
+
+/// True when every opening quote in the buffer is balanced
+/// by a closing quote (doubled quotes inside quoted fields
+/// are escapes and count as two separators).
+fn is_balanced(buf: &str, quote: char) -> bool {
+    let mut in_q = false;
+    let mut chars = buf.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == quote {
+            if in_q && chars.peek() == Some(&quote) { chars.next(); continue; }
+            in_q = !in_q;
+        }
+    }
+    !in_q
+}
+
+impl<R: Read> Iterator for CsvStream<R> {
+    type Item = BradianResult<CsvRow>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.header_consumed && self.options.has_header {
+            if let Err(e) = self.consume_header() { return Some(Err(e)); }
+        }
+        match self.read_next_logical_row() {
+            Ok(Some(row)) => Some(Ok(row)),
+            Ok(None)      => None,
+            Err(e)        => Some(Err(e)),
+        }
+    }
+}
+
+/// ADR 0302 — inferred column type from a sample of CSV
+/// rows. Narrow → wide: `Bool ⊂ I64 ⊂ F64 ⊂ Text`. An
+/// all-empty column is `Text`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InferredType { Bool, I64, F64, Text }
+
+pub fn infer_column_types(header: &[String], rows: &[CsvRow]) -> Vec<InferredType> {
+    let mut out = vec![None::<InferredType>; header.len()];
+    for row in rows {
+        for (i, field) in row.iter().enumerate() {
+            if i >= out.len() { break; }
+            if field.is_empty() { continue; }
+            let observed = classify_one(field);
+            out[i] = Some(match out[i] {
+                None       => observed,
+                Some(prev) => widen(prev, observed),
+            });
+        }
+    }
+    out.into_iter().map(|t| t.unwrap_or(InferredType::Text)).collect()
+}
+
+fn classify_one(field: &str) -> InferredType {
+    let lower = field.to_ascii_lowercase();
+    if lower == "true" || lower == "false" { return InferredType::Bool; }
+    if field.parse::<i64>().is_ok() { return InferredType::I64; }
+    if field.parse::<f64>().is_ok() { return InferredType::F64; }
+    InferredType::Text
+}
+
+fn widen(a: InferredType, b: InferredType) -> InferredType {
+    use InferredType::*;
+    fn rank(t: InferredType) -> u8 {
+        match t { Bool => 0, I64 => 1, F64 => 2, Text => 3 }
+    }
+    if rank(a) >= rank(b) { a } else { b }
+}
+
 /// Light shell carrying the envelope header fields the projection function must supply;
 /// keeps `rows_to_changes` ergonomic while still letting the caller choose how to derive
 /// each stamp from the CSV columns.
@@ -189,6 +325,47 @@ mod tests {
     fn unterminated_quote_rejected() {
         let data = "a\n\"unterminated\n";
         assert!(read_csv_bytes(data.as_bytes(), &CsvOptions::default()).is_err());
+    }
+
+    // ADR 0302 — streaming + type inference.
+
+    #[test]
+    fn streaming_parse_matches_batch_parse_on_three_row_input() {
+        let data = "ou,period,value\nouA,202601,10\nouB,202601,20\nouC,202601,30\n";
+        let (hdr_batch, rows_batch) = read_csv_bytes(data.as_bytes(), &CsvOptions::default()).unwrap();
+        let mut stream = CsvStream::new(data.as_bytes(), CsvOptions::default());
+        let hdr_stream = stream.header().unwrap().map(|s| s.to_vec());
+        let rows_stream: Vec<_> = stream.map(|r| r.unwrap()).collect();
+        assert_eq!(hdr_stream, hdr_batch);
+        assert_eq!(rows_stream, rows_batch);
+    }
+
+    #[test]
+    fn type_inference_classifies_each_column_narrowest_first() {
+        let data = "id,amount,ratio,active,label\n1,100,0.5,true,alpha\n2,200,1.25,false,beta\n3,300,2.0,true,gamma\n";
+        let (hdr, rows) = read_csv_bytes(data.as_bytes(), &CsvOptions::default()).unwrap();
+        let hdr = hdr.unwrap();
+        let types = infer_column_types(&hdr, &rows);
+        assert_eq!(types, vec![
+            InferredType::I64,
+            InferredType::I64,
+            InferredType::F64,
+            InferredType::Bool,
+            InferredType::Text,
+        ]);
+    }
+
+    #[test]
+    fn type_inference_widens_on_conflict_and_defaults_empty_to_text() {
+        let data = "mixed,empty,int_then_float\n1,,1\n2,,1.5\n3,,2\n";
+        let (hdr, rows) = read_csv_bytes(data.as_bytes(), &CsvOptions::default()).unwrap();
+        let hdr = hdr.unwrap();
+        let types = infer_column_types(&hdr, &rows);
+        assert_eq!(types[0], InferredType::I64);
+        assert_eq!(types[1], InferredType::Text,
+            "all-empty column should default to Text");
+        assert_eq!(types[2], InferredType::F64,
+            "I64 + F64 should widen to F64");
     }
 
     #[test]

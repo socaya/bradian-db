@@ -211,7 +211,7 @@ starts; when the slice ships, the ADR number moves to
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
 | Canonical change-log schema | 0301 | DONE | Opt-in `with_idempotent_dedup`; `Outcome::DuplicateChangeId` + `IngestReport::duplicates`; 4 unit tests cover single replay, full batch replay, mixed batch, and the dedup-disabled default. In-memory index; durable survival of restart is Gate 3+ |
-| CSV adapter | 0302 | OPEN | Streaming; type inference; errors surfaced |
+| CSV adapter | 0302 | DONE | `CsvStream` row-at-a-time iterator over any `Read`; `infer_column_types` with Bool/I64/F64/Text widening; 3 unit tests. Errors (unterminated quote) already surfaced by `read_csv_bytes` |
 | JSON Lines adapter | 0303 | OPEN | Same |
 | Arrow IPC adapter | 0304 | OPEN | Batch round-trip |
 | SQL CDC adapter (Postgres logical replication, pull-only) | 0305 | OPEN | Admin credentials scoped; cursor persistence |
