@@ -13,8 +13,11 @@ pub mod period;
 pub mod provenance;
 pub mod fingerprint;
 pub mod authz;
+/// ADR 0319 — production certification manifest skeleton.
+pub mod certification;
 
 pub use error::{BradianError, BradianResult};
+pub use certification::{CertError, CertManifest, CertResult};
 pub use uid::Uid;
 pub use value::{LogicalType, PhysicalType, Value};
 pub use schema::{Column, Schema};

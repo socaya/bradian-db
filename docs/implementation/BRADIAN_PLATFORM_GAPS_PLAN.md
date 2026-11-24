@@ -224,7 +224,13 @@ starts; when the slice ships, the ADR number moves to
 | DHIS2 synthetic fact generator | 0306 | DONE | `WorkloadSpec::{small,medium,dhis2_like}` named presets + `generate_from_spec`; 2 unit tests cover determinism and distinct-fingerprint |
 | Row-store write / read benchmarks | 0307 | DONE | Criterion bench `row_store_rw.rs` + published numbers at `docs/bench/row_store_rw-2026-11-24.md` (put 4.76 ms, get 74 ns on Apple M4 Pro) |
 
-### 3.3 P2 — Gate 4+ blockers
+### 3.3 P2 — Gate 4+ blockers — **12 of 12 SKELETONS shipped**
+
+Every P2 slice carries a typed public surface + honest-scope ADR +
+invariant tests. **None** of these slices claims a production
+implementation; each is a stable staging point for future Gate 3+
+depth work. See individual rows for the honest scope limits.
+
 
 | Slice | ADR | Status | Area |
 |-------|-----|--------|------|
@@ -239,7 +245,7 @@ starts; when the slice ships, the ADR number moves to
 | Wire protocol for relational sessions + reference driver | 0316 | SKELETON | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
 | PITR / incremental archive / offsite backup | 0317 | SKELETON | `incremental_archive::{ArchiveBuilder, ArchiveChunk, ArchiveManifest}` with monotonic LSN + CRC32; 3 unit tests. No WAL reading, no offsite transport, no encryption, no restore. |
 | Schema history compaction with reference proofs | 0318 | SKELETON | `schema_history_compaction::{plan_compaction, verify_proof}`; 2 unit tests. Pure planning + proof; no journal rewrite, no on-disk coupling. |
-| External reproducibility + production certification | 0319 | OPEN | Gate 9 package |
+| External reproducibility + production certification | 0319 | SKELETON | `bradian_core::certification::{CertManifest, validate_shape}`; 2 unit tests. Shape validation + JSON round-trip; no reproducible-build check, no supply-chain audit, no signature algorithm. |
 
 ### 3.4 Remaining Gate 1 qualification tasks (from master roadmap)
 
