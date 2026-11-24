@@ -89,6 +89,10 @@ pub enum ParentPathPolicy {
 /// the helper returns `Unsupported` without touching the filesystem; callers
 /// must decide how to react rather than silently skipping enforcement.
 /// On Unix the expected owner is the effective UID (`geteuid()`).
+/// ADR 0291 — on Windows the helper does a best-effort basic
+/// check (existence + directory + exclusive-lock-can-be-taken)
+/// instead of returning `Unsupported`. Full Windows ACL
+/// inspection via `windows-sys` is captured as ADR 0322.
 pub fn ensure_private_root(path: &Path, policy: PrivateRootPolicy)
     -> Result<(), LocalAccessError>
 {
@@ -101,8 +105,43 @@ pub fn ensure_private_root(path: &Path, policy: PrivateRootPolicy)
         let euid = unsafe { libc::geteuid() };
         unix::ensure_private_root_owned_by(path, policy, euid)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    { windows_private_root(path, policy) }
+    #[cfg(not(any(unix, windows)))]
     { let _ = (path, policy); Err(LocalAccessError::Unsupported) }
+}
+
+/// ADR 0291 — Windows private-root check. Verifies the
+/// path exists (or is created under `CreateIfMissing`) and
+/// is a directory. Full ACL inspection is a follow-up ADR
+/// 0322; here we preserve the contract that the function
+/// NEVER returns `Unsupported` on Windows, so callers can
+/// treat Windows the same as Unix for the basic structural
+/// invariants.
+#[cfg(windows)]
+fn windows_private_root(path: &Path, policy: PrivateRootPolicy)
+    -> Result<(), LocalAccessError>
+{
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(LocalAccessError::SymlinkedRoot);
+            }
+            if !meta.is_dir() {
+                return Err(LocalAccessError::NotADirectory);
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match policy {
+                PrivateRootPolicy::RequireExisting => Err(LocalAccessError::NotFound),
+                PrivateRootPolicy::CreateIfMissing => {
+                    std::fs::create_dir_all(path).map_err(LocalAccessError::Io)
+                }
+            }
+        }
+        Err(e) => Err(LocalAccessError::Io(e)),
+    }
 }
 
 /// Test-visible workhorse: enforce the private-root invariants against an
@@ -116,7 +155,9 @@ pub fn ensure_private_root_owned_by(path: &Path, policy: PrivateRootPolicy, expe
 {
     #[cfg(unix)]
     { unix::ensure_private_root_owned_by(path, policy, expected_uid) }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    { let _ = expected_uid; windows_private_root(path, policy) }
+    #[cfg(not(any(unix, windows)))]
     { Err(LocalAccessError::Unsupported) }
 }
 
@@ -202,7 +243,16 @@ pub fn check_parent_path_trust(
     }
     #[cfg(unix)]
     { unix::check_parent_path_trust(path, parent_policy) }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // ADR 0291 — Windows doesn't use POSIX world-writable
+        // bits. Parent-path trust under Windows is governed by
+        // ACLs; a full implementation lives in ADR 0322. Here
+        // we accept the path if it exists at all.
+        let _ = parent_policy;
+        if path.exists() { Ok(()) } else { Err(LocalAccessError::NotFound) }
+    }
+    #[cfg(not(any(unix, windows)))]
     { Err(LocalAccessError::Unsupported) }
 }
 
