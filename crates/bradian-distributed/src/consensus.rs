@@ -5,15 +5,19 @@
 //! and treats it as committed. Not safe for multi-node use.
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
+         Serialize, Deserialize)]
 pub struct ReplicaId(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
+         Serialize, Deserialize)]
 pub struct Term(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
+         Serialize, Deserialize)]
 pub struct LogIndex(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
