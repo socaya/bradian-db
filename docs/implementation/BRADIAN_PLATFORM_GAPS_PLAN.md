@@ -233,7 +233,7 @@ starts; when the slice ships, the ADR number moves to
 | Distributed commit + global snapshot | 0310 | SKELETON | `distributed_commit` module with `DistributedCommit` trait + `InMemoryTwoPhaseCommit` stub; 3 unit tests. Single-process only. |
 | Shard placement + fencing | 0311 | SKELETON | `shard_placement::PlacementMap` with per-shard monotone fence tokens; 2 unit tests. In-memory only; no durable manifest, no reconfig protocol. |
 | Rebalancing | 0312 | SKELETON | `rebalancing::RebalancePlan::{diff,apply_to}`; 2 unit tests. Pure planning + in-memory apply; no data movement, no catch-up, no handoff. |
-| Federation (site autonomy) | 0313 | OPEN | New crate or `bradian-distributed` extension |
+| Federation (site autonomy) | 0313 | SKELETON | `federation::FederationRegistry` + `TrustLevel` + `ConflictResolution` resolver; 2 unit tests. In-memory only; no RPC, no clock ordering. |
 | Studio UI backing real SQL sessions | 0314 | OPEN | `apps/bradian-ui` + `bradian-serving` |
 | DHIS2 integration deployment path | 0315 | OPEN | `apps/dhis2-integration` |
 | Wire protocol for relational sessions + reference driver | 0316 | OPEN | `bradian-serving` |

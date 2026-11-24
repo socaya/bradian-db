@@ -28,6 +28,8 @@ pub mod distributed_commit;
 pub mod shard_placement;
 /// ADR 0312 — shard rebalancing skeleton.
 pub mod rebalancing;
+/// ADR 0313 — federation (site autonomy) skeleton.
+pub mod federation;
 
 pub use coordinator::{Coordinator, FederatedResult};
 pub use fragment::{Fragment, FragmentKind, FragmentResult};
