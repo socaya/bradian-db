@@ -1783,9 +1783,20 @@ pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
         (DataType::TimestampTz, Value::TimestampTz(_)) => v,
         (DataType::TimestampTz, Value::Int64(n)) => Value::TimestampTz(*n),
         (DataType::TimestampTz, Value::Int32(n)) => Value::TimestampTz(i64::from(*n)),
+        // ADR 0263 — TEXT → TIMESTAMPTZ via the ADR 0180
+        // ISO-8601 parser so round-trip through ADR 0263's
+        // render is stable.
+        (DataType::TimestampTz, Value::String(s)) => {
+            let micros = parse_iso8601_micros(s).ok_or_else(invalid)?;
+            Value::TimestampTz(micros)
+        }
         (DataType::Int64, Value::TimestampTz(n)) => Value::Int64(*n),
+        // ADR 0263 — render as ISO-8601 `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
+        // Inverse of ADR 0180's ISO-8601 parser so round-trip
+        // `CAST(TEXT AS TIMESTAMPTZ)` ↔ `CAST(TIMESTAMPTZ AS TEXT)`
+        // through the current timestamp coerce path is stable.
         (DataType::Text | DataType::Varchar { .. }, Value::TimestampTz(n)) =>
-            Value::String(n.to_string()),
+            Value::String(format_timestamptz_text(*n)),
         // ADR 0262 — DECIMAL(p, s) target. Accepts Int / BigInt
         // / Decimal / String. Overflow against the declared
         // precision/scale rejects.
@@ -1813,6 +1824,46 @@ pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
             Value::String(format_uuid_text(b)),
         _ => return Err(invalid()),
     })
+}
+
+/// ADR 0263 — render a TIMESTAMPTZ (unix micros) as ISO-8601
+/// `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`. Uses Howard Hinnant's
+/// civil-from-days algorithm (the inverse of ADR 0180's
+/// days-from-civil). Everything is in UTC.
+fn format_timestamptz_text(micros: i64) -> String {
+    const MICROS_PER_SEC: i64 = 1_000_000;
+    const SECS_PER_DAY: i64 = 86_400;
+    let (days, remainder_us) = {
+        let secs_total = micros.div_euclid(MICROS_PER_SEC);
+        let us = micros.rem_euclid(MICROS_PER_SEC);
+        let d = secs_total.div_euclid(SECS_PER_DAY);
+        let s = secs_total.rem_euclid(SECS_PER_DAY);
+        (d, s * MICROS_PER_SEC + us)
+    };
+    let hour = (remainder_us / (3600 * MICROS_PER_SEC)) as i32;
+    let minute = ((remainder_us / (60 * MICROS_PER_SEC)) % 60) as i32;
+    let second = ((remainder_us / MICROS_PER_SEC) % 60) as i32;
+    let subsec = (remainder_us % MICROS_PER_SEC) as i32;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{subsec:06}+00:00"
+    )
+}
+
+/// Civil date from days since 1970-01-01. From Howard Hinnant's
+/// chrono-compatible C++ algorithm, ported straight to Rust.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 /// ADR 0262 — fit a scaled decimal integer into the declared

@@ -71,11 +71,13 @@ fn cast_bigint_to_timestamptz_and_back() {
 
 #[test]
 fn cast_timestamptz_to_text() {
+    // ADR 0263 — TIMESTAMPTZ renders as ISO-8601 UTC.
+    // id=2 means 2 unix micros = 1970-01-01T00:00:00.000002+00:00.
     let (_dir, db) = seed();
     let row = first_row(db.execute(
         "SELECT CAST(CAST(id AS TIMESTAMPTZ) AS TEXT) FROM t.public.items WHERE id = 2"
     ).unwrap());
-    assert_eq!(row, vec![Value::String("2".into())]);
+    assert_eq!(row, vec![Value::String("1970-01-01T00:00:00.000002+00:00".into())]);
 }
 
 #[test]
