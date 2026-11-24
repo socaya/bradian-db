@@ -72,6 +72,12 @@ pub enum SqlError {
     /// duplicate / not found, empty password, journal error).
     #[error(transparent)]
     User(#[from] crate::persistent_user_catalog::PersistentUserCatalogError),
+    /// ADR 0256 — a caller-held `SchemaSnapshot` observed that
+    /// a table's schema advanced since the snapshot was
+    /// captured. The caller must re-resolve the table and
+    /// retry.
+    #[error("schema for table {table} advanced from {captured} to {current}")]
+    SchemaStale { table: u64, captured: u64, current: u64 },
     /// ADR 0182 — per-column CHECK constraint violated by a
     /// candidate row at INSERT or UPDATE.
     #[error("CHECK constraint on column {column:?} failed: value does not satisfy {op} {literal}")]
@@ -4371,6 +4377,50 @@ impl SqlEngine {
     /// for tests and diagnostics; does not reveal plaintext.
     pub fn user_catalog_snapshot(&self) -> crate::user_catalog::UserCatalog {
         self.users.snapshot()
+    }
+
+    /// ADR 0256 — expose the current catalog snapshot for
+    /// diagnostics and tests.
+    pub fn catalog_snapshot(&self) -> crate::Catalog {
+        self.catalog.snapshot()
+    }
+
+    /// ADR 0256 — capture a schema snapshot of the named
+    /// fully-qualified tables. Each name is resolved against
+    /// the current catalog; unknown names return
+    /// `SqlError::Resolution`. The returned snapshot can be
+    /// passed to `execute_with_schema_snapshot` so a later
+    /// statement fast-fails when any observed table has
+    /// advanced.
+    pub fn capture_schema_snapshot_of(
+        &self, qualified_names: &[&str],
+    ) -> SqlResult<crate::catalog::SchemaSnapshot> {
+        let catalog = self.catalog.snapshot();
+        let mut ids = Vec::with_capacity(qualified_names.len());
+        for name in qualified_names {
+            let parts = Parser::new(name)?.name()?;
+            let table = self.resolve(&parts)?;
+            ids.push(table.id);
+        }
+        Ok(catalog.capture_schema_snapshot(ids))
+    }
+
+    /// ADR 0256 — run `sql` only if every table named in the
+    /// snapshot still matches its captured version.
+    /// `SqlError::SchemaStale` surfaces when any version
+    /// advanced — the caller must re-plan.
+    pub fn execute_with_schema_snapshot(
+        &self, sql: &str, snapshot: &crate::catalog::SchemaSnapshot,
+    ) -> SqlResult<SqlResultSet> {
+        let catalog = self.catalog.snapshot();
+        if let Err(stale) = snapshot.reconcile(&catalog) {
+            return Err(SqlError::SchemaStale {
+                table: stale.table.0,
+                captured: stale.captured,
+                current: stale.current,
+            });
+        }
+        self.execute(sql)
     }
 
     /// ADR 0170 — attach a workspace-wide admission cap.
