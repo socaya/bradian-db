@@ -481,6 +481,7 @@ dependencies = [
  "argon2",
  "blake3",
  "bradian-core",
+ "bradian-runtime",
  "crc32fast",
  "libc",
  "parking_lot",

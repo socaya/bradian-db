@@ -23,6 +23,10 @@ impl Serialize for Cell<'_> {
                 let uuid=format!("{}-{}-{}-{}-{}",&hex[..8],&hex[8..12],&hex[12..16],&hex[16..20],&hex[20..]);
                 map.serialize_entry("type","uuid")?; map.serialize_entry("value",&uuid)?;
             }
+            // ADR 0113 — JSON document stored as its canonical
+            // serde_json serialization. Preserve the declared type
+            // so the CLI round-trips it as JSON (not as TEXT).
+            Value::Json(v)=>{ map.serialize_entry("type","json")?; map.serialize_entry("value",v)?; }
         }
         map.end()
     }
@@ -99,6 +103,7 @@ mod tests {
                 let hex=v.iter().map(|byte|format!("{byte:02x}")).collect::<String>();
                 json!({"type":"uuid","value":format!("{}-{}-{}-{}-{}",&hex[..8],&hex[8..12],&hex[12..16],&hex[16..20],&hex[20..])})
             }
+            Value::Json(v)=>json!({"type":"json","value":v}),
         }
     }
     #[test]

@@ -217,6 +217,9 @@ fn private_root(root: &Path) -> Result<()> {
         Err(LocalAccessError::UntrustedAncestor { path, mode }) => anyhow::bail!(
             "SQL root ancestor {path:?} is untrusted (mode {mode:o}); a malicious user with write access to that directory can replace the private root (ADR 0109)",
         ),
+        Err(LocalAccessError::ExtendedAcl { path }) => anyhow::bail!(
+            "SQL root {path:?} has an extended POSIX ACL; the base mode-0o700 check alone does not bound access (ADR 0321)",
+        ),
         Err(LocalAccessError::Io(err)) => Err(err.into()),
     }
 }

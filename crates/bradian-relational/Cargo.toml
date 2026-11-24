@@ -27,3 +27,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# ADR 0292 — vectorized SELECT path parity test. Dev-only until ADR 0293
+# promotes the batch executor into the relational crate's production
+# commit pipeline.
+bradian-runtime = { workspace = true }
