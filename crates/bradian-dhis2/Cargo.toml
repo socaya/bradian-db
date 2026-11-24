@@ -19,3 +19,5 @@ regex       = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
+# ADR 0315 — deployment apply_to / load_applied tests.
+tempfile    = { workspace = true }
