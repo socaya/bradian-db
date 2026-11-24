@@ -66,6 +66,17 @@ impl std::fmt::Display for SchemaStale {
 impl std::error::Error for SchemaStale {}
 
 impl SchemaSnapshot {
+    /// Construct a snapshot from explicit `(TableId, version)`
+    /// pairs. Primarily for operator tooling and test
+    /// scaffolding that needs to assert against a specific
+    /// captured version without going through
+    /// `Catalog::capture_schema_snapshot`.
+    pub fn from_entries<I: IntoIterator<Item = (TableId, u64)>>(entries: I) -> Self {
+        let mut versions = BTreeMap::new();
+        for (id, v) in entries { versions.insert(id, v); }
+        Self { versions }
+    }
+
     /// All observed (table, captured_version) pairs.
     pub fn entries(&self) -> impl Iterator<Item = (TableId, u64)> + '_ {
         self.versions.iter().map(|(t, v)| (*t, *v))

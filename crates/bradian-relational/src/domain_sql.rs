@@ -142,6 +142,23 @@ impl DomainSqlEngine {
         self.global_budget
     }
 
+    /// ADR 0266 — capture a schema snapshot of the named
+    /// fully-qualified tables for later use in a session's
+    /// `attach_schema_snapshot`. Unknown names return
+    /// `SqlError::Resolution`.
+    pub fn capture_schema_snapshot_of(
+        &self, qualified_names: &[&str],
+    ) -> SqlResult<crate::catalog::SchemaSnapshot> {
+        let catalog = self.catalog.snapshot();
+        let mut ids = Vec::with_capacity(qualified_names.len());
+        for name in qualified_names {
+            let parts = Parser::new(name)?.name()?;
+            let t = self.resolve(&parts)?;
+            ids.push(t.id);
+        }
+        Ok(catalog.capture_schema_snapshot(ids))
+    }
+
     pub fn register_catalog_table(&self, qualified_name: &str) -> SqlResult<u64> {
         let _guard = self.operation.lock();
         let mut parser = Parser::new(qualified_name)?;
@@ -169,6 +186,7 @@ impl DomainSqlEngine {
             budget: None,
             policy: None,
             authz: None,
+            schema_snapshot: None,
         };
         callback(&mut session)
     }
@@ -190,6 +208,7 @@ impl DomainSqlEngine {
             budget: Some(crate::query_budget::BudgetTracker::new(budget)),
             policy: None,
             authz: None,
+            schema_snapshot: None,
         };
         callback(&mut session)
     }
@@ -212,6 +231,7 @@ impl DomainSqlEngine {
             budget: Some(tracker),
             policy: None,
             authz: None,
+            schema_snapshot: None,
         };
         callback(&mut session)
     }
@@ -231,7 +251,7 @@ impl DomainSqlEngine {
             last_commit_lsn: None,
             budget: Some(crate::query_budget::BudgetTracker::new(budget)),
             policy: Some(policy),
-            authz: Some(authz),
+            authz: Some(authz), schema_snapshot: None,
         };
         callback(&mut session)
     }
@@ -253,7 +273,7 @@ impl DomainSqlEngine {
             last_commit_lsn: None,
             budget: None,
             policy: Some(policy),
-            authz: Some(authz),
+            authz: Some(authz), schema_snapshot: None,
         };
         callback(&mut session)
     }
@@ -270,6 +290,20 @@ pub struct DomainSqlSession<'a> {
     policy: Option<crate::access_policy::TableAccessPolicy>,
     /// ADR 0154 — authorization context paired with policy.
     authz: Option<bradian_core::AuthorizationContext>,
+    /// ADR 0266 — captured schema snapshot. Each `execute`
+    /// reconciles before dispatch; a stale snapshot surfaces
+    /// `SqlError::SchemaStale` and aborts any pending
+    /// transaction.
+    schema_snapshot: Option<crate::catalog::SchemaSnapshot>,
+}
+
+impl<'a> DomainSqlSession<'a> {
+    /// ADR 0266 — attach a schema snapshot to the session.
+    /// Every subsequent `execute` reconciles the snapshot
+    /// against the live catalog before dispatching.
+    pub fn attach_schema_snapshot(&mut self, snapshot: crate::catalog::SchemaSnapshot) {
+        self.schema_snapshot = Some(snapshot);
+    }
 }
 
 impl<'a> DomainSqlSession<'a> {
@@ -279,6 +313,18 @@ impl<'a> DomainSqlSession<'a> {
     /// A failed statement aborts the current transaction; subsequent COMMIT
     /// cannot accidentally publish earlier staged writes.
     pub fn execute(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
+        // ADR 0266 — reconcile attached snapshot before dispatch.
+        if let Some(snap) = &self.schema_snapshot {
+            let catalog = self.engine.catalog.snapshot();
+            if let Err(stale) = snap.reconcile(&catalog) {
+                self.active = None;
+                return Err(SqlError::SchemaStale {
+                    table: stale.table.0,
+                    captured: stale.captured,
+                    current: stale.current,
+                });
+            }
+        }
         // ADR 0230 — UNION / UNION ALL across top-level SELECT
         // arms. Each arm runs through `execute_inner` with the
         // same session mutation state; UNION dedups the
