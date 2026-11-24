@@ -16,6 +16,8 @@ pub mod state;
 pub mod tls;
 /// ADR 0314 — Studio SQL session skeleton.
 pub mod sql_session;
+/// ADR 0316 — relational wire protocol + reference driver skeleton.
+pub mod wire;
 
 pub use engine::AnalyticsEngine;
 pub use jobs::{JobProgress, JobRecord, JobRegistry, JobStatus};
