@@ -572,6 +572,7 @@ dependencies = [
 name = "bradian-sources"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "bradian-core",
  "bradian-ingest",
  "bradian-storage",

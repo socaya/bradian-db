@@ -24,9 +24,13 @@
 #![warn(rust_2018_idioms)]
 
 pub mod csv;
+/// ADR 0304 — Bradian-native batch IPC. Not Apache Arrow
+/// wire-compatible; see the ADR for rationale.
+pub mod ipc;
 pub mod jsonl;
 pub mod sql_cdc;
 
 pub use csv::{read_csv_bytes, CsvOptions};
+pub use ipc::{read_ipc, write_ipc, IpcColumn, IpcRecordBatch, IpcValue, IpcValueType};
 pub use jsonl::{read_jsonl, JsonlOptions};
 pub use sql_cdc::{SqlCdcRow, SqlCdcSource};

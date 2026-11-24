@@ -16,6 +16,9 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+# ADR 0304 — Bradian-native batch IPC encoding. Not yet
+# Apache Arrow IPC wire-compatible.
+bincode     = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }
