@@ -63,6 +63,8 @@ pub mod unique_check;
 pub mod pitr;
 /// ADR 0317 — PITR incremental archive skeleton.
 pub mod incremental_archive;
+/// ADR 0318 — schema history compaction with reference proofs skeleton.
+pub mod schema_history_compaction;
 pub mod collation;
 pub mod audit_log;
 pub mod audit_chain;

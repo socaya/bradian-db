@@ -238,7 +238,7 @@ starts; when the slice ships, the ADR number moves to
 | DHIS2 integration deployment path | 0315 | SKELETON | `bradian_dhis2::deployment::DeploymentManifest` + `load_manifest_json` with shape validation; 2 unit tests. Parse only — no HTTP, no apply, no upgrade/rollback, no systemd/docker. |
 | Wire protocol for relational sessions + reference driver | 0316 | SKELETON | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
 | PITR / incremental archive / offsite backup | 0317 | SKELETON | `incremental_archive::{ArchiveBuilder, ArchiveChunk, ArchiveManifest}` with monotonic LSN + CRC32; 3 unit tests. No WAL reading, no offsite transport, no encryption, no restore. |
-| Schema history compaction with reference proofs | 0318 | OPEN | `bradian-relational` |
+| Schema history compaction with reference proofs | 0318 | SKELETON | `schema_history_compaction::{plan_compaction, verify_proof}`; 2 unit tests. Pure planning + proof; no journal rewrite, no on-disk coupling. |
 | External reproducibility + production certification | 0319 | OPEN | Gate 9 package |
 
 ### 3.4 Remaining Gate 1 qualification tasks (from master roadmap)
