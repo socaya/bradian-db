@@ -22,6 +22,8 @@ pub mod residency;
 pub mod worker;
 /// ADR 0309 — consensus-backed replication skeleton.
 pub mod consensus;
+/// ADR 0310 — distributed commit + global snapshot skeleton.
+pub mod distributed_commit;
 
 pub use coordinator::{Coordinator, FederatedResult};
 pub use fragment::{Fragment, FragmentKind, FragmentResult};
