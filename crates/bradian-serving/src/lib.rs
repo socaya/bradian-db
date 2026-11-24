@@ -14,6 +14,8 @@ pub mod routes;
 pub mod state;
 /// ADR 0283 + ADR 0284 — rustls-backed TLS and optional mTLS.
 pub mod tls;
+/// ADR 0314 — Studio SQL session skeleton.
+pub mod sql_session;
 
 pub use engine::AnalyticsEngine;
 pub use jobs::{JobProgress, JobRecord, JobRegistry, JobStatus};
