@@ -31,3 +31,5 @@ tempfile = { workspace = true }
 # promotes the batch executor into the relational crate's production
 # commit pipeline.
 bradian-runtime = { workspace = true }
+# ADR 0294 — commit-receipt → incremental aggregate parity test.
+bradian-views   = { workspace = true }

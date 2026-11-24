@@ -188,7 +188,7 @@ starts; when the slice ships, the ADR number moves to
 |-------|-----|--------|------------|
 | Vectorized SELECT path alongside the row path | 0292 | DONE | Parity test `vectorized_scan_parity.rs` — RowStore scan → `RecordBatchBuilder` → `parallel_filter_aggregate` matches scalar oracle; `bradian-runtime` is a dev-dep until 0293 promotes it |
 | Columnar segment write path from commit | 0293 | DONE | `MultiTableTransaction::commit_with_receipt` returns per-table upsert post-images; 3 tests in `commit_column_projection.rs` demonstrate RecordBatch projection parity |
-| Incremental view maintenance for SUM / COUNT / MIN / MAX | 0294 | OPEN | Retraction + refresh on commit |
+| Incremental view maintenance for SUM / COUNT / MIN / MAX | 0294 | DONE | `CommitReceipt::changes_by_table` carries old/new per mutation; `incremental_view_refresh.rs` demonstrates parity with scan-based rescan over four mixed commits |
 | Freshness / snapshot semantics for HTAP reads | 0295 | OPEN | Explicit lag annotation |
 
 #### P1-2 Planner + binder parity (`bradian-planner`)

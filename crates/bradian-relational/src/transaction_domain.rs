@@ -357,46 +357,76 @@ impl MultiTableTransaction<'_> {
         Ok(self.commit_with_receipt()?.lsn)
     }
 
-    /// ADR 0293 — same durability contract as `commit`, but
-    /// return a `CommitReceipt` describing the per-table
-    /// post-image rows that were just persisted. Enables the
-    /// columnar side to project committed rows synchronously
-    /// without re-scanning the store.
+    /// ADR 0293 / 0294 — same durability contract as `commit`
+    /// but return a `CommitReceipt` describing the per-table
+    /// post-image rows that were just persisted AND the
+    /// pre-image / post-image change log for every mutation
+    /// (0294). The caller can project committed rows into
+    /// columnar batches or feed retract-apply deltas into an
+    /// incremental aggregate without re-scanning the store.
     pub fn commit_with_receipt(self) -> DomainResult<CommitReceipt> {
         if self.changes.is_empty() {
-            return Ok(CommitReceipt { lsn: self.base_lsn, upserts_by_table: BTreeMap::new() });
+            return Ok(CommitReceipt {
+                lsn: self.base_lsn,
+                upserts_by_table: BTreeMap::new(),
+                changes_by_table: BTreeMap::new(),
+            });
         }
         let mut ops = Vec::with_capacity(self.changes.len());
         let mut upserts_by_table: BTreeMap<TableId, Vec<Vec<Value>>> = BTreeMap::new();
+        let mut changes_by_table: BTreeMap<TableId, Vec<CommitRowChange>> = BTreeMap::new();
         for (key, value) in self.changes {
             let table_id = row_table_id(&key)?;
+            let old = self.snapshot.get(&key).cloned();
             match value {
                 Some(row) => {
                     let table = self.definitions.get(&table_id).ok_or(DomainError::UnknownTable(table_id.0))?;
                     let bytes = encode_row(&table.table, &row)?;
-                    upserts_by_table.entry(table_id).or_default().push(row);
+                    upserts_by_table.entry(table_id).or_default().push(row.clone());
+                    let change = match old {
+                        Some(previous) => CommitRowChange::Update { old: previous, new: row },
+                        None           => CommitRowChange::Insert { new: row },
+                    };
+                    changes_by_table.entry(table_id).or_default().push(change);
                     ops.push(RowMutation::Put { key, value: bytes });
                 }
-                None => ops.push(RowMutation::Delete { key }),
+                None => {
+                    let previous = old.ok_or_else(||
+                        DomainError::Corruption("delete without pre-image in transaction snapshot".into()))?;
+                    changes_by_table.entry(table_id).or_default().push(
+                        CommitRowChange::Delete { old: previous });
+                    ops.push(RowMutation::Delete { key });
+                }
             }
         }
         match self.domain.storage.commit_batch(Some(self.base_lsn), &ops) {
-            Ok(lsn) => Ok(CommitReceipt { lsn, upserts_by_table }),
+            Ok(lsn) => Ok(CommitReceipt { lsn, upserts_by_table, changes_by_table }),
             Err(StoreError::Conflict { .. }) => Err(DomainError::Conflict),
             Err(e) => Err(e.into()),
         }
     }
 }
 
-/// ADR 0293 — per-commit receipt enabling synchronous
-/// column projection after a shared-domain commit.
+/// ADR 0293 / 0294 — per-commit receipt.
 ///
-/// Honest scope: this slice emits UPSERT post-image rows
-/// only. Delete-side tombstones for the columnar / view
-/// consumers are deferred to ADR 0294 (incremental view
-/// maintenance).
+/// `upserts_by_table` names only the post-image rows of
+/// inserts and replaces. `changes_by_table` carries the
+/// full retract-apply change log (pre-image for replaces
+/// and deletes) so invertible incremental aggregates can
+/// refresh without re-scanning the store.
 #[derive(Debug, Clone)]
 pub struct CommitReceipt {
     pub lsn: u64,
     pub upserts_by_table: BTreeMap<TableId, Vec<Vec<Value>>>,
+    pub changes_by_table: BTreeMap<TableId, Vec<CommitRowChange>>,
+}
+
+/// ADR 0294 — per-row change descriptor for incremental
+/// view maintenance. `Insert` has no pre-image; `Update`
+/// carries both; `Delete` has no post-image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitRowChange {
+    Insert { new: Vec<Value> },
+    Update { old: Vec<Value>, new: Vec<Value> },
+    Delete { old: Vec<Value> },
 }

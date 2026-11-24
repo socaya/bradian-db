@@ -482,6 +482,7 @@ dependencies = [
  "blake3",
  "bradian-core",
  "bradian-runtime",
+ "bradian-views",
  "crc32fast",
  "libc",
  "parking_lot",
