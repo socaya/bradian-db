@@ -2,10 +2,11 @@
 //! hashing. First P0-4 foundation slice: no SQL grammar yet,
 //! no persistence yet, no GRANT yet. Just the primitive.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use bradian_core::Capability;
 use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use rand::rngs::OsRng;
 
@@ -35,6 +36,12 @@ pub struct UserRecord {
     /// Argon2id PHC-encoded hash (incl. salt + params).
     password_hash: String,
     pub active: bool,
+    /// ADR 0251 — authorization capabilities granted to this
+    /// user. Empty by default; the first user created in an
+    /// empty catalog is bootstrapped with all capabilities so
+    /// there is always a path to grant others.
+    #[serde(default)]
+    capabilities: BTreeSet<Capability>,
 }
 
 impl UserRecord {
@@ -42,6 +49,10 @@ impl UserRecord {
     /// must still go through `UserCatalog::verify_password`
     /// so timing-safe comparisons happen in one place.
     pub fn password_hash(&self) -> &str { &self.password_hash }
+
+    /// Capabilities the user may exercise. Empty set means the
+    /// user may authenticate but cannot run SQL.
+    pub fn capabilities(&self) -> &BTreeSet<Capability> { &self.capabilities }
 }
 
 /// ADR 0247 — user identifier shape. Match the catalog's
@@ -107,6 +118,10 @@ impl UserCatalog {
 
     /// Register a new active user. Rejects invalid names,
     /// duplicates, and empty passwords. Hashes with argon2id.
+    /// ADR 0251 — if the catalog is empty at call time, the
+    /// new user is bootstrapped with every capability so there
+    /// is always a path to grant others. Subsequent users
+    /// start with an empty capability set.
     pub fn create_user(&mut self, name: &str, password: &str) -> UserCatalogResult<()> {
         let name = validate_name(name)?;
         if password.is_empty() {
@@ -115,9 +130,13 @@ impl UserCatalog {
         if self.users.contains_key(&name) {
             return Err(UserCatalogError::Duplicate(name));
         }
+        let capabilities: BTreeSet<Capability> = if self.users.is_empty() {
+            [Capability::Read, Capability::Write, Capability::Ddl, Capability::Admin]
+                .into_iter().collect()
+        } else { BTreeSet::new() };
         let phc = hash_password(password)?;
         self.users.insert(name.clone(), UserRecord {
-            name, password_hash: phc, active: true,
+            name, password_hash: phc, active: true, capabilities,
         });
         Ok(())
     }
@@ -194,10 +213,11 @@ impl UserCatalog {
     /// ADR 0248 — insert a user with an already-hashed PHC
     /// string. Journal replay uses this so re-hashing is not
     /// paid per boot. Rejects invalid names, duplicates, and
-    /// empty hashes. Does NOT verify the hash shape — that is
-    /// the caller's (or `verify_phc`'s) responsibility.
+    /// empty hashes. ADR 0251 — caller supplies capabilities
+    /// (replay carries them verbatim).
     pub(crate) fn insert_hashed(
         &mut self, name: &str, password_hash: &str, active: bool,
+        capabilities: BTreeSet<Capability>,
     ) -> UserCatalogResult<()> {
         let name = validate_name(name)?;
         if password_hash.is_empty() {
@@ -207,8 +227,28 @@ impl UserCatalog {
             return Err(UserCatalogError::Duplicate(name));
         }
         self.users.insert(name.clone(), UserRecord {
-            name, password_hash: password_hash.to_owned(), active,
+            name, password_hash: password_hash.to_owned(), active, capabilities,
         });
+        Ok(())
+    }
+
+    /// ADR 0251 — grant one capability. Idempotent. Rejects
+    /// unknown names.
+    pub fn grant(&mut self, name: &str, capability: Capability) -> UserCatalogResult<()> {
+        let name = validate_name(name)?;
+        let record = self.users.get_mut(&name)
+            .ok_or(UserCatalogError::NotFound(name))?;
+        record.capabilities.insert(capability);
+        Ok(())
+    }
+
+    /// ADR 0251 — revoke one capability. Idempotent. Rejects
+    /// unknown names.
+    pub fn revoke(&mut self, name: &str, capability: Capability) -> UserCatalogResult<()> {
+        let name = validate_name(name)?;
+        let record = self.users.get_mut(&name)
+            .ok_or(UserCatalogError::NotFound(name))?;
+        record.capabilities.remove(&capability);
         Ok(())
     }
 

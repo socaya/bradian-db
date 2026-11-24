@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Granularity of permission required to run a SQL statement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Capability {
     /// `SELECT` — read-only access.

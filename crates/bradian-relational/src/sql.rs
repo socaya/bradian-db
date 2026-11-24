@@ -2962,6 +2962,20 @@ pub(crate) fn join_resolve_column(
 /// column identifier. Used by both `parse_projection` and the
 /// WHERE-side JSON path predicate parser so the chain grammar
 /// has exactly one implementation.
+/// ADR 0251 — parse a capability keyword (`READ`, `WRITE`,
+/// `DDL`, `ADMIN`). Any other word returns `SqlError::Syntax`.
+pub(crate) fn parse_capability(p: &mut Parser) -> SqlResult<bradian_core::Capability> {
+    let word = p.word()?;
+    match word.as_str() {
+        "read"  => Ok(bradian_core::Capability::Read),
+        "write" => Ok(bradian_core::Capability::Write),
+        "ddl"   => Ok(bradian_core::Capability::Ddl),
+        "admin" => Ok(bradian_core::Capability::Admin),
+        _ => Err(SqlError::Syntax(format!(
+            "expected capability (READ, WRITE, DDL, ADMIN); got {word}"))),
+    }
+}
+
 pub(crate) fn parse_projection_tail(p: &mut Parser, column: String) -> SqlResult<Projection> {
     let mut path: Vec<JsonSegment> = Vec::new();
     let mut as_text = false;
@@ -4334,9 +4348,10 @@ impl SqlEngine {
     /// `execute` on that session goes through `execute_as` so
     /// capability checks fire before the statement runs.
     ///
-    /// Until ADR 0251 wires a GRANT/role model, authenticated
-    /// users receive full administrator capabilities. The next
-    /// slice narrows this.
+    /// ADR 0251 — capabilities come from the stored
+    /// `UserRecord`. A user with no capabilities can
+    /// authenticate but every SQL statement fast-fails with
+    /// `SqlError::Authz`.
     pub fn with_authenticated_session<R>(
         &self, user: &str, password: &str,
         callback: impl FnOnce(&AuthenticatedSession<'_>) -> SqlResult<R>,
@@ -4345,7 +4360,9 @@ impl SqlEngine {
         let snapshot = self.users.snapshot();
         let record = snapshot.get(user)
             .ok_or_else(|| SqlError::Resolution(format!("user {user} not found after verify")))?;
-        let authz = bradian_core::AuthorizationContext::administrator(record.name.clone());
+        let caps: Vec<bradian_core::Capability> =
+            record.capabilities().iter().copied().collect();
+        let authz = bradian_core::AuthorizationContext::new(record.name.clone(), caps);
         let session = AuthenticatedSession { engine: self, authz };
         callback(&session)
     }
@@ -6030,6 +6047,24 @@ impl SqlEngine {
                 let name = p.word()?;
                 p.end()?;
                 self.users.drop_user(&name)?;
+                Ok(SqlResultSet::Command { affected: 0 })
+            }
+            // ADR 0251 — GRANT <cap> TO <user>
+            "grant" => {
+                let cap = parse_capability(&mut p)?;
+                p.expect("to")?;
+                let user = p.word()?;
+                p.end()?;
+                self.users.grant(&user, cap)?;
+                Ok(SqlResultSet::Command { affected: 0 })
+            }
+            // ADR 0251 — REVOKE <cap> FROM <user>
+            "revoke" => {
+                let cap = parse_capability(&mut p)?;
+                p.expect("from")?;
+                let user = p.word()?;
+                p.end()?;
+                self.users.revoke(&user, cap)?;
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),

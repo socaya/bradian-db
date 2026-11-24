@@ -12,7 +12,9 @@
 //! atomicity (e.g. GRANT referencing a user) is not yet designed;
 //! call it out as a known limitation in any ADR that spans both.
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use bradian_core::Capability;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -45,10 +47,24 @@ pub type PersistentUserCatalogResult<T> = Result<T, PersistentUserCatalogError>;
 /// identifier, matching `UserCatalog::drop_user`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum Command {
-    CreateUser { name: String, password_hash: String },
+    /// ADR 0247/0251 — argon2id PHC pre-hashed; initial
+    /// capability set carries the bootstrap decision (admin if
+    /// catalog was empty, otherwise empty) so replay is
+    /// deterministic even when old events predate newer
+    /// bootstrap policy.
+    CreateUser {
+        name: String,
+        password_hash: String,
+        #[serde(default)]
+        capabilities: BTreeSet<Capability>,
+    },
     DropUser { name: String },
     SetPassword { name: String, password_hash: String },
     SetActive { name: String, active: bool },
+    /// ADR 0251 — grant one capability.
+    Grant { name: String, capability: Capability },
+    /// ADR 0251 — revoke one capability.
+    Revoke { name: String, capability: Capability },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,8 +80,8 @@ fn event_key(lsn: u64) -> String {
 /// don't pay the KDF cost per user per boot.
 fn apply_event(cat: &mut UserCatalog, event: &Event) -> PersistentUserCatalogResult<()> {
     match &event.command {
-        Command::CreateUser { name, password_hash } => {
-            cat.insert_hashed(name, password_hash, /*active=*/true)
+        Command::CreateUser { name, password_hash, capabilities } => {
+            cat.insert_hashed(name, password_hash, /*active=*/true, capabilities.clone())
                 .map_err(PersistentUserCatalogError::User)
         }
         Command::DropUser { name } => {
@@ -77,6 +93,12 @@ fn apply_event(cat: &mut UserCatalog, event: &Event) -> PersistentUserCatalogRes
         }
         Command::SetActive { name, active } => {
             cat.set_active(name, *active).map_err(PersistentUserCatalogError::User)
+        }
+        Command::Grant { name, capability } => {
+            cat.grant(name, *capability).map_err(PersistentUserCatalogError::User)
+        }
+        Command::Revoke { name, capability } => {
+            cat.revoke(name, *capability).map_err(PersistentUserCatalogError::User)
         }
     }
 }
@@ -161,18 +183,38 @@ impl PersistentUserCatalog {
     }
 
     /// Create a user, hashing the plaintext with argon2id BEFORE
-    /// the WAL append so the stored hash is canonical.
+    /// the WAL append so the stored hash is canonical. ADR 0251
+    /// — snapshots the live catalog to decide whether this is
+    /// the bootstrap user (empty catalog → admin caps) or a
+    /// regular new user (empty caps). The decision is recorded
+    /// in the journaled Command so replay is deterministic.
     pub fn create_user(&self, name: &str, password: &str) -> PersistentUserCatalogResult<u64> {
-        // Reuse UserCatalog::create_user's validation on a scratch
-        // instance so hashing failure or duplicate rejection
-        // surfaces BEFORE we hash into the journal.
+        let is_bootstrap = {
+            let inner = self.inner.lock();
+            inner.catalog.is_empty()
+        };
         let mut probe = UserCatalog::new();
         probe.create_user(name, password)?;
         let record = probe.get(name).expect("just created").clone();
+        let capabilities: BTreeSet<Capability> = if is_bootstrap {
+            [Capability::Read, Capability::Write, Capability::Ddl, Capability::Admin]
+                .into_iter().collect()
+        } else { BTreeSet::new() };
         self.commit(Command::CreateUser {
             name: record.name.clone(),
             password_hash: record.password_hash().to_owned(),
+            capabilities,
         })
+    }
+
+    /// ADR 0251 — grant one capability to an existing user.
+    pub fn grant(&self, name: &str, capability: Capability) -> PersistentUserCatalogResult<u64> {
+        self.commit(Command::Grant { name: name.to_owned(), capability })
+    }
+
+    /// ADR 0251 — revoke one capability from an existing user.
+    pub fn revoke(&self, name: &str, capability: Capability) -> PersistentUserCatalogResult<u64> {
+        self.commit(Command::Revoke { name: name.to_owned(), capability })
     }
 
     pub fn drop_user(&self, name: &str) -> PersistentUserCatalogResult<u64> {
