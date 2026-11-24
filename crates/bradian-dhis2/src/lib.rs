@@ -32,6 +32,8 @@
 pub mod aggregate;
 pub mod completion;
 pub mod custom_aggregation;
+/// ADR 0315 — DHIS2 integration deployment manifest skeleton.
+pub mod deployment;
 pub mod event;
 pub mod expression;
 pub mod indicator;

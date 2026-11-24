@@ -235,7 +235,7 @@ starts; when the slice ships, the ADR number moves to
 | Rebalancing | 0312 | SKELETON | `rebalancing::RebalancePlan::{diff,apply_to}`; 2 unit tests. Pure planning + in-memory apply; no data movement, no catch-up, no handoff. |
 | Federation (site autonomy) | 0313 | SKELETON | `federation::FederationRegistry` + `TrustLevel` + `ConflictResolution` resolver; 2 unit tests. In-memory only; no RPC, no clock ordering. |
 | Studio UI backing real SQL sessions | 0314 | SKELETON | `bradian_serving::sql_session::SessionRegistry` with open/get/close; 2 unit tests. HTTP routes + idle expiry + SQL-statement binding are follow-ups. |
-| DHIS2 integration deployment path | 0315 | OPEN | `apps/dhis2-integration` |
+| DHIS2 integration deployment path | 0315 | SKELETON | `bradian_dhis2::deployment::DeploymentManifest` + `load_manifest_json` with shape validation; 2 unit tests. Parse only — no HTTP, no apply, no upgrade/rollback, no systemd/docker. |
 | Wire protocol for relational sessions + reference driver | 0316 | OPEN | `bradian-serving` |
 | PITR / incremental archive / offsite backup | 0317 | OPEN | `bradian-relational` + `bradian-storage` |
 | Schema history compaction with reference proofs | 0318 | OPEN | `bradian-relational` |
