@@ -10,6 +10,20 @@ use bradian_core::Capability;
 use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use rand::rngs::OsRng;
 
+use crate::TableId;
+
+/// ADR 0258 — per-object capabilities granted on a specific
+/// table. Distinct from `bradian_core::Capability` which is
+/// global/coarse (verb-level); this enum is the first slice
+/// of a finer-grained per-table authorization model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash,
+    serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ObjectCapability {
+    /// `SELECT` on this table — read-only.
+    Select,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum UserCatalogError {
     #[error("invalid username: {0}")]
@@ -42,6 +56,12 @@ pub struct UserRecord {
     /// there is always a path to grant others.
     #[serde(default)]
     capabilities: BTreeSet<Capability>,
+    /// ADR 0258 — per-table object grants. A user with global
+    /// `Capability::Read` is implicitly authorized on every
+    /// table; this map only matters for users that lack the
+    /// global read capability.
+    #[serde(default)]
+    table_grants: BTreeMap<TableId, BTreeSet<ObjectCapability>>,
 }
 
 impl UserRecord {
@@ -53,6 +73,24 @@ impl UserRecord {
     /// Capabilities the user may exercise. Empty set means the
     /// user may authenticate but cannot run SQL.
     pub fn capabilities(&self) -> &BTreeSet<Capability> { &self.capabilities }
+
+    /// ADR 0258 — per-table object grants held by this user.
+    pub fn table_grants(&self) -> &BTreeMap<TableId, BTreeSet<ObjectCapability>> {
+        &self.table_grants
+    }
+
+    /// ADR 0258 — true if the user may exercise `cap` on
+    /// `table`. The global `Capability::Read` implies
+    /// `ObjectCapability::Select` on every table.
+    pub fn allows_on_table(&self, table: TableId, cap: ObjectCapability) -> bool {
+        if matches!(cap, ObjectCapability::Select)
+            && self.capabilities.contains(&Capability::Read)
+        {
+            return true;
+        }
+        self.table_grants.get(&table)
+            .is_some_and(|caps| caps.contains(&cap))
+    }
 }
 
 /// ADR 0247 — user identifier shape. Match the catalog's
@@ -137,6 +175,7 @@ impl UserCatalog {
         let phc = hash_password(password)?;
         self.users.insert(name.clone(), UserRecord {
             name, password_hash: phc, active: true, capabilities,
+            table_grants: BTreeMap::new(),
         });
         Ok(())
     }
@@ -228,7 +267,36 @@ impl UserCatalog {
         }
         self.users.insert(name.clone(), UserRecord {
             name, password_hash: password_hash.to_owned(), active, capabilities,
+            table_grants: BTreeMap::new(),
         });
+        Ok(())
+    }
+
+    /// ADR 0258 — grant one object capability on one table.
+    /// Idempotent. Rejects unknown users.
+    pub fn grant_on_table(&mut self, name: &str, table: TableId, cap: ObjectCapability)
+        -> UserCatalogResult<()>
+    {
+        let name = validate_name(name)?;
+        let record = self.users.get_mut(&name)
+            .ok_or(UserCatalogError::NotFound(name))?;
+        record.table_grants.entry(table).or_default().insert(cap);
+        Ok(())
+    }
+
+    /// ADR 0258 — revoke one object capability on one table.
+    /// Idempotent (revoking an absent grant is a no-op).
+    /// Rejects unknown users.
+    pub fn revoke_on_table(&mut self, name: &str, table: TableId, cap: ObjectCapability)
+        -> UserCatalogResult<()>
+    {
+        let name = validate_name(name)?;
+        let record = self.users.get_mut(&name)
+            .ok_or(UserCatalogError::NotFound(name))?;
+        if let Some(caps) = record.table_grants.get_mut(&table) {
+            caps.remove(&cap);
+            if caps.is_empty() { record.table_grants.remove(&table); }
+        }
         Ok(())
     }
 

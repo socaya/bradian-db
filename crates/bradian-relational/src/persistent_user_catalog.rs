@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::row_store::{RowStore, StoreError};
-use crate::user_catalog::{UserCatalog, UserCatalogError};
+use crate::user_catalog::{ObjectCapability, UserCatalog, UserCatalogError};
+use crate::TableId;
 
 const MARKER_KEY: &[u8] = b"bradian.users.version";
 const MARKER_VALUE: &[u8] = b"BRADIAN-USERS-V1";
@@ -65,6 +66,10 @@ enum Command {
     Grant { name: String, capability: Capability },
     /// ADR 0251 — revoke one capability.
     Revoke { name: String, capability: Capability },
+    /// ADR 0258 — grant one per-table object capability.
+    GrantOnTable { name: String, table: TableId, capability: ObjectCapability },
+    /// ADR 0258 — revoke one per-table object capability.
+    RevokeOnTable { name: String, table: TableId, capability: ObjectCapability },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +104,14 @@ fn apply_event(cat: &mut UserCatalog, event: &Event) -> PersistentUserCatalogRes
         }
         Command::Revoke { name, capability } => {
             cat.revoke(name, *capability).map_err(PersistentUserCatalogError::User)
+        }
+        Command::GrantOnTable { name, table, capability } => {
+            cat.grant_on_table(name, *table, *capability)
+                .map_err(PersistentUserCatalogError::User)
+        }
+        Command::RevokeOnTable { name, table, capability } => {
+            cat.revoke_on_table(name, *table, *capability)
+                .map_err(PersistentUserCatalogError::User)
         }
     }
 }
@@ -215,6 +228,20 @@ impl PersistentUserCatalog {
     /// ADR 0251 — revoke one capability from an existing user.
     pub fn revoke(&self, name: &str, capability: Capability) -> PersistentUserCatalogResult<u64> {
         self.commit(Command::Revoke { name: name.to_owned(), capability })
+    }
+
+    /// ADR 0258 — grant one per-table object capability.
+    pub fn grant_on_table(&self, name: &str, table: TableId, capability: ObjectCapability)
+        -> PersistentUserCatalogResult<u64>
+    {
+        self.commit(Command::GrantOnTable { name: name.to_owned(), table, capability })
+    }
+
+    /// ADR 0258 — revoke one per-table object capability.
+    pub fn revoke_on_table(&self, name: &str, table: TableId, capability: ObjectCapability)
+        -> PersistentUserCatalogResult<u64>
+    {
+        self.commit(Command::RevokeOnTable { name: name.to_owned(), table, capability })
     }
 
     pub fn drop_user(&self, name: &str) -> PersistentUserCatalogResult<u64> {

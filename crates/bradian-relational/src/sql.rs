@@ -4441,7 +4441,8 @@ impl SqlEngine {
         let caps: Vec<bradian_core::Capability> =
             record.capabilities().iter().copied().collect();
         let authz = bradian_core::AuthorizationContext::new(record.name.clone(), caps);
-        let session = AuthenticatedSession { engine: self, authz };
+        let table_grants = record.table_grants().clone();
+        let session = AuthenticatedSession { engine: self, authz, table_grants };
         callback(&session)
     }
 
@@ -6172,7 +6173,20 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             // ADR 0251 — GRANT <cap> TO <user>
+            // ADR 0258 — GRANT SELECT ON <table> TO <user>
             "grant" => {
+                if p.next_is_word("select") {
+                    p.consume_word("select");
+                    p.expect("on")?;
+                    let table_name = p.name()?;
+                    let table = self.resolve(&table_name)?;
+                    p.expect("to")?;
+                    let user = p.word()?;
+                    p.end()?;
+                    self.users.grant_on_table(&user, table.id,
+                        crate::user_catalog::ObjectCapability::Select)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
                 let cap = parse_capability(&mut p)?;
                 p.expect("to")?;
                 let user = p.word()?;
@@ -6181,7 +6195,20 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             // ADR 0251 — REVOKE <cap> FROM <user>
+            // ADR 0258 — REVOKE SELECT ON <table> FROM <user>
             "revoke" => {
+                if p.next_is_word("select") {
+                    p.consume_word("select");
+                    p.expect("on")?;
+                    let table_name = p.name()?;
+                    let table = self.resolve(&table_name)?;
+                    p.expect("from")?;
+                    let user = p.word()?;
+                    p.end()?;
+                    self.users.revoke_on_table(&user, table.id,
+                        crate::user_catalog::ObjectCapability::Select)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
                 let cap = parse_capability(&mut p)?;
                 p.expect("from")?;
                 let user = p.word()?;
@@ -6204,6 +6231,13 @@ impl SqlEngine {
 pub struct AuthenticatedSession<'a> {
     engine: &'a SqlEngine,
     authz: bradian_core::AuthorizationContext,
+    /// ADR 0258 — per-table SELECT grants (and future
+    /// per-table caps) for the authenticated user, snapshotted
+    /// at session start.
+    table_grants: std::collections::BTreeMap<
+        crate::TableId,
+        std::collections::BTreeSet<crate::user_catalog::ObjectCapability>,
+    >,
 }
 
 impl<'a> AuthenticatedSession<'a> {
@@ -6217,10 +6251,71 @@ impl<'a> AuthenticatedSession<'a> {
 
     /// Run a SQL statement through the principal's authz
     /// context. A missing capability fast-fails as
-    /// `SqlError::Authz` before the parser runs.
+    /// `SqlError::Authz` before the parser runs. ADR 0258 —
+    /// before falling through to that check, if the statement
+    /// is a SELECT whose target table has a per-table
+    /// `SELECT` grant for the principal, the session elevates
+    /// the context to include `Capability::Read` for this one
+    /// call.
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
+        if !self.authz.allows(bradian_core::Capability::Read) {
+            if let Some(name_parts) = extract_single_table_select_target(sql) {
+                let catalog = self.engine.catalog.snapshot();
+                if let Some(table) = resolve_in_snapshot(&catalog, &name_parts) {
+                    let caps = self.table_grants.get(&table.id);
+                    if caps.is_some_and(|s|
+                        s.contains(&crate::user_catalog::ObjectCapability::Select))
+                    {
+                        let mut granted = self.authz.capabilities().to_vec();
+                        granted.push(bradian_core::Capability::Read);
+                        let elevated = bradian_core::AuthorizationContext::new(
+                            self.authz.principal_id().to_string(), granted);
+                        return self.engine.execute_as(&elevated, sql);
+                    }
+                }
+            }
+        }
         self.engine.execute_as(&self.authz, sql)
     }
+}
+
+/// ADR 0258 — scan a SQL statement for a simple
+/// `SELECT … FROM <qualified-name>` and return the parsed
+/// three-part identifier. Returns `None` for anything that
+/// isn't a bare SELECT or whose FROM target isn't a plain
+/// three-part name (joins, subqueries, qualified aliases —
+/// out of this slice's scope).
+fn extract_single_table_select_target(sql: &str) -> Option<Vec<String>> {
+    let mut p = Parser::new(sql).ok()?;
+    if !p.consume_word("select") { return None; }
+    // Walk forward until we see FROM, skipping SELECT list tokens.
+    while !p.consume_word("from") {
+        let before = p.save_pos();
+        p.peek()?;
+        p.advance();
+        if p.save_pos() == before { return None; }
+    }
+    let name = p.name().ok()?;
+    // Reject compound FROMs (JOIN / , / subselect) — out of
+    // scope for this slice.
+    match p.peek() {
+        Some(Token::Word(w)) if matches!(
+            w.to_ascii_lowercase().as_str(),
+            "join" | "inner" | "left" | "right" | "cross") => return None,
+        Some(Token::Symbol(',')) => return None,
+        _ => {}
+    }
+    Some(name)
+}
+
+/// ADR 0258 — resolve a fully-qualified name against a
+/// catalog snapshot without going through `SqlEngine::resolve`
+/// (which clones the catalog again).
+fn resolve_in_snapshot(catalog: &crate::Catalog, parts: &[String]) -> Option<Table> {
+    if parts.len() != 3 { return None; }
+    let db = catalog.databases().find(|d| d.name == parts[0])?;
+    let sch = catalog.schemas().find(|s| s.database == db.id && s.name == parts[1])?;
+    catalog.tables().find(|t| t.schema == sch.id && t.name == parts[2]).cloned()
 }
 
 /// A scoped SQL transaction session for one fully qualified native table.
