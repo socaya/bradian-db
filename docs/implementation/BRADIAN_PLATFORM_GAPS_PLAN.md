@@ -249,7 +249,7 @@ end-to-end rather than shipping a stub of the full feature.
 | DHIS2 integration deployment path | 0315 | OPEN | `bradian_dhis2::deployment::DeploymentManifest` + `load_manifest_json` with shape validation; 2 unit tests. Parse only — no HTTP, no apply, no upgrade/rollback, no systemd/docker. |
 | Wire protocol for relational sessions + reference driver | 0316 | OPEN | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
 | PITR / incremental archive / offsite backup | 0317 | DONE | Byte-offset WAL archive: `write_from_wal` / `verify` / `apply_to_wal`; chunked + fsync'd; corruption + misalignment fail closed; 6 unit tests including real RowStore round-trip (full + incremental → fresh dir → reopen → every row + `last_lsn` match). Offsite transport + encryption are follow-ups. |
-| Schema history compaction with reference proofs | 0318 | OPEN | `schema_history_compaction::{plan_compaction, verify_proof}`; 2 unit tests. Pure planning + proof; no journal rewrite, no on-disk coupling. |
+| Schema history compaction with reference proofs | 0318 | DONE | `compact_file_in_place` atomic tmp-rename + BLAKE3 proof over retained `(version,digest)` pairs; `verify_file_proof` detects tampering; 6 unit tests. Integration with the real catalog DDL journal remains a follow-up. |
 | External reproducibility + production certification | 0319 | DONE | Real BLAKE3-256 of `Cargo.lock` via `CertManifest::{from_build, verify_against}`; constant-time hash comparison; 7 unit tests + 1 integration test hashing + verifying the live workspace `Cargo.lock`. Signature algorithm is a dedicated follow-up. |
 
 ### 3.4 Remaining Gate 1 qualification tasks (from master roadmap)
