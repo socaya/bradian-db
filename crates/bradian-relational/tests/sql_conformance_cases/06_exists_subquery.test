@@ -1,0 +1,33 @@
+# ADR 0271 — EXISTS (SELECT …).
+statement ok
+CREATE DATABASE t
+
+statement ok
+CREATE SCHEMA t.public
+
+statement ok
+CREATE TABLE t.public.outer_tbl (id BIGINT NOT NULL, PRIMARY KEY(id))
+
+statement ok
+CREATE TABLE t.public.inner_tbl (id BIGINT NOT NULL, PRIMARY KEY(id))
+
+statement ok
+INSERT INTO t.public.outer_tbl(id) VALUES(1)
+
+statement ok
+INSERT INTO t.public.outer_tbl(id) VALUES(2)
+
+# Inner empty → no rows.
+query I
+SELECT id FROM t.public.outer_tbl WHERE EXISTS (SELECT id FROM t.public.inner_tbl)
+----
+
+# Inner non-empty → all rows.
+statement ok
+INSERT INTO t.public.inner_tbl(id) VALUES(99)
+
+query I
+SELECT id FROM t.public.outer_tbl WHERE EXISTS (SELECT id FROM t.public.inner_tbl)
+----
+1
+2

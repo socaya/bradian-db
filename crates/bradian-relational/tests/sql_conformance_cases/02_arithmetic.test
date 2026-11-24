@@ -1,0 +1,31 @@
+# SQL-92 §6.14: Arithmetic.
+statement ok
+CREATE DATABASE t
+
+statement ok
+CREATE SCHEMA t.public
+
+statement ok
+CREATE TABLE t.public.n (id BIGINT NOT NULL, v INT, PRIMARY KEY(id))
+
+statement ok
+INSERT INTO t.public.n(id, v) VALUES(1, 10)
+
+statement ok
+INSERT INTO t.public.n(id, v) VALUES(2, 20)
+
+# Addition
+query I
+SELECT v + 5 FROM t.public.n WHERE id = 1
+----
+15
+
+# Multiplication
+query I
+SELECT v * 2 FROM t.public.n WHERE id = 2
+----
+40
+
+# Division by zero
+statement error
+SELECT v / 0 FROM t.public.n WHERE id = 1

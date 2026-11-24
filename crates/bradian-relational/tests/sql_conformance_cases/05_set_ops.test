@@ -1,0 +1,38 @@
+# SQL-92 §7.9: Set operators.
+statement ok
+CREATE DATABASE t
+
+statement ok
+CREATE SCHEMA t.public
+
+statement ok
+CREATE TABLE t.public.a (id BIGINT NOT NULL, PRIMARY KEY(id))
+
+statement ok
+CREATE TABLE t.public.b (id BIGINT NOT NULL, PRIMARY KEY(id))
+
+statement ok
+INSERT INTO t.public.a(id) VALUES(1)
+
+statement ok
+INSERT INTO t.public.a(id) VALUES(2)
+
+statement ok
+INSERT INTO t.public.a(id) VALUES(3)
+
+statement ok
+INSERT INTO t.public.b(id) VALUES(2)
+
+statement ok
+INSERT INTO t.public.b(id) VALUES(3)
+
+query I
+SELECT id FROM t.public.a INTERSECT SELECT id FROM t.public.b
+----
+2
+3
+
+query I
+SELECT id FROM t.public.a EXCEPT SELECT id FROM t.public.b
+----
+1

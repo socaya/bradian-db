@@ -1,0 +1,25 @@
+# SQL-92 §7: Basic SELECT.
+statement ok
+CREATE DATABASE t
+
+statement ok
+CREATE SCHEMA t.public
+
+statement ok
+CREATE TABLE t.public.items (id BIGINT NOT NULL, name TEXT, PRIMARY KEY(id))
+
+statement ok
+INSERT INTO t.public.items(id, name) VALUES(1, 'alpha')
+
+statement ok
+INSERT INTO t.public.items(id, name) VALUES(2, 'beta')
+
+query I
+SELECT id FROM t.public.items WHERE id = 1
+----
+1
+
+query I
+SELECT id FROM t.public.items WHERE id = 2
+----
+2

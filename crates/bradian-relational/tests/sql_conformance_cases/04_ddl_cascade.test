@@ -1,0 +1,20 @@
+# ADR 0261 — DROP COLUMN CASCADE verification.
+statement ok
+CREATE DATABASE t
+
+statement ok
+CREATE SCHEMA t.public
+
+statement ok
+CREATE TABLE t.public.parents (pid BIGINT NOT NULL, label TEXT NOT NULL, PRIMARY KEY(pid), UNIQUE(label))
+
+statement ok
+CREATE TABLE t.public.children (cid BIGINT NOT NULL, parent_label TEXT, PRIMARY KEY(cid), FOREIGN KEY(parent_label) REFERENCES t.public.parents(label))
+
+# Plain DROP must fail — label is in UK + referenced by FK.
+statement error
+ALTER TABLE t.public.parents DROP COLUMN label
+
+# CASCADE drops the UK and the incoming FK.
+statement ok
+ALTER TABLE t.public.parents DROP COLUMN label CASCADE

@@ -1,0 +1,25 @@
+# SQL-92 §8: NULL predicates (IS NULL / IS NOT NULL).
+statement ok
+CREATE DATABASE t
+
+statement ok
+CREATE SCHEMA t.public
+
+statement ok
+CREATE TABLE t.public.items (id BIGINT NOT NULL, note TEXT, PRIMARY KEY(id))
+
+statement ok
+INSERT INTO t.public.items(id, note) VALUES(1, 'present')
+
+statement ok
+INSERT INTO t.public.items(id, note) VALUES(2, NULL)
+
+query I
+SELECT id FROM t.public.items WHERE note IS NULL
+----
+2
+
+query I
+SELECT id FROM t.public.items WHERE note IS NOT NULL
+----
+1
