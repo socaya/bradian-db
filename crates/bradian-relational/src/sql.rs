@@ -1786,6 +1786,23 @@ pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
         (DataType::Int64, Value::TimestampTz(n)) => Value::Int64(*n),
         (DataType::Text | DataType::Varchar { .. }, Value::TimestampTz(n)) =>
             Value::String(n.to_string()),
+        // ADR 0262 — DECIMAL(p, s) target. Accepts Int / BigInt
+        // / Decimal / String. Overflow against the declared
+        // precision/scale rejects.
+        (DataType::Decimal { precision, scale }, Value::Decimal(d)) =>
+            decimal_fit(*d, *precision, *scale).map(Value::Decimal)
+                .ok_or_else(invalid)?,
+        (DataType::Decimal { precision, scale }, Value::Int32(n)) =>
+            decimal_fit((i128::from(*n)) * 10_i128.pow(u32::from(*scale)),
+                *precision, *scale).map(Value::Decimal).ok_or_else(invalid)?,
+        (DataType::Decimal { precision, scale }, Value::Int64(n)) =>
+            decimal_fit((i128::from(*n)) * 10_i128.pow(u32::from(*scale)),
+                *precision, *scale).map(Value::Decimal).ok_or_else(invalid)?,
+        (DataType::Decimal { precision, scale }, Value::String(s)) => {
+            let scaled = parse_decimal_text(s, *scale).ok_or_else(invalid)?;
+            decimal_fit(scaled, *precision, *scale).map(Value::Decimal)
+                .ok_or_else(invalid)?
+        }
         // ADR 0257 — UUID ↔ canonical hyphenated string.
         (DataType::Uuid, Value::Uuid(_)) => v,
         (DataType::Uuid, Value::String(s)) => {
@@ -1796,6 +1813,44 @@ pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
             Value::String(format_uuid_text(b)),
         _ => return Err(invalid()),
     })
+}
+
+/// ADR 0262 — fit a scaled decimal integer into the declared
+/// precision envelope `|value| < 10^precision`. Returns None
+/// on overflow or when precision/scale are out of range.
+fn decimal_fit(value: i128, precision: u8, scale: u8) -> Option<i128> {
+    if precision == 0 || precision > 38 || scale > precision { return None; }
+    let bound = 10_i128.checked_pow(u32::from(precision))?;
+    if value.unsigned_abs() < bound as u128 { Some(value) } else { None }
+}
+
+/// ADR 0262 — parse a decimal text literal into an i128 scaled
+/// by `target_scale`. Accepts optional leading `+`/`-`, an
+/// integer part, and an optional fractional part up to
+/// `target_scale` digits (longer fractions reject).
+fn parse_decimal_text(s: &str, target_scale: u8) -> Option<i128> {
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'-') => (-1i128, &s[1..]),
+        Some(b'+') => (1i128, &s[1..]),
+        _ => (1i128, s),
+    };
+    let (int_part, frac_part) = match rest.find('.') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() { return None; }
+    if int_part.bytes().any(|b| !b.is_ascii_digit())
+        || frac_part.bytes().any(|b| !b.is_ascii_digit())
+    { return None; }
+    if frac_part.len() > usize::from(target_scale) { return None; }
+    let int_v: i128 = if int_part.is_empty() { 0 } else { int_part.parse().ok()? };
+    let frac_v: i128 = if frac_part.is_empty() { 0 } else { frac_part.parse().ok()? };
+    let pad = usize::from(target_scale).checked_sub(frac_part.len())?;
+    let frac_scaled = frac_v.checked_mul(10_i128.checked_pow(pad as u32)?)?;
+    let scale_mul = 10_i128.checked_pow(u32::from(target_scale))?;
+    let int_scaled = int_v.checked_mul(scale_mul)?;
+    let total = int_scaled.checked_add(frac_scaled)?;
+    Some(sign.checked_mul(total)?)
 }
 
 /// ADR 0257 — parse a hyphenated UUID string
@@ -1854,19 +1909,10 @@ fn nibble_hex(n: u8) -> char {
 
 /// ADR 0235 — parse a type name after `AS` in a CAST.
 fn parse_cast_target(p: &mut Parser) -> SqlResult<DataType> {
-    let name = p.word()?;
-    Ok(match name.to_ascii_lowercase().as_str() {
-        "int" | "integer" | "int4" => DataType::Int32,
-        "bigint" | "int8" => DataType::Int64,
-        "text" => DataType::Text,
-        "boolean" | "bool" => DataType::Boolean,
-        "json" => DataType::Json,
-        // ADR 0257 — TIMESTAMPTZ and UUID targets.
-        "timestamp" | "timestamptz" => DataType::TimestampTz,
-        "uuid" => DataType::Uuid,
-        _ => return Err(SqlError::Unsupported(format!(
-            "CAST target type {name} is not supported"))),
-    })
+    // ADR 0262 — delegate to the shared `data_type` parser so
+    // CAST accepts every target the CREATE TABLE grammar does
+    // (incl. DECIMAL(p,s), VARCHAR(n), JSON, TIMESTAMPTZ, UUID).
+    p.data_type()
 }
 
 /// ADR 0232 + 0234 — resolve a FuncArg against a row.
