@@ -8,5 +8,7 @@
 pub mod fixtures;
 pub mod report;
 
-pub use fixtures::{generate_facts, generate_schema, FactsFixture};
+pub use fixtures::{
+    generate_facts, generate_from_spec, generate_schema, FactsFixture, WorkloadSpec,
+};
 pub use report::{BenchContext, BenchReport};

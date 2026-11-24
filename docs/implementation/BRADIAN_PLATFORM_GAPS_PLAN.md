@@ -221,7 +221,7 @@ starts; when the slice ships, the ADR number moves to
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
 | Criterion harness skeleton | — | PARTIAL | Already scaffolded |
-| DHIS2 synthetic fact generator | 0306 | OPEN | Reproducible seed; documented workload |
+| DHIS2 synthetic fact generator | 0306 | DONE | `WorkloadSpec::{small,medium,dhis2_like}` named presets + `generate_from_spec`; 2 unit tests cover determinism and distinct-fingerprint |
 | Row-store write / read benchmarks | 0307 | OPEN | Publishes numbers in `docs/` |
 
 ### 3.3 P2 — Gate 4+ blockers
