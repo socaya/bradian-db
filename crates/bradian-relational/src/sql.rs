@@ -4492,6 +4492,55 @@ pub struct SqlEngine {
     /// ADR 0249 — WAL-backed user catalog. Opened at
     /// `<root>/users`; separate journal from the DDL catalog.
     users: crate::persistent_user_catalog::PersistentUserCatalog,
+    /// ADR 0265 — per-table-schema-version reader pin registry.
+    /// Maps `TableId → captured_version → active pin count`.
+    /// A `SchemaLease` increments on capture and decrements on
+    /// drop so operators / future online-DDL coordinators can
+    /// query active readers before accepting a schema change.
+    schema_leases: std::sync::Arc<parking_lot::Mutex<
+        std::collections::BTreeMap<crate::TableId,
+            std::collections::BTreeMap<u64, usize>>>>,
+}
+
+/// ADR 0265 — RAII pin on observed schema versions. Dropping
+/// a `SchemaLease` decrements the pin count for every
+/// `(TableId, version)` it held. Clone is NOT provided — a
+/// lease is unique and transferable only by move.
+pub struct SchemaLease {
+    snapshot: crate::catalog::SchemaSnapshot,
+    registry: std::sync::Arc<parking_lot::Mutex<
+        std::collections::BTreeMap<crate::TableId,
+            std::collections::BTreeMap<u64, usize>>>>,
+}
+
+impl SchemaLease {
+    /// The captured snapshot for use with
+    /// `execute_with_schema_snapshot`.
+    pub fn snapshot(&self) -> &crate::catalog::SchemaSnapshot { &self.snapshot }
+
+    /// Entries this lease pinned.
+    pub fn pins(&self) -> impl Iterator<Item = (crate::TableId, u64)> + '_ {
+        self.snapshot.entries()
+    }
+}
+
+impl Drop for SchemaLease {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock();
+        for (table, version) in self.snapshot.entries() {
+            if let Some(per_table) = registry.get_mut(&table) {
+                if let Some(count) = per_table.get_mut(&version) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        per_table.remove(&version);
+                    }
+                }
+                if per_table.is_empty() {
+                    registry.remove(&table);
+                }
+            }
+        }
+    }
 }
 
 impl SqlEngine {
@@ -4530,6 +4579,8 @@ impl SqlEngine {
             bace_wiring: wiring,
             global_budget: crate::workspace_usage::GlobalBudget::default(),
             users,
+            schema_leases: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::BTreeMap::new())),
         })
     }
 
@@ -4596,6 +4647,42 @@ impl SqlEngine {
             ids.push(table.id);
         }
         Ok(catalog.capture_schema_snapshot(ids))
+    }
+
+    /// ADR 0265 — capture a schema snapshot AND pin every
+    /// observed `(TableId, version)` in the lease registry.
+    /// The returned `SchemaLease` decrements the pins on drop.
+    /// Operators / future online-DDL coordinators consult
+    /// `active_readers_on` before accepting an ALTER.
+    pub fn capture_schema_lease(
+        &self, qualified_names: &[&str],
+    ) -> SqlResult<SchemaLease> {
+        let snapshot = self.capture_schema_snapshot_of(qualified_names)?;
+        let mut registry = self.schema_leases.lock();
+        for (table, version) in snapshot.entries() {
+            *registry.entry(table).or_default().entry(version).or_insert(0) += 1;
+        }
+        drop(registry);
+        Ok(SchemaLease { snapshot, registry: std::sync::Arc::clone(&self.schema_leases) })
+    }
+
+    /// ADR 0265 — count of active reader pins on a specific
+    /// table (summed across all pinned versions). A future
+    /// ALTER coordinator uses this to wait for drain.
+    pub fn active_readers_on(&self, table: crate::TableId) -> usize {
+        let registry = self.schema_leases.lock();
+        registry.get(&table)
+            .map(|per| per.values().sum())
+            .unwrap_or(0)
+    }
+
+    /// ADR 0265 — per-version pin counts for a table. Operator
+    /// diagnostic.
+    pub fn reader_pin_versions(&self, table: crate::TableId)
+        -> std::collections::BTreeMap<u64, usize>
+    {
+        let registry = self.schema_leases.lock();
+        registry.get(&table).cloned().unwrap_or_default()
     }
 
     /// ADR 0256 + ADR 0264 — run `sql` only if every table
