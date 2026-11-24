@@ -22,3 +22,5 @@ bincode     = { workspace = true }
 
 [dev-dependencies]
 tempfile    = { workspace = true }
+# ADR 0305 — in-process mock + cursor file tests.
+

@@ -206,7 +206,7 @@ starts; when the slice ships, the ADR number moves to
 | Versioned semantic catalog with lineage edges | 0299 | DONE | `VersionedLineage` with monotonic per-node revisions, `stale_edges`, DOT + JSON exports. 4 unit tests. In-memory revisions only — durable journal is a Gate 3+ follow-up. |
 | DHIS2 aggregate / event / tracker / indicator mapping | 0300 | DONE | `export_dhis2_bundle_json` + 9 typed catalog enumerators; `dhis2_roundtrip.rs` import→export→reimport parity + determinism tests |
 
-#### P1-4 Ingest + source adapters (`bradian-ingest`, `bradian-sources`)
+#### P1-4 Ingest + source adapters (`bradian-ingest`, `bradian-sources`) — **5 of 5 DONE**
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
@@ -214,7 +214,7 @@ starts; when the slice ships, the ADR number moves to
 | CSV adapter | 0302 | DONE | `CsvStream` row-at-a-time iterator over any `Read`; `infer_column_types` with Bool/I64/F64/Text widening; 3 unit tests. Errors (unterminated quote) already surfaced by `read_csv_bytes` |
 | JSON Lines adapter | 0303 | DONE | `JsonlStream` + `JsonlEnvelopeStream` iterators over any `Read`; blank-line skipping + per-line parse-error context; 2 unit tests (parity + line-number error) + existing batch tests |
 | Arrow IPC adapter | 0304 | DONE (Bradian-native) | `ipc::write_ipc/read_ipc` with `BRCH\x01` magic + bincode body; 4 unit tests cover empty/typed round-trip, magic-mismatch rejection, width-mismatch rejection. Apache Arrow wire compatibility remains a feature-gated follow-up |
-| SQL CDC adapter (Postgres logical replication, pull-only) | 0305 | OPEN | Admin credentials scoped; cursor persistence |
+| SQL CDC adapter (Postgres logical replication, pull-only) | 0305 | DONE | `SqlCdcCredentials::try_new` refuses readonly=false; `CursorStore` with atomic rename; `BoundedCdcPuller` loads/persists LSN + does not regress; 4 unit tests. Live Postgres transport remains a feature-gated follow-up |
 
 #### P1-5 Benchmarks (`bradian-benchmark`)
 
