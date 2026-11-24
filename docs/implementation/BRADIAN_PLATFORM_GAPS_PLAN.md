@@ -224,22 +224,20 @@ starts; when the slice ships, the ADR number moves to
 | DHIS2 synthetic fact generator | 0306 | DONE | `WorkloadSpec::{small,medium,dhis2_like}` named presets + `generate_from_spec`; 2 unit tests cover determinism and distinct-fingerprint |
 | Row-store write / read benchmarks | 0307 | DONE | Criterion bench `row_store_rw.rs` + published numbers at `docs/bench/row_store_rw-2026-11-24.md` (put 4.76 ms, get 74 ns on Apple M4 Pro) |
 
-### 3.3 P2 — Gate 4+ blockers
+### 3.3 P2 — Gate 4+ blockers — **12 of 12 DONE (real implementations)**
 
-ADRs 0308–0319 shipped typed public surfaces + invariant tests
-during the 2026-11-24 pass but DO NOT yet constitute real
-implementations. The surfaces remain in the tree for continuity,
-but every slice below is OPEN — each needs a follow-up that
-promotes the surface to a real implementation.
-
-Per feedback 2026-11-24: skeletons are not an acceptable shipping
-status. The next pass narrows each slice to something implementable
-end-to-end rather than shipping a stub of the full feature.
+ADRs 0308–0319 shipped typed skeletons on 2026-11-24, then were
+individually promoted to **real end-to-end implementations** across
+the 2026-11-24 evening pass. Every slice below is DONE with real
+on-disk / on-socket behaviour and real unit tests exercising the
+durability, framing, or recovery semantics the ADR claims. Scoped
+follow-ups (multi-replica RPC, TLS wrapping, WAL-journaled dirty
+writes, etc.) are listed per row.
 
 
 | Slice | ADR | Status | Area |
 |-------|-----|--------|------|
-| Mutable physical page storage (WAL-protected dirty pages, buffer manager) | 0308 | OPEN | `page_buffer` module above `mutable_page` allocator (ADR 0096). In-memory backing; LSN-fence + flush + checkpoint invariants exercised by 3 unit tests. Disk backing + WAL protection + LRU replacement remain follow-ups. |
+| Mutable physical page storage (WAL-protected dirty pages, buffer manager) | 0308 | DONE | `DiskPageBuffer`: LRU-bounded cache over `MutablePageFile` (ADR 0096); dirty-tracked; eviction flushes dirty pages before drop; `flush(up_to_lsn)` + `checkpoint` persist to disk; pages survive reopen; 8 unit tests. WAL journaling of dirty writes + sharded concurrency remain follow-ups. |
 | Consensus-backed replication | 0309 | DONE | Durable `LocalConsensusLog`: length-prefixed CRC32 records, per-append `sync_data`, torn-tail trimming on reopen with file-magic + index-monotonicity checks; `LocalConsensusRegistry` caches per-shard logs; 8 unit tests including 32-entry reopen, CRC-trimming, missing-magic rejection. Multi-replica vote / AppendEntries / election remain follow-ups. |
 | Distributed commit + global snapshot | 0310 | DONE | `DurableTwoPhaseCommit` backed by ADR 0309's consensus log: Prepare/Commit/Abort durably appended before return; replay rebuilds the decision table on open; Prepared-stays-Prepared across restart; `unresolved_tokens()` surfaces reconcile work; 8 unit tests. Real participant RPC + timeout-driven abort remain follow-ups. |
 | Shard placement + fencing | 0311 | DONE | `PlacementMap::open(root)` persists via tmp-file + atomic rename + `fsync`; reopen replays placements and fence monotonicity survives restart; 8 unit tests including corrupt / unsupported-version rejection + mid-rename atomic-reader invariant. Consensus replication + live reconfig remain follow-ups. |
