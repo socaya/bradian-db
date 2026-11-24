@@ -22,6 +22,12 @@ use crate::TableId;
 pub enum ObjectCapability {
     /// `SELECT` on this table — read-only.
     Select,
+    /// ADR 0278 — `INSERT` on this table.
+    Insert,
+    /// ADR 0278 — `UPDATE` on this table.
+    Update,
+    /// ADR 0278 — `DELETE` on this table.
+    Delete,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,15 +85,20 @@ impl UserRecord {
         &self.table_grants
     }
 
-    /// ADR 0258 — true if the user may exercise `cap` on
-    /// `table`. The global `Capability::Read` implies
-    /// `ObjectCapability::Select` on every table.
+    /// ADR 0258 + ADR 0278 — true if the user may exercise
+    /// `cap` on `table`. The global `Capability::Read`
+    /// implies `Select`; the global `Capability::Write`
+    /// implies `Insert`, `Update`, `Delete`.
     pub fn allows_on_table(&self, table: TableId, cap: ObjectCapability) -> bool {
-        if matches!(cap, ObjectCapability::Select)
-            && self.capabilities.contains(&Capability::Read)
-        {
-            return true;
-        }
+        let implied_by_global = match cap {
+            ObjectCapability::Select =>
+                self.capabilities.contains(&Capability::Read),
+            ObjectCapability::Insert
+            | ObjectCapability::Update
+            | ObjectCapability::Delete =>
+                self.capabilities.contains(&Capability::Write),
+        };
+        if implied_by_global { return true; }
         self.table_grants.get(&table)
             .is_some_and(|caps| caps.contains(&cap))
     }

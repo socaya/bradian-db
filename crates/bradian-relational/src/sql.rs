@@ -3243,6 +3243,22 @@ pub(crate) fn join_resolve_column(
 /// column identifier. Used by both `parse_projection` and the
 /// WHERE-side JSON path predicate parser so the chain grammar
 /// has exactly one implementation.
+/// ADR 0278 — recognize a per-object capability keyword
+/// (`SELECT`, `INSERT`, `UPDATE`, `DELETE`). Returns `Some`
+/// after consuming the keyword, `None` if the next word
+/// isn't one of those. Lets the GRANT/REVOKE grammar
+/// distinguish per-object vs. global grants.
+pub(crate) fn detect_object_capability(p: &mut Parser)
+    -> Option<crate::user_catalog::ObjectCapability>
+{
+    use crate::user_catalog::ObjectCapability;
+    if p.consume_word("select") { Some(ObjectCapability::Select) }
+    else if p.consume_word("insert") { Some(ObjectCapability::Insert) }
+    else if p.consume_word("update") { Some(ObjectCapability::Update) }
+    else if p.consume_word("delete") { Some(ObjectCapability::Delete) }
+    else { None }
+}
+
 /// ADR 0251 — parse a capability keyword (`READ`, `WRITE`,
 /// `DDL`, `ADMIN`). Any other word returns `SqlError::Syntax`.
 pub(crate) fn parse_capability(p: &mut Parser) -> SqlResult<bradian_core::Capability> {
@@ -6650,17 +6666,16 @@ impl SqlEngine {
             }
             // ADR 0251 — GRANT <cap> TO <user>
             // ADR 0258 — GRANT SELECT ON <table> TO <user>
+            // ADR 0278 — GRANT { INSERT | UPDATE | DELETE } ON <table> TO <user>
             "grant" => {
-                if p.next_is_word("select") {
-                    p.consume_word("select");
+                if let Some(obj_cap) = detect_object_capability(&mut p) {
                     p.expect("on")?;
                     let table_name = p.name()?;
                     let table = self.resolve(&table_name)?;
                     p.expect("to")?;
                     let user = p.word()?;
                     p.end()?;
-                    self.users.grant_on_table(&user, table.id,
-                        crate::user_catalog::ObjectCapability::Select)?;
+                    self.users.grant_on_table(&user, table.id, obj_cap)?;
                     return Ok(SqlResultSet::Command { affected: 0 });
                 }
                 let cap = parse_capability(&mut p)?;
@@ -6670,19 +6685,15 @@ impl SqlEngine {
                 self.users.grant(&user, cap)?;
                 Ok(SqlResultSet::Command { affected: 0 })
             }
-            // ADR 0251 — REVOKE <cap> FROM <user>
-            // ADR 0258 — REVOKE SELECT ON <table> FROM <user>
             "revoke" => {
-                if p.next_is_word("select") {
-                    p.consume_word("select");
+                if let Some(obj_cap) = detect_object_capability(&mut p) {
                     p.expect("on")?;
                     let table_name = p.name()?;
                     let table = self.resolve(&table_name)?;
                     p.expect("from")?;
                     let user = p.word()?;
                     p.end()?;
-                    self.users.revoke_on_table(&user, table.id,
-                        crate::user_catalog::ObjectCapability::Select)?;
+                    self.users.revoke_on_table(&user, table.id, obj_cap)?;
                     return Ok(SqlResultSet::Command { affected: 0 });
                 }
                 let cap = parse_capability(&mut p)?;
@@ -6734,18 +6745,25 @@ impl<'a> AuthenticatedSession<'a> {
     /// the context to include `Capability::Read` for this one
     /// call.
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
-        if !self.authz.allows(bradian_core::Capability::Read) {
-            if let Some(name_parts) = extract_single_table_select_target(sql) {
+        // ADR 0258 / 0278 — per-object elevation. If the
+        // session lacks the global capability for this
+        // statement's verb AND the statement targets a
+        // single table that the user holds the matching
+        // per-object grant on, elevate for this one call.
+        if let Some((required_cap, obj_cap, name_parts)) =
+            classify_single_table_statement(sql)
+        {
+            let has_global = self.authz.allows(required_cap);
+            if !has_global {
                 let catalog = self.engine.catalog.snapshot();
                 if let Some(table) = resolve_in_snapshot(&catalog, &name_parts) {
-                    let caps = self.table_grants.get(&table.id);
-                    if caps.is_some_and(|s|
-                        s.contains(&crate::user_catalog::ObjectCapability::Select))
-                    {
-                        let mut granted = self.authz.capabilities().to_vec();
-                        granted.push(bradian_core::Capability::Read);
+                    let granted = self.table_grants.get(&table.id)
+                        .is_some_and(|s| s.contains(&obj_cap));
+                    if granted {
+                        let mut caps = self.authz.capabilities().to_vec();
+                        caps.push(required_cap);
                         let elevated = bradian_core::AuthorizationContext::new(
-                            self.authz.principal_id().to_string(), granted);
+                            self.authz.principal_id().to_string(), caps);
                         return self.engine.execute_as(&elevated, sql);
                     }
                 }
@@ -6753,6 +6771,40 @@ impl<'a> AuthenticatedSession<'a> {
         }
         self.engine.execute_as(&self.authz, sql)
     }
+}
+
+/// ADR 0278 — classify a statement as a single-table SELECT /
+/// INSERT / UPDATE / DELETE and return the required global
+/// capability, its per-object counterpart, and the target
+/// table name. Returns None for compound FROMs (joins /
+/// subqueries), DDL, or anything else.
+fn classify_single_table_statement(sql: &str)
+    -> Option<(bradian_core::Capability,
+               crate::user_catalog::ObjectCapability,
+               Vec<String>)>
+{
+    use bradian_core::Capability;
+    use crate::user_catalog::ObjectCapability;
+    let mut p = Parser::new(sql).ok()?;
+    if p.consume_word("select") {
+        let parts = extract_single_table_select_target(sql)?;
+        return Some((Capability::Read, ObjectCapability::Select, parts));
+    }
+    if p.consume_word("insert") {
+        p.consume_word("into");
+        let parts = p.name().ok()?;
+        return Some((Capability::Write, ObjectCapability::Insert, parts));
+    }
+    if p.consume_word("update") {
+        let parts = p.name().ok()?;
+        return Some((Capability::Write, ObjectCapability::Update, parts));
+    }
+    if p.consume_word("delete") {
+        p.consume_word("from");
+        let parts = p.name().ok()?;
+        return Some((Capability::Write, ObjectCapability::Delete, parts));
+    }
+    None
 }
 
 /// ADR 0258 — scan a SQL statement for a simple
