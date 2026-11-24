@@ -56,6 +56,9 @@ pub mod schema_activation;
 pub mod local_access;
 pub mod workspace_usage;
 pub mod mutable_page;
+/// ADR 0308 — buffer-pool / dirty-page-manager skeleton
+/// layered over `mutable_page`. In-memory for this slice.
+pub mod page_buffer;
 pub mod unique_check;
 pub mod pitr;
 pub mod collation;
