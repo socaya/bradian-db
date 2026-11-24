@@ -26,6 +26,8 @@ pub mod consensus;
 pub mod distributed_commit;
 /// ADR 0311 — shard placement + fencing skeleton.
 pub mod shard_placement;
+/// ADR 0312 — shard rebalancing skeleton.
+pub mod rebalancing;
 
 pub use coordinator::{Coordinator, FederatedResult};
 pub use fragment::{Fragment, FragmentKind, FragmentResult};

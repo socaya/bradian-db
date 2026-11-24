@@ -232,7 +232,7 @@ starts; when the slice ships, the ADR number moves to
 | Consensus-backed replication | 0309 | SKELETON | `consensus` module exposes `ConsensusGroup` trait + single-replica `InMemoryConsensusGroup` stub; 2 unit tests. Not safe for multi-node use. |
 | Distributed commit + global snapshot | 0310 | SKELETON | `distributed_commit` module with `DistributedCommit` trait + `InMemoryTwoPhaseCommit` stub; 3 unit tests. Single-process only. |
 | Shard placement + fencing | 0311 | SKELETON | `shard_placement::PlacementMap` with per-shard monotone fence tokens; 2 unit tests. In-memory only; no durable manifest, no reconfig protocol. |
-| Rebalancing | 0312 | OPEN | `bradian-distributed` |
+| Rebalancing | 0312 | SKELETON | `rebalancing::RebalancePlan::{diff,apply_to}`; 2 unit tests. Pure planning + in-memory apply; no data movement, no catch-up, no handoff. |
 | Federation (site autonomy) | 0313 | OPEN | New crate or `bradian-distributed` extension |
 | Studio UI backing real SQL sessions | 0314 | OPEN | `apps/bradian-ui` + `bradian-serving` |
 | DHIS2 integration deployment path | 0315 | OPEN | `apps/dhis2-integration` |
