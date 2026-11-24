@@ -3383,6 +3383,9 @@ pub(crate) fn detect_object_capability(p: &mut Parser)
     else if p.consume_word("insert") { Some(ObjectCapability::Insert) }
     else if p.consume_word("update") { Some(ObjectCapability::Update) }
     else if p.consume_word("delete") { Some(ObjectCapability::Delete) }
+    // ADR 0279 — ALTER / DROP per-object grants.
+    else if p.consume_word("alter") { Some(ObjectCapability::Alter) }
+    else if p.consume_word("drop") { Some(ObjectCapability::Drop) }
     else { None }
 }
 
@@ -7085,6 +7088,18 @@ fn classify_single_table_statement(sql: &str)
         p.consume_word("from");
         let parts = p.name().ok()?;
         return Some((Capability::Write, ObjectCapability::Delete, parts));
+    }
+    // ADR 0279 — ALTER TABLE <name> / DROP TABLE <name>.
+    if p.consume_word("alter") {
+        if p.consume_word("table") {
+            let parts = p.name().ok()?;
+            return Some((Capability::Ddl, ObjectCapability::Alter, parts));
+        }
+    } else if p.consume_word("drop") {
+        if p.consume_word("table") {
+            let parts = p.name().ok()?;
+            return Some((Capability::Ddl, ObjectCapability::Drop, parts));
+        }
     }
     None
 }

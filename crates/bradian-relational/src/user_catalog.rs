@@ -28,6 +28,11 @@ pub enum ObjectCapability {
     Update,
     /// ADR 0278 — `DELETE` on this table.
     Delete,
+    /// ADR 0279 — `ALTER` on this table (RENAME / DROP COLUMN /
+    /// SET DEFAULT / SET NOT NULL / TYPE / FK / UK).
+    Alter,
+    /// ADR 0279 — `DROP` on this table.
+    Drop,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -97,6 +102,10 @@ impl UserRecord {
             | ObjectCapability::Update
             | ObjectCapability::Delete =>
                 self.capabilities.contains(&Capability::Write),
+            // ADR 0279 — global Ddl implies table ALTER / DROP.
+            ObjectCapability::Alter
+            | ObjectCapability::Drop =>
+                self.capabilities.contains(&Capability::Ddl),
         };
         if implied_by_global { return true; }
         self.table_grants.get(&table)
