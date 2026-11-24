@@ -4714,8 +4714,8 @@ impl SqlEngine {
         let caps: Vec<bradian_core::Capability> =
             record.capabilities().iter().copied().collect();
         let authz = bradian_core::AuthorizationContext::new(record.name.clone(), caps);
-        let table_grants = record.table_grants().clone();
-        let session = AuthenticatedSession { engine: self, authz, table_grants };
+        let _initial_grants = record.table_grants().clone();
+        let session = AuthenticatedSession { engine: self, authz, _initial_grants };
         callback(&session)
     }
 
@@ -6718,10 +6718,12 @@ impl SqlEngine {
 pub struct AuthenticatedSession<'a> {
     engine: &'a SqlEngine,
     authz: bradian_core::AuthorizationContext,
-    /// ADR 0258 — per-table SELECT grants (and future
-    /// per-table caps) for the authenticated user, snapshotted
-    /// at session start.
-    table_grants: std::collections::BTreeMap<
+    /// ADR 0282 — grants are re-read from the live user
+    /// catalog on every `execute` so mid-session REVOKE
+    /// takes effect on the next statement. This field is
+    /// kept for callers that want a snapshot-at-start view
+    /// for diagnostics.
+    _initial_grants: std::collections::BTreeMap<
         crate::TableId,
         std::collections::BTreeSet<crate::user_catalog::ObjectCapability>,
     >,
@@ -6745,32 +6747,120 @@ impl<'a> AuthenticatedSession<'a> {
     /// the context to include `Capability::Read` for this one
     /// call.
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
-        // ADR 0258 / 0278 — per-object elevation. If the
-        // session lacks the global capability for this
-        // statement's verb AND the statement targets a
-        // single table that the user holds the matching
-        // per-object grant on, elevate for this one call.
-        if let Some((required_cap, obj_cap, name_parts)) =
-            classify_single_table_statement(sql)
+        // ADR 0282 — refresh per-table grants from the live
+        // user catalog so a mid-session REVOKE takes effect
+        // on the next statement.
+        let refreshed_grants = self.engine.users.snapshot()
+            .get(self.authz.principal_id())
+            .map(|r| r.table_grants().clone())
+            .unwrap_or_default();
+        // ADR 0258 / 0278 / 0280 — per-object elevation. If
+        // the session lacks the global capability for this
+        // statement's verb AND EVERY referenced table carries
+        // the matching per-object grant, elevate for this
+        // one call.
+        if let Some((required_cap, obj_cap, parts_list)) =
+            classify_statement_targets(sql)
         {
             let has_global = self.authz.allows(required_cap);
             if !has_global {
                 let catalog = self.engine.catalog.snapshot();
-                if let Some(table) = resolve_in_snapshot(&catalog, &name_parts) {
-                    let granted = self.table_grants.get(&table.id)
-                        .is_some_and(|s| s.contains(&obj_cap));
-                    if granted {
-                        let mut caps = self.authz.capabilities().to_vec();
-                        caps.push(required_cap);
-                        let elevated = bradian_core::AuthorizationContext::new(
-                            self.authz.principal_id().to_string(), caps);
-                        return self.engine.execute_as(&elevated, sql);
+                let mut all_granted = !parts_list.is_empty();
+                for parts in &parts_list {
+                    match resolve_in_snapshot(&catalog, parts) {
+                        Some(t) => {
+                            if !refreshed_grants.get(&t.id)
+                                .is_some_and(|s| s.contains(&obj_cap))
+                            { all_granted = false; break; }
+                        }
+                        None => { all_granted = false; break; }
                     }
+                }
+                if all_granted {
+                    let mut caps = self.authz.capabilities().to_vec();
+                    caps.push(required_cap);
+                    let elevated = bradian_core::AuthorizationContext::new(
+                        self.authz.principal_id().to_string(), caps);
+                    return self.engine.execute_as(&elevated, sql);
                 }
             }
         }
         self.engine.execute_as(&self.authz, sql)
     }
+}
+
+/// ADR 0280 — classify any statement and return the list
+/// of referenced table names (not just the first). For
+/// SELECT, extracts each FROM / JOIN target. For INSERT /
+/// UPDATE / DELETE, the single target table. Returns None
+/// for DDL and anything else.
+fn classify_statement_targets(sql: &str)
+    -> Option<(bradian_core::Capability,
+               crate::user_catalog::ObjectCapability,
+               Vec<Vec<String>>)>
+{
+    use bradian_core::Capability;
+    use crate::user_catalog::ObjectCapability;
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if lower.starts_with("select") {
+        let targets = extract_select_table_targets(sql);
+        if targets.is_empty() { return None; }
+        return Some((Capability::Read, ObjectCapability::Select, targets));
+    }
+    let single = classify_single_table_statement(sql)?;
+    Some((single.0, single.1, vec![single.2]))
+}
+
+/// ADR 0280 — scan a SELECT for every FROM / JOIN target.
+/// Returns an empty vec on parse failure (caller fails closed).
+fn extract_select_table_targets(sql: &str) -> Vec<Vec<String>> {
+    let mut targets = Vec::new();
+    let mut p = match Parser::new(sql) {
+        Ok(p) => p,
+        Err(_) => return targets,
+    };
+    if !p.consume_word("select") { return targets; }
+    while !p.consume_word("from") {
+        if p.peek().is_none() { return targets; }
+        p.advance();
+    }
+    loop {
+        match p.name() {
+            Ok(n) => targets.push(n),
+            Err(_) => break,
+        }
+        let _ = p.consume_word("as");
+        if let Some(Token::Word(w)) = p.peek() {
+            let w_low = w.to_ascii_lowercase();
+            let is_clause = matches!(w_low.as_str(),
+                "where" | "group" | "order" | "limit"
+                | "union" | "intersect" | "except"
+                | "inner" | "left" | "right" | "cross" | "join" | "on");
+            if !is_clause { p.advance(); }
+        }
+        if p.consume_word("inner") { p.consume_word("join"); continue; }
+        if p.consume_word("left") { p.consume_word("outer"); p.consume_word("join"); continue; }
+        if p.consume_word("right") { p.consume_word("outer"); p.consume_word("join"); continue; }
+        if p.consume_word("cross") { p.consume_word("join"); continue; }
+        if p.consume_word("join") { continue; }
+        if p.consume_symbol(',') { continue; }
+        if p.consume_word("on") {
+            while let Some(tok) = p.peek() {
+                if let Token::Word(w) = tok {
+                    let w_low = w.to_ascii_lowercase();
+                    if matches!(w_low.as_str(),
+                        "inner" | "left" | "right" | "cross" | "join"
+                        | "where" | "group" | "order" | "limit"
+                        | "union" | "intersect" | "except")
+                    { break; }
+                }
+                p.advance();
+            }
+            continue;
+        }
+        break;
+    }
+    targets
 }
 
 /// ADR 0278 — classify a statement as a single-table SELECT /
