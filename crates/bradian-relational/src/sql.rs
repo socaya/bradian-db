@@ -6121,8 +6121,14 @@ impl SqlEngine {
                 if p.consume_word("drop") {
                     p.expect("column")?;
                     let col = p.word()?;
+                    // ADR 0261 — optional CASCADE tail.
+                    let cascade = p.consume_word("cascade");
                     p.end()?;
-                    self.catalog.drop_column(table.id, &col)?;
+                    if cascade {
+                        self.catalog.drop_column_cascade(table.id, &col)?;
+                    } else {
+                        self.catalog.drop_column(table.id, &col)?;
+                    }
                     return Ok(SqlResultSet::Command { affected: 0 });
                 }
                 if p.consume_word("alter") {

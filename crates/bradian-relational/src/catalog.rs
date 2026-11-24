@@ -598,6 +598,80 @@ impl Catalog {
         Ok(())
     }
 
+    /// ADR 0261 — drop a named foreign-key constraint from a
+    /// table. Rejects unknown names or missing constraints.
+    pub fn drop_foreign_key(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.foreign_keys.iter().any(|fk| fk.name == name) {
+            return Err(CatalogError::NotFound(format!("foreign key {name}")));
+        }
+        let t = self.tables.get_mut(&id).expect("validated table");
+        t.foreign_keys.retain(|fk| fk.name != name);
+        self.bump_schema_version(id);
+        Ok(())
+    }
+
+    /// ADR 0261 — drop a named unique constraint from a table.
+    /// Rejects unknown names or missing constraints.
+    pub fn drop_unique_key(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.unique_keys.iter().any(|uk| uk.name == name) {
+            return Err(CatalogError::NotFound(format!("unique key {name}")));
+        }
+        let t = self.tables.get_mut(&id).expect("validated table");
+        t.unique_keys.retain(|uk| uk.name != name);
+        self.bump_schema_version(id);
+        Ok(())
+    }
+
+    /// ADR 0261 — drop a column, auto-dropping every dependent
+    /// unique key, foreign key, and incoming foreign key. Fails
+    /// for PK columns (CASCADE can't help; drop the whole table
+    /// instead) and for the last column (empty-table invariant).
+    pub fn drop_column_cascade(&mut self, id: TableId, name: &str) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.columns.iter().any(|c| c.name == name) {
+            return Err(CatalogError::NotFound(format!("column {name}")));
+        }
+        if table.columns.len() == 1 {
+            return Err(CatalogError::InvalidDefinition("cannot drop last column".into()));
+        }
+        if table.primary_key.columns.iter().any(|c| c == &name) {
+            return Err(CatalogError::DependentObjects(format!(
+                "column {name} is in primary key; CASCADE cannot drop PK")));
+        }
+        let local_uks: Vec<String> = table.unique_keys.iter()
+            .filter(|uk| uk.columns.iter().any(|c| c == &name))
+            .map(|uk| uk.name.clone()).collect();
+        let local_fks: Vec<String> = table.foreign_keys.iter()
+            .filter(|fk| fk.columns.iter().any(|c| c == &name))
+            .map(|fk| fk.name.clone()).collect();
+        let mut incoming: Vec<(TableId, String)> = Vec::new();
+        for other in self.tables.values() {
+            if other.id == id { continue; }
+            for fk in &other.foreign_keys {
+                if fk.referenced_table == id
+                    && fk.referenced_columns.iter().any(|c| c == &name)
+                {
+                    incoming.push((other.id, fk.name.clone()));
+                }
+            }
+        }
+        for uk in local_uks { self.drop_unique_key(id, &uk)?; }
+        for fk in local_fks { self.drop_foreign_key(id, &fk)?; }
+        for (other_id, fk_name) in incoming {
+            self.drop_foreign_key(other_id, &fk_name)?;
+        }
+        // Now the plain drop_column succeeds.
+        self.drop_column(id, &name)
+    }
+
     /// ADR 0124 — SET DEFAULT on a column. Rejects unknown
     /// columns. Validates the default against the column's
     /// declared type via typed_table::validate_value.

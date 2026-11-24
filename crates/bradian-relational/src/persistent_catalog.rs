@@ -88,6 +88,13 @@ enum Command {
     /// Caller is responsible for row-level validation before
     /// journaling.
     ChangeColumnType { table: TableId, column: String, new_type: crate::model::DataType },
+    /// ADR 0261 — drop a column, auto-dropping dependent UKs,
+    /// FKs, and incoming FKs.
+    DropColumnCascade { table: TableId, column: String },
+    /// ADR 0261 — drop a named foreign key.
+    DropForeignKey { table: TableId, name: String },
+    /// ADR 0261 — drop a named unique key.
+    DropUniqueKey { table: TableId, name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +189,18 @@ impl Event {
             }
             Command::ChangeColumnType { table, column, new_type } => {
                 catalog.change_column_type(*table, column, new_type.clone())?;
+                None
+            }
+            Command::DropColumnCascade { table, column } => {
+                catalog.drop_column_cascade(*table, column)?;
+                None
+            }
+            Command::DropForeignKey { table, name } => {
+                catalog.drop_foreign_key(*table, name)?;
+                None
+            }
+            Command::DropUniqueKey { table, name } => {
+                catalog.drop_unique_key(*table, name)?;
                 None
             }
             Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } | Command::ProposeDefaultedRevision { table, proposed } => {
@@ -571,6 +590,33 @@ impl PersistentCatalog {
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::ChangeColumnType {
             table, column: column.into(), new_type,
+        })?.1)
+    }
+
+    /// ADR 0261 — DROP COLUMN CASCADE.
+    pub fn drop_column_cascade(&self, table: TableId, column: &str)
+        -> PersistentCatalogResult<u64>
+    {
+        Ok(self.commit(Command::DropColumnCascade {
+            table, column: column.into(),
+        })?.1)
+    }
+
+    /// ADR 0261 — drop a named foreign key.
+    pub fn drop_foreign_key(&self, table: TableId, name: &str)
+        -> PersistentCatalogResult<u64>
+    {
+        Ok(self.commit(Command::DropForeignKey {
+            table, name: name.into(),
+        })?.1)
+    }
+
+    /// ADR 0261 — drop a named unique key.
+    pub fn drop_unique_key(&self, table: TableId, name: &str)
+        -> PersistentCatalogResult<u64>
+    {
+        Ok(self.commit(Command::DropUniqueKey {
+            table, name: name.into(),
         })?.1)
     }
 
