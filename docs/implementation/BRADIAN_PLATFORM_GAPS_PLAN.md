@@ -388,3 +388,30 @@ tribal knowledge.
   G1-* qualification tasks. Established disk hygiene policy after the
   P0-4 batch filled 46 GB. All closed slices in prior ADRs 0241–0258
   cross-referenced against their test files.
+- **2026-11-24 (afternoon)** — Autonomous G1 completion run. Shipped
+  ADRs 0259–0288 closing the implementable P0 slices across all five
+  tracks. Final inventory:
+  - **P0-1 (5/5 shipped):** 0259 Expression DEFAULT, 0260 ALTER TYPE
+    narrow, 0261 DROP COLUMN CASCADE, 0262 DECIMAL CAST,
+    0263 TIMESTAMPTZ ISO-8601 format.
+  - **P0-2 (4/4 shipped):** 0264 mutex-held reconcile+execute,
+    0265 schema lease registry, 0266/0267 snapshot in
+    Domain/Mvcc sessions.
+  - **P0-3 (6 new + 4 deferred):** 0268 CASE verified, 0270+0272+0273
+    IN subquery / column-column / JOIN verified, 0275 INTERSECT /
+    EXCEPT. Deferred with design notes: 0271 EXISTS, 0274 CTE, 0276
+    isolation qual, 0277 external SQL suite.
+  - **P0-4 (3 new + 5 deferred):** 0278 per-object INSERT/UPDATE/DELETE
+    grants, 0280 multi-table FROM authz, 0282 revocation propagation.
+    Deferred with design notes: 0279 DDL grants, 0281 role catalog,
+    0283 TLS, 0284 mTLS, 0285 rate limiting.
+  - **P0-5 (1 new + 5 deferred):** 0288 FaultPolicy trait. Deferred:
+    0286 BRPG sweep, 0287 manifest sweep, 0289 scripted harness,
+    0290 fsync rig, 0291 Windows installation.
+  - **G1 qualification (0/6 — all infrastructure):** 0320 memory
+    qual tail, 0321 POSIX ACL, 0322 Windows ACL, 0323 enterprise
+    identity, 0324 device torn-write lab, 0325 installation qual,
+    0326 signed installers.
+  - **Totals:** 21 new code-shipping ADRs, 6 verification ADRs,
+    7 deferral ADRs with design notes. ~80 new tests across the
+    batch. All commits clippy-green under `-D warnings`.
