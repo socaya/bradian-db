@@ -1408,6 +1408,39 @@ fn find_in_subquery(sql: &[u8], from: usize) -> Option<(usize, usize)> {
 /// ADR 0229 — find the position of the paren that closes the
 /// one at `open` (which must point AT the `(`).  Returns `None`
 /// when unbalanced.
+/// ADR 0271 — locate the next `EXISTS` keyword at top-level
+/// paren depth. Returns the byte offset of the `E` in EXISTS.
+/// Skips string literals so EXISTS inside a quoted string is
+/// ignored.
+fn find_exists_subquery(sql: &[u8], from: usize) -> Option<usize> {
+    let word_boundary = |b: u8| !b.is_ascii_alphanumeric() && b != b'_';
+    let mut i = from;
+    let mut in_quote = false;
+    let mut paren_depth = 0u32;
+    while i + 6 <= sql.len() {
+        let b = sql[i];
+        if in_quote {
+            if b == b'\'' { in_quote = false; }
+            i += 1; continue;
+        }
+        match b {
+            b'\'' => { in_quote = true; i += 1; continue; }
+            b'(' => { paren_depth += 1; i += 1; continue; }
+            b')' => { paren_depth = paren_depth.saturating_sub(1); i += 1; continue; }
+            _ => {}
+        }
+        if paren_depth == 0
+            && (i == 0 || word_boundary(sql[i - 1]))
+            && sql[i..i + 6].eq_ignore_ascii_case(b"EXISTS")
+            && (i + 6 == sql.len() || word_boundary(sql[i + 6]))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn find_matching_paren(sql: &[u8], open: usize) -> Option<usize> {
     assert_eq!(sql[open], b'(');
     let mut depth = 0i32;
@@ -3545,6 +3578,11 @@ pub(crate) enum WhereTree {
     And(Box<WhereTree>, Box<WhereTree>),
     Or(Box<WhereTree>, Box<WhereTree>),
     Not(Box<WhereTree>),
+    /// ADR 0271 — constant boolean predicate. Injected by the
+    /// textual EXISTS pre-pass (TRUE if the subquery returned
+    /// rows, FALSE otherwise) and reachable directly via
+    /// `WHERE TRUE` / `WHERE FALSE` grammar.
+    Bool(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -3574,7 +3612,12 @@ pub(crate) fn parse_select_where(p: &mut Parser, table: &Table) -> SqlResult<Sel
     // ADR 0240 — look one token ahead: `NOT`, `(`, or a word
     // followed by a JSON-arrow / hash-arrow dispatches to the
     // tree parser. Anything else goes to the PK-equality path.
-    if p.next_is_word("not") || matches!(p.peek(), Some(Token::Symbol('('))) {
+    // ADR 0271 — `TRUE` / `FALSE` boolean constants also go
+    // through the tree parser; they are the substitution
+    // target for the EXISTS pre-pass.
+    if p.next_is_word("not") || p.next_is_word("true") || p.next_is_word("false")
+        || matches!(p.peek(), Some(Token::Symbol('(')))
+    {
         let tree = parse_where_expr(p, table)?;
         return Ok(SelectWhere::JsonPathPredicates(tree));
     }
@@ -3686,6 +3729,10 @@ fn parse_where_primary(p: &mut Parser, table: &Table) -> SqlResult<WhereTree> {
         p.symbol(')')?;
         return Ok(inner);
     }
+    // ADR 0271 — constant boolean predicates (used by the
+    // EXISTS pre-pass + available directly).
+    if p.consume_word("true") { return Ok(WhereTree::Bool(true)); }
+    if p.consume_word("false") { return Ok(WhereTree::Bool(false)); }
     Ok(WhereTree::Predicate(parse_json_predicate(p, table)?))
 }
 
@@ -4072,6 +4119,7 @@ fn eval_where_tree(
             eval_where_tree(b, row, table)
         }
         WhereTree::Not(inner) => Ok(!eval_where_tree(inner, row, table)?),
+        WhereTree::Bool(b) => Ok(*b),
     }
 }
 
@@ -5043,6 +5091,11 @@ impl SqlEngine {
         // literal list.  This runs BEFORE the UNION splitter so
         // a subquery inside a UNION arm still gets expanded.
         let sql = self.resolve_in_subqueries(sql, control)?;
+        // ADR 0271 — EXISTS (SELECT …) → TRUE if the inner
+        // returns any rows, FALSE otherwise. Must run AFTER the
+        // IN-subquery pass so nested EXISTS inside IN resolves
+        // first through its own eager path.
+        let sql = self.resolve_exists_subqueries(&sql, control)?;
         let sql = sql.as_str();
         // ADR 0275 — INTERSECT / EXCEPT at the top level. Only
         // dispatch to the extended handler when a non-UNION
@@ -5432,6 +5485,48 @@ impl SqlEngine {
             }
         }
         evaluate_grouped(composite, composite_rows, &group_keys, &items, having.as_ref())
+    }
+
+    /// ADR 0271 — eagerly resolve every top-level
+    /// `EXISTS (SELECT …)` subquery by executing the inner and
+    /// substituting `TRUE` (non-empty) or `FALSE` (empty) in
+    /// place of the `EXISTS (...)` span. The substitution
+    /// composes with AND / OR / NOT in the WHERE tree parser.
+    /// Non-correlated only; inner may have any columns.
+    fn resolve_exists_subqueries(
+        &self, sql: &str, control: &ScanControl,
+    ) -> SqlResult<String> {
+        let mut out = sql.to_string();
+        loop {
+            let bytes = out.as_bytes();
+            let Some(exists_start) = find_exists_subquery(bytes, 0) else { break };
+            // Find the opening paren after EXISTS.
+            let mut i = exists_start + 6; // past "EXISTS"
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t'
+                || bytes[i] == b'\n' || bytes[i] == b'\r') { i += 1; }
+            if i >= bytes.len() || bytes[i] != b'(' {
+                return Err(SqlError::Syntax(
+                    "EXISTS must be followed by a parenthesised SELECT".into()));
+            }
+            let paren_open = i;
+            let close = find_matching_paren(bytes, paren_open)
+                .ok_or_else(|| SqlError::Syntax(
+                    "EXISTS (SELECT …) has unbalanced parens".into()))?;
+            let inner = &out[paren_open + 1..close];
+            let rs = self.execute_impl(inner, control, None, None, None)?;
+            let non_empty = match rs {
+                SqlResultSet::Rows { rows, .. } => !rows.is_empty(),
+                _ => return Err(SqlError::Unsupported(
+                    "EXISTS (SELECT …) subquery must be a SELECT".into())),
+            };
+            let substitute = if non_empty { "TRUE" } else { "FALSE" };
+            let mut rewritten = String::with_capacity(out.len());
+            rewritten.push_str(&out[..exists_start]);
+            rewritten.push_str(substitute);
+            rewritten.push_str(&out[close + 1..]);
+            out = rewritten;
+        }
+        Ok(out)
     }
 
     /// ADR 0229 — eagerly resolve every top-level
