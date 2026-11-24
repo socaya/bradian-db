@@ -70,6 +70,14 @@ enum Command {
     GrantOnTable { name: String, table: TableId, capability: ObjectCapability },
     /// ADR 0258 — revoke one per-table object capability.
     RevokeOnTable { name: String, table: TableId, capability: ObjectCapability },
+    /// ADR 0281 — create a role with explicit capabilities.
+    CreateRole { name: String, capabilities: BTreeSet<Capability> },
+    /// ADR 0281 — drop a role; implicit revoke from all users.
+    DropRole { name: String },
+    /// ADR 0281 — grant a role to a user.
+    GrantRole { user: String, role: String },
+    /// ADR 0281 — revoke a role from a user.
+    RevokeRole { user: String, role: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +120,19 @@ fn apply_event(cat: &mut UserCatalog, event: &Event) -> PersistentUserCatalogRes
         Command::RevokeOnTable { name, table, capability } => {
             cat.revoke_on_table(name, *table, *capability)
                 .map_err(PersistentUserCatalogError::User)
+        }
+        Command::CreateRole { name, capabilities } => {
+            cat.create_role(name, capabilities.clone())
+                .map_err(PersistentUserCatalogError::User)
+        }
+        Command::DropRole { name } => {
+            cat.drop_role(name).map_err(PersistentUserCatalogError::User)
+        }
+        Command::GrantRole { user, role } => {
+            cat.grant_role(user, role).map_err(PersistentUserCatalogError::User)
+        }
+        Command::RevokeRole { user, role } => {
+            cat.revoke_role(user, role).map_err(PersistentUserCatalogError::User)
         }
     }
 }
@@ -242,6 +263,28 @@ impl PersistentUserCatalog {
         -> PersistentUserCatalogResult<u64>
     {
         self.commit(Command::RevokeOnTable { name: name.to_owned(), table, capability })
+    }
+
+    /// ADR 0281 — create a role.
+    pub fn create_role(&self, name: &str, capabilities: BTreeSet<Capability>)
+        -> PersistentUserCatalogResult<u64>
+    {
+        self.commit(Command::CreateRole { name: name.to_owned(), capabilities })
+    }
+
+    /// ADR 0281 — drop a role.
+    pub fn drop_role(&self, name: &str) -> PersistentUserCatalogResult<u64> {
+        self.commit(Command::DropRole { name: name.to_owned() })
+    }
+
+    /// ADR 0281 — grant a role to a user.
+    pub fn grant_role(&self, user: &str, role: &str) -> PersistentUserCatalogResult<u64> {
+        self.commit(Command::GrantRole { user: user.to_owned(), role: role.to_owned() })
+    }
+
+    /// ADR 0281 — revoke a role from a user.
+    pub fn revoke_role(&self, user: &str, role: &str) -> PersistentUserCatalogResult<u64> {
+        self.commit(Command::RevokeRole { user: user.to_owned(), role: role.to_owned() })
     }
 
     pub fn drop_user(&self, name: &str) -> PersistentUserCatalogResult<u64> {

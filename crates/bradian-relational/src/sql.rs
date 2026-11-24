@@ -5695,6 +5695,21 @@ impl SqlEngine {
             "create" => {
                 let kind = p.word()?;
                 match kind.as_str() {
+                    // ADR 0281 — CREATE ROLE <name> [WITH <cap>[, <cap>...]]
+                    "role" => {
+                        let role = p.word()?;
+                        let mut caps = std::collections::BTreeSet::new();
+                        if p.consume_word("with") {
+                            loop {
+                                let cap = parse_capability(&mut p)?;
+                                caps.insert(cap);
+                                if !p.consume_symbol(',') { break; }
+                            }
+                        }
+                        p.end()?;
+                        self.users.create_role(&role, caps)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
                     // ADR 0249 — CREATE USER <name> WITH PASSWORD '<pw>'
                     "user" => {
                         let name = p.word()?;
@@ -6852,7 +6867,14 @@ impl SqlEngine {
                     "ALTER TABLE expects RENAME / DROP COLUMN / ALTER COLUMN".into()))
             }
             // ADR 0249 — DROP USER <name>
+            // ADR 0281 — DROP ROLE <name>
             "drop" => {
+                if p.consume_word("role") {
+                    let name = p.word()?;
+                    p.end()?;
+                    self.users.drop_role(&name)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
                 p.expect("user")?;
                 let name = p.word()?;
                 p.end()?;
@@ -6860,9 +6882,17 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             // ADR 0251 — GRANT <cap> TO <user>
-            // ADR 0258 — GRANT SELECT ON <table> TO <user>
-            // ADR 0278 — GRANT { INSERT | UPDATE | DELETE } ON <table> TO <user>
+            // ADR 0258/0278/0279 — GRANT <verb> ON <table> TO <user>
+            // ADR 0281 — GRANT ROLE <role> TO <user>
             "grant" => {
+                if p.consume_word("role") {
+                    let role = p.word()?;
+                    p.expect("to")?;
+                    let user = p.word()?;
+                    p.end()?;
+                    self.users.grant_role(&user, &role)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
                 if let Some(obj_cap) = detect_object_capability(&mut p) {
                     p.expect("on")?;
                     let table_name = p.name()?;
@@ -6881,6 +6911,15 @@ impl SqlEngine {
                 Ok(SqlResultSet::Command { affected: 0 })
             }
             "revoke" => {
+                // ADR 0281 — REVOKE ROLE <role> FROM <user>
+                if p.consume_word("role") {
+                    let role = p.word()?;
+                    p.expect("from")?;
+                    let user = p.word()?;
+                    p.end()?;
+                    self.users.revoke_role(&user, &role)?;
+                    return Ok(SqlResultSet::Command { affected: 0 });
+                }
                 if let Some(obj_cap) = detect_object_capability(&mut p) {
                     p.expect("on")?;
                     let table_name = p.name()?;
@@ -6942,13 +6981,14 @@ impl<'a> AuthenticatedSession<'a> {
     /// the context to include `Capability::Read` for this one
     /// call.
     pub fn execute(&self, sql: &str) -> SqlResult<SqlResultSet> {
-        // ADR 0282 — refresh per-table grants from the live
-        // user catalog so a mid-session REVOKE takes effect
-        // on the next statement.
-        let refreshed_grants = self.engine.users.snapshot()
-            .get(self.authz.principal_id())
-            .map(|r| r.table_grants().clone())
-            .unwrap_or_default();
+        // ADR 0282 + ADR 0281 — refresh per-table grants and
+        // role-derived capabilities from the live user catalog
+        // so mid-session REVOKE / GRANT ROLE takes effect on
+        // the next statement.
+        let snapshot = self.engine.users.snapshot();
+        let principal = self.authz.principal_id();
+        let refreshed_grants = snapshot.effective_table_grants(principal);
+        let effective_global = snapshot.effective_capabilities(principal);
         // ADR 0258 / 0278 / 0280 — per-object elevation. If
         // the session lacks the global capability for this
         // statement's verb AND EVERY referenced table carries
@@ -6957,27 +6997,34 @@ impl<'a> AuthenticatedSession<'a> {
         if let Some((required_cap, obj_cap, parts_list)) =
             classify_statement_targets(sql)
         {
-            let has_global = self.authz.allows(required_cap);
-            if !has_global {
-                let catalog = self.engine.catalog.snapshot();
-                let mut all_granted = !parts_list.is_empty();
-                for parts in &parts_list {
-                    match resolve_in_snapshot(&catalog, parts) {
-                        Some(t) => {
-                            if !refreshed_grants.get(&t.id)
-                                .is_some_and(|s| s.contains(&obj_cap))
-                            { all_granted = false; break; }
-                        }
-                        None => { all_granted = false; break; }
+            let has_global = self.authz.allows(required_cap)
+                || effective_global.contains(&required_cap);
+            if has_global {
+                // Role granted the capability globally — elevate.
+                let mut caps = self.authz.capabilities().to_vec();
+                if !caps.contains(&required_cap) { caps.push(required_cap); }
+                let elevated = bradian_core::AuthorizationContext::new(
+                    self.authz.principal_id().to_string(), caps);
+                return self.engine.execute_as(&elevated, sql);
+            }
+            let catalog = self.engine.catalog.snapshot();
+            let mut all_granted = !parts_list.is_empty();
+            for parts in &parts_list {
+                match resolve_in_snapshot(&catalog, parts) {
+                    Some(t) => {
+                        if !refreshed_grants.get(&t.id)
+                            .is_some_and(|s| s.contains(&obj_cap))
+                        { all_granted = false; break; }
                     }
+                    None => { all_granted = false; break; }
                 }
-                if all_granted {
-                    let mut caps = self.authz.capabilities().to_vec();
-                    caps.push(required_cap);
-                    let elevated = bradian_core::AuthorizationContext::new(
-                        self.authz.principal_id().to_string(), caps);
-                    return self.engine.execute_as(&elevated, sql);
-                }
+            }
+            if all_granted {
+                let mut caps = self.authz.capabilities().to_vec();
+                caps.push(required_cap);
+                let elevated = bradian_core::AuthorizationContext::new(
+                    self.authz.principal_id().to_string(), caps);
+                return self.engine.execute_as(&elevated, sql);
             }
         }
         self.engine.execute_as(&self.authz, sql)

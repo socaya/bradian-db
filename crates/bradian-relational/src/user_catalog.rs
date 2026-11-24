@@ -73,6 +73,22 @@ pub struct UserRecord {
     /// global read capability.
     #[serde(default)]
     table_grants: BTreeMap<TableId, BTreeSet<ObjectCapability>>,
+    /// ADR 0281 — roles granted to this user. `effective_*`
+    /// methods union the user's own caps / table_grants with
+    /// those of each named role.
+    #[serde(default)]
+    roles: BTreeSet<String>,
+}
+
+/// ADR 0281 — a named bundle of capabilities. Keyed in
+/// `UserCatalog::roles` by canonical lowercase name.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RoleRecord {
+    pub name: String,
+    #[serde(default)]
+    pub capabilities: BTreeSet<Capability>,
+    #[serde(default)]
+    pub table_grants: BTreeMap<TableId, BTreeSet<ObjectCapability>>,
 }
 
 impl UserRecord {
@@ -89,6 +105,9 @@ impl UserRecord {
     pub fn table_grants(&self) -> &BTreeMap<TableId, BTreeSet<ObjectCapability>> {
         &self.table_grants
     }
+
+    /// ADR 0281 — roles granted to this user.
+    pub fn roles(&self) -> &BTreeSet<String> { &self.roles }
 
     /// ADR 0258 + ADR 0278 — true if the user may exercise
     /// `cap` on `table`. The global `Capability::Read`
@@ -169,6 +188,9 @@ fn verify_phc(password: &str, phc_string: &str) -> UserCatalogResult<()> {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct UserCatalog {
     users: BTreeMap<String, UserRecord>,
+    /// ADR 0281 — named role bundles.
+    #[serde(default)]
+    roles: BTreeMap<String, RoleRecord>,
 }
 
 impl UserCatalog {
@@ -196,6 +218,7 @@ impl UserCatalog {
         self.users.insert(name.clone(), UserRecord {
             name, password_hash: phc, active: true, capabilities,
             table_grants: BTreeMap::new(),
+            roles: BTreeSet::new(),
         });
         Ok(())
     }
@@ -288,6 +311,7 @@ impl UserCatalog {
         self.users.insert(name.clone(), UserRecord {
             name, password_hash: password_hash.to_owned(), active, capabilities,
             table_grants: BTreeMap::new(),
+            roles: BTreeSet::new(),
         });
         Ok(())
     }
@@ -318,6 +342,107 @@ impl UserCatalog {
             if caps.is_empty() { record.table_grants.remove(&table); }
         }
         Ok(())
+    }
+
+    /// ADR 0281 — create a role with explicit capabilities.
+    pub fn create_role(&mut self, name: &str, capabilities: BTreeSet<Capability>)
+        -> UserCatalogResult<()>
+    {
+        let name = validate_name(name)?;
+        if let Some(existing) = self.roles.get(&name) {
+            if existing.capabilities == capabilities { return Ok(()); }
+            return Err(UserCatalogError::Duplicate(name));
+        }
+        self.roles.insert(name.clone(), RoleRecord {
+            name, capabilities, table_grants: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    /// ADR 0281 — drop a role. Auto-revokes from every user.
+    /// Idempotent.
+    pub fn drop_role(&mut self, name: &str) -> UserCatalogResult<()> {
+        let name = validate_name(name)?;
+        if self.roles.remove(&name).is_some() {
+            for user in self.users.values_mut() {
+                user.roles.remove(&name);
+            }
+        }
+        Ok(())
+    }
+
+    /// ADR 0281 — grant a role to a user.
+    pub fn grant_role(&mut self, user: &str, role: &str) -> UserCatalogResult<()> {
+        let user = validate_name(user)?;
+        let role = validate_name(role)?;
+        if !self.roles.contains_key(&role) {
+            return Err(UserCatalogError::NotFound(role));
+        }
+        let record = self.users.get_mut(&user)
+            .ok_or(UserCatalogError::NotFound(user))?;
+        record.roles.insert(role);
+        Ok(())
+    }
+
+    /// ADR 0281 — revoke a role from a user.
+    pub fn revoke_role(&mut self, user: &str, role: &str) -> UserCatalogResult<()> {
+        let user = validate_name(user)?;
+        let role = validate_name(role)?;
+        let record = self.users.get_mut(&user)
+            .ok_or(UserCatalogError::NotFound(user))?;
+        record.roles.remove(&role);
+        Ok(())
+    }
+
+    /// ADR 0281 — look up a role.
+    pub fn role(&self, name: &str) -> Option<&RoleRecord> {
+        let name = validate_name(name).ok()?;
+        self.roles.get(&name)
+    }
+
+    /// ADR 0281 — iterate every stored role.
+    pub fn roles_iter(&self) -> impl Iterator<Item = &RoleRecord> {
+        self.roles.values()
+    }
+
+    /// ADR 0281 — effective global capabilities (union of
+    /// user's own with every role's).
+    pub fn effective_capabilities(&self, user: &str) -> BTreeSet<Capability> {
+        let mut out = BTreeSet::new();
+        if let Ok(name) = validate_name(user) {
+            if let Some(record) = self.users.get(&name) {
+                out.extend(record.capabilities.iter().copied());
+                for role_name in &record.roles {
+                    if let Some(role) = self.roles.get(role_name) {
+                        out.extend(role.capabilities.iter().copied());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// ADR 0281 — effective per-table grants (union of user's
+    /// own with every role's).
+    pub fn effective_table_grants(&self, user: &str)
+        -> BTreeMap<TableId, BTreeSet<ObjectCapability>>
+    {
+        let mut out: BTreeMap<TableId, BTreeSet<ObjectCapability>> = BTreeMap::new();
+        if let Ok(name) = validate_name(user) {
+            if let Some(record) = self.users.get(&name) {
+                for (t, caps) in &record.table_grants {
+                    out.entry(*t).or_default().extend(caps.iter().copied());
+                }
+                for role_name in &record.roles {
+                    if let Some(role) = self.roles.get(role_name) {
+                        for (t, caps) in &role.table_grants {
+                            out.entry(*t).or_default().extend(caps.iter().copied());
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// ADR 0251 — grant one capability. Idempotent. Rejects
