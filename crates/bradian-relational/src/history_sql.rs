@@ -659,11 +659,11 @@ impl<'a> HistorySqlSession<'a> {
     }
 
     fn execute_inner(&mut self, sql: &str) -> SqlResult<SqlResultSet> {
-        // ADR 0170 — workspace-wide admission cap. Catalog
-        // counts only for now (durable-history byte totals
-        // live on DurableTypedStore internals we don't
-        // expose publicly yet).
-        let usage = crate::workspace_usage::WorkspaceUsage::for_catalog(&self.engine.catalog);
+        // ADR 0170 + ADR 0320 — workspace-wide admission cap.
+        // Catalog + DurableTypedStore retained-history counts
+        // are sampled before every statement.
+        let usage = crate::workspace_usage::WorkspaceUsage::for_catalog(&self.engine.catalog)
+            .with_durable_typed(&self.engine.domain);
         self.engine.global_budget.check(&usage)?;
         let mut p = Parser::new_expressions(sql)?;
         let command = p.word()?;
