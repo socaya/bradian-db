@@ -16,7 +16,12 @@ blake3      = { workspace = true }
 ahash       = { workspace = true }
 once_cell   = { workspace = true }
 smallvec    = { workspace = true }
+# ADR 0319 — constant-time comparison of certification hashes.
+subtle      = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
 serde_json  = { workspace = true }
+# ADR 0319 — tempfile for certification tests writing a
+# fake Cargo.lock.
+tempfile    = { workspace = true }

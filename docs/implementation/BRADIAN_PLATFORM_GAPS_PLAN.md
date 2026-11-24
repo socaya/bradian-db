@@ -250,7 +250,7 @@ end-to-end rather than shipping a stub of the full feature.
 | Wire protocol for relational sessions + reference driver | 0316 | OPEN | `bradian_serving::wire::{WireMessage, ReferenceDriver}`; 2 unit tests. Pure in-process message pass; no TCP, no TLS binding, no SQL execution wired. |
 | PITR / incremental archive / offsite backup | 0317 | DONE | Byte-offset WAL archive: `write_from_wal` / `verify` / `apply_to_wal`; chunked + fsync'd; corruption + misalignment fail closed; 6 unit tests including real RowStore round-trip (full + incremental → fresh dir → reopen → every row + `last_lsn` match). Offsite transport + encryption are follow-ups. |
 | Schema history compaction with reference proofs | 0318 | OPEN | `schema_history_compaction::{plan_compaction, verify_proof}`; 2 unit tests. Pure planning + proof; no journal rewrite, no on-disk coupling. |
-| External reproducibility + production certification | 0319 | OPEN | `bradian_core::certification::{CertManifest, validate_shape}`; 2 unit tests. Shape validation + JSON round-trip; no reproducible-build check, no supply-chain audit, no signature algorithm. |
+| External reproducibility + production certification | 0319 | DONE | Real BLAKE3-256 of `Cargo.lock` via `CertManifest::{from_build, verify_against}`; constant-time hash comparison; 7 unit tests + 1 integration test hashing + verifying the live workspace `Cargo.lock`. Signature algorithm is a dedicated follow-up. |
 
 ### 3.4 Remaining Gate 1 qualification tasks (from master roadmap)
 

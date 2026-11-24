@@ -383,6 +383,8 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "subtle",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
