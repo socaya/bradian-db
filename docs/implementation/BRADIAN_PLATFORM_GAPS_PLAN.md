@@ -203,7 +203,7 @@ starts; when the slice ships, the ADR number moves to
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
-| Versioned semantic catalog with lineage edges | 0299 | OPEN | Graph export; stale-lineage detection |
+| Versioned semantic catalog with lineage edges | 0299 | DONE | `VersionedLineage` with monotonic per-node revisions, `stale_edges`, DOT + JSON exports. 4 unit tests. In-memory revisions only — durable journal is a Gate 3+ follow-up. |
 | DHIS2 aggregate / event / tracker / indicator mapping | 0300 | OPEN | Import reference DHIS2 metadata; round-trip |
 
 #### P1-4 Ingest + source adapters (`bradian-ingest`, `bradian-sources`)
