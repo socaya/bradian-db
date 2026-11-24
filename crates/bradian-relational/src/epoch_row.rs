@@ -136,6 +136,7 @@ mod tests {
             column_collations: Default::default(),
             policies: Default::default(),
             column_checks: Default::default(),
+            column_default_exprs: Default::default(),
         }
     }
 

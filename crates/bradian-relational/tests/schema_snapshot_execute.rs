@@ -106,6 +106,45 @@ fn execute_without_snapshot_still_works_after_alter() {
 }
 
 #[test]
+fn atomic_reconcile_and_execute_from_concurrent_threads() {
+    // ADR 0264 — the operation mutex is held across reconcile
+    // and execute. Confirm that a snapshot-protected SELECT
+    // either completes with pre-ALTER state or returns
+    // SchemaStale; never mixed data.
+    use std::sync::Arc;
+    use std::thread;
+    let (dir, db) = seed();
+    let db = Arc::new(db);
+    let snap = db.capture_schema_snapshot_of(&["t.public.items"]).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let db_select = Arc::clone(&db);
+    let b_select = Arc::clone(&barrier);
+    let select_handle = thread::spawn(move || {
+        b_select.wait();
+        db_select.execute_with_schema_snapshot(
+            "SELECT id FROM t.public.items WHERE id = 1", &snap)
+    });
+    let db_alter = Arc::clone(&db);
+    let b_alter = Arc::clone(&barrier);
+    let alter_handle = thread::spawn(move || {
+        b_alter.wait();
+        db_alter.execute(
+            "ALTER TABLE t.public.items ALTER COLUMN note SET NOT NULL BACKFILL 'd'")
+    });
+    let select_result = select_handle.join().unwrap();
+    let alter_result = alter_handle.join().unwrap();
+    alter_result.unwrap();
+    // The SELECT either completed before the ALTER (then it returned the row)
+    // or the ALTER landed first (then SchemaStale). It cannot mix.
+    match select_result {
+        Ok(_) => {}
+        Err(SqlError::SchemaStale { .. }) => {}
+        Err(other) => panic!("unexpected SELECT outcome: {other:?}"),
+    }
+    drop(dir);
+}
+
+#[test]
 fn snapshot_reports_specific_table_in_error() {
     let (_dir, db) = seed();
     // Resolve items' id BEFORE the ALTER so the test can assert

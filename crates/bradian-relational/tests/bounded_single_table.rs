@@ -9,7 +9,7 @@ fn table()->Table {
     Table { id:TableId(1),schema:SchemaId(1),name:"items".into(),columns:vec![
         Column { name:"id".into(),data_type:DataType::Int64,nullable:false },
         Column { name:"body".into(),data_type:DataType::Text,nullable:false }],
-        primary_key:PrimaryKey { columns:vec!["id".into()] },unique_keys:vec![],foreign_keys:vec![],column_defaults:Default::default(),column_collations:Default::default(),policies:Default::default(),column_checks:Default::default() }
+        primary_key:PrimaryKey { columns:vec!["id".into()] },unique_keys:vec![],foreign_keys:vec![],column_defaults:Default::default(),column_collations:Default::default(),policies:Default::default(),column_checks:Default::default(),column_default_exprs:Default::default() }
 }
 fn row(id:i64,body:&str)->Vec<Value> { vec![Value::Int64(id),Value::String(body.into())] }
 fn engine(root:&std::path::Path)->SqlEngine {

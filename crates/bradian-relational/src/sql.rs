@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use crate::runtime_limits::ScanControl;
 use std::path::{Path, PathBuf};
 
+#[allow(unused_imports)]
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -1901,7 +1902,7 @@ fn parse_decimal_text(s: &str, target_scale: u8) -> Option<i128> {
     let scale_mul = 10_i128.checked_pow(u32::from(target_scale))?;
     let int_scaled = int_v.checked_mul(scale_mul)?;
     let total = int_scaled.checked_add(frac_scaled)?;
-    Some(sign.checked_mul(total)?)
+    sign.checked_mul(total)
 }
 
 /// ADR 0257 — parse a hyphenated UUID string
@@ -4476,7 +4477,10 @@ pub(crate) fn key_predicate(
 pub struct SqlEngine {
     root: PathBuf,
     catalog: PersistentCatalog,
-    operation: Mutex<()>,
+    /// ADR 0264 — reentrant so `execute_with_schema_snapshot`
+    /// can hold the lock across reconcile + dispatch without
+    /// deadlocking on the nested execute path.
+    operation: parking_lot::ReentrantMutex<()>,
     /// ADR 0071 — present when the engine was opened via
     /// `open_with_bace`. Each lazy `TableStore::open_with_bace`
     /// in `table_store()` consults this.
@@ -4522,7 +4526,7 @@ impl SqlEngine {
         Ok(Self {
             root: root.to_owned(),
             catalog,
-            operation: Mutex::new(()),
+            operation: parking_lot::ReentrantMutex::new(()),
             bace_wiring: wiring,
             global_budget: crate::workspace_usage::GlobalBudget::default(),
             users,
@@ -4594,13 +4598,16 @@ impl SqlEngine {
         Ok(catalog.capture_schema_snapshot(ids))
     }
 
-    /// ADR 0256 — run `sql` only if every table named in the
-    /// snapshot still matches its captured version.
-    /// `SqlError::SchemaStale` surfaces when any version
-    /// advanced — the caller must re-plan.
+    /// ADR 0256 + ADR 0264 — run `sql` only if every table
+    /// named in the snapshot still matches its captured
+    /// version. The operation mutex is held across both the
+    /// reconcile and the dispatch so no ALTER can land in the
+    /// race window between them. `operation` is reentrant to
+    /// permit the inner `execute` call.
     pub fn execute_with_schema_snapshot(
         &self, sql: &str, snapshot: &crate::catalog::SchemaSnapshot,
     ) -> SqlResult<SqlResultSet> {
+        let _guard = self.operation.lock();
         let catalog = self.catalog.snapshot();
         if let Err(stale) = snapshot.reconcile(&catalog) {
             return Err(SqlError::SchemaStale {
