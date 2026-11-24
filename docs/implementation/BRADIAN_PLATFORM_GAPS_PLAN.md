@@ -229,7 +229,7 @@ starts; when the slice ships, the ADR number moves to
 | Slice | ADR | Status | Area |
 |-------|-----|--------|------|
 | Mutable physical page storage (WAL-protected dirty pages, buffer manager) | 0308 | SKELETON | `page_buffer` module above `mutable_page` allocator (ADR 0096). In-memory backing; LSN-fence + flush + checkpoint invariants exercised by 3 unit tests. Disk backing + WAL protection + LRU replacement remain follow-ups. |
-| Consensus-backed replication | 0309 | OPEN | `bradian-distributed` |
+| Consensus-backed replication | 0309 | SKELETON | `consensus` module exposes `ConsensusGroup` trait + single-replica `InMemoryConsensusGroup` stub; 2 unit tests. Not safe for multi-node use. |
 | Distributed commit + global snapshot | 0310 | OPEN | `bradian-distributed` |
 | Shard placement + fencing | 0311 | OPEN | `bradian-distributed` |
 | Rebalancing | 0312 | OPEN | `bradian-distributed` |

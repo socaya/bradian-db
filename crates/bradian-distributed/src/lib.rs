@@ -20,6 +20,8 @@ pub mod fragment;
 pub mod reconcile;
 pub mod residency;
 pub mod worker;
+/// ADR 0309 — consensus-backed replication skeleton.
+pub mod consensus;
 
 pub use coordinator::{Coordinator, FederatedResult};
 pub use fragment::{Fragment, FragmentKind, FragmentResult};
