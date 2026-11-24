@@ -1,5 +1,10 @@
 //! JSON Lines adapter: one JSON object per line, each already shaped as a canonical
 //! `bradian_ingest::Change` envelope or as a payload the caller projects into a change.
+//!
+//! ADR 0303 — `JsonlStream` and `JsonlEnvelopeStream`
+//! process the input row-at-a-time from any `Read`.
+
+use std::io::{BufRead, BufReader, Read};
 
 use bradian_core::{BradianError, BradianResult};
 use bradian_ingest::Change;
@@ -50,6 +55,63 @@ where
     Ok(out)
 }
 
+/// ADR 0303 — streaming JSONL reader. Yields one parsed
+/// `serde_json::Value` per non-blank line; parse errors
+/// carry the 1-based line number.
+pub struct JsonlStream<R: Read> {
+    reader: BufReader<R>,
+    lineno: usize,
+    done:   bool,
+}
+
+impl<R: Read> JsonlStream<R> {
+    pub fn new(reader: R) -> Self {
+        Self { reader: BufReader::new(reader), lineno: 0, done: false }
+    }
+}
+
+impl<R: Read> Iterator for JsonlStream<R> {
+    type Item = BradianResult<serde_json::Value>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done { return None; }
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => { self.done = true; return None; }
+                Ok(_) => {
+                    self.lineno += 1;
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() { continue; }
+                    return Some(serde_json::from_str::<serde_json::Value>(trimmed)
+                        .map_err(|e| BradianError::Serialization(
+                            format!("line {}: {e}", self.lineno))));
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(BradianError::invalid_value(
+                        format!("jsonl read: {e}"))));
+                }
+            }
+        }
+    }
+}
+
+/// ADR 0303 — streaming JSONL reader that parses each
+/// record directly into a `Change` envelope.
+pub struct JsonlEnvelopeStream<R: Read> { inner: JsonlStream<R> }
+impl<R: Read> JsonlEnvelopeStream<R> {
+    pub fn new(reader: R) -> Self { Self { inner: JsonlStream::new(reader) } }
+}
+impl<R: Read> Iterator for JsonlEnvelopeStream<R> {
+    type Item = BradianResult<Change>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|r| r.and_then(|v|
+            serde_json::from_value::<Change>(v).map_err(|e|
+                BradianError::Serialization(format!("envelope parse: {e}")))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,6 +130,38 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].change_id, "c1");
         assert_eq!(changes[1].source_version, 2);
+    }
+
+    // ADR 0303 — streaming parity + error reporting.
+
+    #[test]
+    fn streaming_envelope_parity_matches_batch_parser() {
+        let jsonl = r#"{"changeId":"c1","siteId":null,"objectType":"X","objectUid":"deAAAAAAAAA","sourceVersion":1,"operation":"UPSERT","occurredAt":"now","payload":{"a":1}}
+{"changeId":"c2","siteId":null,"objectType":"X","objectUid":"deAAAAAAAAA","sourceVersion":2,"operation":"UPSERT","occurredAt":"now","payload":{"a":2}}"#;
+        let batch = read_jsonl(jsonl.as_bytes(),
+            &JsonlOptions { expect_envelope: true }).unwrap();
+        let stream: Vec<_> = JsonlEnvelopeStream::new(jsonl.as_bytes())
+            .map(|r| r.unwrap()).collect();
+        assert_eq!(stream.len(), batch.len());
+        for (a, b) in stream.iter().zip(batch.iter()) {
+            assert_eq!(a.change_id, b.change_id);
+            assert_eq!(a.source_version, b.source_version);
+        }
+    }
+
+    #[test]
+    fn stream_skips_blank_lines_and_surfaces_parse_errors_with_line_number() {
+        let data = "{\"ok\":1}\n\n{not-json}\n{\"ok\":2}\n";
+        let mut s = JsonlStream::new(data.as_bytes());
+        assert_eq!(s.next().unwrap().unwrap()["ok"], 1);
+        // Blank line skipped; next call hits the malformed
+        // record and surfaces the 1-based line number 3.
+        let err = s.next().unwrap().unwrap_err();
+        assert!(format!("{err}").contains("line 3"),
+            "expected line-3 error context, got: {err}");
+        // After the error, the stream remains usable for
+        // subsequent lines.
+        assert_eq!(s.next().unwrap().unwrap()["ok"], 2);
     }
 
     #[test]
