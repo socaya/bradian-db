@@ -4747,6 +4747,20 @@ pub struct SqlEngine {
     schema_leases: std::sync::Arc<parking_lot::Mutex<
         std::collections::BTreeMap<crate::TableId,
             std::collections::BTreeMap<u64, usize>>>>,
+    /// ADR 0285 — per-principal token buckets. Empty when no
+    /// policy is set; `with_rate_limit` installs the policy
+    /// and `execute_as` charges one token per statement
+    /// (including authz-denied).
+    rate_limit_policy: parking_lot::Mutex<Option<RateLimitPolicy>>,
+    rate_limit_buckets: parking_lot::Mutex<
+        std::collections::BTreeMap<String, crate::rate_limiter::TokenBucket>>,
+}
+
+/// ADR 0285 — token-bucket policy applied per principal.
+#[derive(Clone, Copy, Debug)]
+pub struct RateLimitPolicy {
+    pub capacity: u64,
+    pub refill_per_second: u64,
 }
 
 /// ADR 0265 — RAII pin on observed schema versions. Dropping
@@ -4828,7 +4842,44 @@ impl SqlEngine {
             users,
             schema_leases: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::BTreeMap::new())),
+            rate_limit_policy: parking_lot::Mutex::new(None),
+            rate_limit_buckets: parking_lot::Mutex::new(
+                std::collections::BTreeMap::new()),
         })
+    }
+
+    /// ADR 0285 — install a per-principal rate-limit policy.
+    /// Fluent builder: called before shared use; replaces any
+    /// prior policy. Default (no call) is unlimited.
+    pub fn with_rate_limit(self, capacity: u64, refill_per_second: u64) -> Self {
+        *self.rate_limit_policy.lock() =
+            Some(RateLimitPolicy { capacity, refill_per_second });
+        self.rate_limit_buckets.lock().clear();
+        self
+    }
+
+    /// ADR 0285 — charge one token against the principal's
+    /// bucket. Refills one from scratch when a policy is set
+    /// and the principal is new. Returns
+    /// `SqlError::Resource(_)` on exhaustion.
+    fn charge_rate_limit(&self, principal: &str) -> SqlResult<()> {
+        let policy = match *self.rate_limit_policy.lock() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        let mut buckets = self.rate_limit_buckets.lock();
+        let bucket = buckets.entry(principal.to_string())
+            .or_insert_with(|| crate::rate_limiter::TokenBucket::new(
+                policy.capacity, policy.refill_per_second));
+        bucket.try_consume(1, now_micros).map_err(|_|
+            SqlError::Resource(crate::runtime_limits::ResourceError::Limit {
+                resource: "rate_limit",
+                limit: policy.capacity as usize,
+            }))
     }
 
     /// ADR 0249 — verify a user's plaintext password against
@@ -5080,6 +5131,10 @@ impl SqlEngine {
         authz: &bradian_core::AuthorizationContext,
         sql: &str,
     ) -> SqlResult<SqlResultSet> {
+        // ADR 0285 — charge the principal's bucket BEFORE the
+        // authz check so failed authn / authz attempts also
+        // consume quota (brute-force throttling).
+        self.charge_rate_limit(authz.principal_id())?;
         authz.check_sql(sql)?;
         self.execute(sql)
     }
