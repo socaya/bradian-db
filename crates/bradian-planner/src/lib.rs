@@ -11,6 +11,10 @@ pub mod explain;
 pub mod plan;
 pub mod pruning;
 pub mod runner;
+/// ADR 0296 — SQL logical plan tree + interpreter for the
+/// existing relational SQL subset. Deliberately separate
+/// from the DHIS2-oriented `plan::LogicalPlan`.
+pub mod sql_plan;
 
 pub use dsl::{
     AggregateQuery, AggregationSpec, FilterSpec, OrderSpec, PeriodSpec, QueryConsistency,

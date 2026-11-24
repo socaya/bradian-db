@@ -33,3 +33,5 @@ tempfile = { workspace = true }
 bradian-runtime = { workspace = true }
 # ADR 0294 — commit-receipt → incremental aggregate parity test.
 bradian-views   = { workspace = true }
+# ADR 0296 — SQL logical plan tree parity test.
+bradian-planner = { workspace = true }

@@ -195,7 +195,7 @@ starts; when the slice ships, the ADR number moves to
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
-| Logical plan node coverage for existing SQL subset | 0296 | OPEN | Round-trip: SQL → plan → execute |
+| Logical plan node coverage for existing SQL subset | 0296 | DONE | `bradian_planner::sql_plan` ships Scan / Filter / Project + interpreter; 4 unit tests + parity integration test prove plan tree matches `SqlEngine` on 3 statements. Automatic SQL→plan compile is 0297. |
 | EXPLAIN surface backed by actual plan | 0297 | OPEN | Not a text template |
 | Cost-based join reordering (two-table + chained) | 0298 | OPEN | Benchmarks demonstrate gain |
 
