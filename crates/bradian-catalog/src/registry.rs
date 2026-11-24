@@ -214,6 +214,35 @@ impl Catalog {
     pub fn transitive_dependents(&self, uid: &Uid) -> Vec<Uid> {
         self.inner.read().lineage.transitive_dependents(uid)
     }
+
+    // ADR 0300 — typed enumerators for DHIS2 export.
+    pub fn data_elements(&self) -> Vec<DataElement> {
+        self.inner.read().data_elements.values().cloned().collect()
+    }
+    pub fn datasets(&self) -> Vec<Dataset> {
+        self.inner.read().datasets.values().cloned().collect()
+    }
+    pub fn category_combos(&self) -> Vec<CategoryCombo> {
+        self.inner.read().category_combos.values().cloned().collect()
+    }
+    pub fn category_option_combos(&self) -> Vec<CategoryOptionCombo> {
+        self.inner.read().option_combos.values().cloned().collect()
+    }
+    pub fn org_units(&self) -> Vec<OrgUnit> {
+        self.inner.read().org_units.values().cloned().collect()
+    }
+    pub fn programs(&self) -> Vec<Program> {
+        self.inner.read().programs.values().cloned().collect()
+    }
+    pub fn program_stages(&self) -> Vec<ProgramStage> {
+        self.inner.read().program_stages.values().cloned().collect()
+    }
+    pub fn program_indicators(&self) -> Vec<ProgramIndicator> {
+        self.inner.read().program_indicators.values().cloned().collect()
+    }
+    pub fn indicators(&self) -> Vec<Indicator> {
+        self.inner.read().indicators.values().cloned().collect()
+    }
 }
 
 #[cfg(test)]

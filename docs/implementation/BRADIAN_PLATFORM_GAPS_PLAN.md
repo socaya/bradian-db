@@ -199,12 +199,12 @@ starts; when the slice ships, the ADR number moves to
 | EXPLAIN surface backed by actual plan | 0297 | DONE | `SqlExplainNode` derived structurally from the plan tree + deterministic Display; 3 unit tests pin both the structure and the rendered string |
 | Cost-based join reordering (two-table + chained) | 0298 | DONE | `SqlLogicalNode::Join` + `reorder_joins` + `estimated_rows`. 4 unit tests prove two-table swap, chained three-way rewrite, build-side strictly shrinks on asymmetric input (test proxy for a Criterion bench pending 0307) |
 
-#### P1-3 Catalog + semantic layer (`bradian-catalog`, `bradian-dhis2`)
+#### P1-3 Catalog + semantic layer (`bradian-catalog`, `bradian-dhis2`) — **2 of 2 DONE**
 
 | Slice | ADR | Status | Acceptance |
 |-------|-----|--------|------------|
 | Versioned semantic catalog with lineage edges | 0299 | DONE | `VersionedLineage` with monotonic per-node revisions, `stale_edges`, DOT + JSON exports. 4 unit tests. In-memory revisions only — durable journal is a Gate 3+ follow-up. |
-| DHIS2 aggregate / event / tracker / indicator mapping | 0300 | OPEN | Import reference DHIS2 metadata; round-trip |
+| DHIS2 aggregate / event / tracker / indicator mapping | 0300 | DONE | `export_dhis2_bundle_json` + 9 typed catalog enumerators; `dhis2_roundtrip.rs` import→export→reimport parity + determinism tests |
 
 #### P1-4 Ingest + source adapters (`bradian-ingest`, `bradian-sources`)
 

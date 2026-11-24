@@ -13,7 +13,10 @@ pub mod lineage;
 pub mod metadata;
 pub mod registry;
 
-pub use dhis2_adapter::{apply_dhis2_bundle, apply_dhis2_metadata_json, Dhis2MetadataBundle};
+pub use dhis2_adapter::{
+    apply_dhis2_bundle, apply_dhis2_metadata_json, export_dhis2_bundle_json,
+    Dhis2MetadataBundle,
+};
 #[cfg(feature = "http")]
 pub use dhis2_http::{Dhis2Auth, Dhis2HttpClient, Dhis2LoadReport};
 pub use lineage::{Lineage, LineageEdge, LineageKind, VersionedLineage};

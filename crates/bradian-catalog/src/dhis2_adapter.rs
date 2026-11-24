@@ -364,6 +364,172 @@ fn parse_program_type(raw: &str) -> BradianResult<ProgramType> {
     })
 }
 
+/// ADR 0300 — export the catalog state as a DHIS2-shaped
+/// JSON bundle. Only fields the importer reads are
+/// exported; DHIS2-only metadata that was dropped on
+/// import is NOT fabricated. UIDs are sorted deterministically
+/// so repeated exports produce identical bytes.
+pub fn export_dhis2_bundle_json(catalog: &Catalog) -> String {
+    use serde_json::json;
+
+    fn uid_ref(uid: &Uid) -> serde_json::Value { json!({ "id": uid.as_ref() }) }
+    fn sort_by_uid<T, F: Fn(&T) -> &Uid>(mut v: Vec<T>, key: F) -> Vec<T> {
+        v.sort_by(|a, b| key(a).as_ref().cmp(key(b).as_ref())); v
+    }
+
+    let data_elements: Vec<_> = sort_by_uid(catalog.data_elements(), |d| &d.uid).into_iter()
+        .map(|de| json!({
+            "id":              de.uid.as_ref(),
+            "code":            de.code,
+            "name":            de.name,
+            "valueType":       value_type_str(de.value_type),
+            "aggregationType": aggregation_type_str(de.aggregation_type),
+            "categoryCombo":   uid_ref(&de.category_combo),
+        })).collect();
+
+    let data_sets: Vec<_> = sort_by_uid(catalog.datasets(), |d| &d.uid).into_iter()
+        .map(|ds| json!({
+            "id":          ds.uid.as_ref(),
+            "name":        ds.name,
+            "periodType":  period_type_str(ds.period_type),
+            "dataSetElements": ds.data_elements.iter()
+                .map(|uid| json!({ "dataElement": uid_ref(uid) }))
+                .collect::<Vec<_>>(),
+        })).collect();
+
+    let category_combos: Vec<_> = sort_by_uid(catalog.category_combos(), |c| &c.uid).into_iter()
+        .map(|cc| json!({
+            "id":   cc.uid.as_ref(),
+            "name": cc.name,
+            "categoryOptionCombos": cc.option_combos.iter()
+                .map(uid_ref).collect::<Vec<_>>(),
+        })).collect();
+
+    let option_combos: Vec<_> = sort_by_uid(catalog.category_option_combos(), |c| &c.uid).into_iter()
+        .map(|coc| json!({
+            "id":            coc.uid.as_ref(),
+            "name":          coc.name,
+            "categoryCombo": uid_ref(&coc.category_combo),
+        })).collect();
+
+    let org_units: Vec<_> = sort_by_uid(catalog.org_units(), |o| &o.uid).into_iter()
+        .map(|ou| {
+            let path = if ou.path.is_empty() { None } else {
+                Some(format!("/{}", ou.path.iter()
+                    .map(|p| p.as_ref().to_string())
+                    .collect::<Vec<_>>().join("/")))
+            };
+            json!({
+                "id":     ou.uid.as_ref(),
+                "code":   ou.code,
+                "name":   ou.name,
+                "parent": ou.parent.as_ref().map(uid_ref),
+                "level":  ou.level,
+                "path":   path,
+            })
+        }).collect();
+
+    let programs: Vec<_> = sort_by_uid(catalog.programs(), |p| &p.uid).into_iter()
+        .map(|p| json!({
+            "id":          p.uid.as_ref(),
+            "name":        p.name,
+            "programType": program_type_str(p.program_type),
+            "programStages": p.stages.iter().map(uid_ref).collect::<Vec<_>>(),
+        })).collect();
+
+    let program_stages: Vec<_> = sort_by_uid(catalog.program_stages(), |p| &p.uid).into_iter()
+        .map(|ps| json!({
+            "id":         ps.uid.as_ref(),
+            "name":       ps.name,
+            "program":    uid_ref(&ps.program),
+            "repeatable": ps.repeatable,
+        })).collect();
+
+    let program_indicators: Vec<_> = sort_by_uid(catalog.program_indicators(), |p| &p.uid).into_iter()
+        .map(|pi| json!({
+            "id":              pi.uid.as_ref(),
+            "name":            pi.name,
+            "program":         uid_ref(&pi.program),
+            "expression":      pi.expression,
+            "filter":          pi.filter,
+            "aggregationType": aggregation_type_str(pi.aggregation_type),
+        })).collect();
+
+    let indicators: Vec<_> = sort_by_uid(catalog.indicators(), |i| &i.uid).into_iter()
+        .map(|i| json!({
+            "id":          i.uid.as_ref(),
+            "name":        i.name,
+            "numerator":   i.numerator,
+            "denominator": i.denominator,
+            "factor":      i.factor,
+        })).collect();
+
+    serde_json::to_string(&json!({
+        "dataElements":          data_elements,
+        "dataSets":              data_sets,
+        "categoryCombos":        category_combos,
+        "categoryOptionCombos":  option_combos,
+        "organisationUnits":     org_units,
+        "programs":              programs,
+        "programStages":         program_stages,
+        "programIndicators":     program_indicators,
+        "indicators":            indicators,
+    })).expect("serialize dhis2 bundle")
+}
+
+fn value_type_str(v: DataValueType) -> &'static str {
+    use DataValueType::*;
+    match v {
+        Number => "NUMBER", Integer => "INTEGER",
+        PositiveInteger => "INTEGER_POSITIVE",
+        NegativeInteger => "INTEGER_NEGATIVE",
+        ZeroOrPositiveInteger => "INTEGER_ZERO_OR_POSITIVE",
+        Percentage => "PERCENTAGE", Boolean => "BOOLEAN",
+        Text => "TEXT", LongText => "LONG_TEXT",
+        Date => "DATE", DateTime => "DATETIME", Time => "TIME",
+    }
+}
+
+fn aggregation_type_str(v: AggregationType) -> &'static str {
+    use AggregationType::*;
+    match v {
+        Sum => "SUM", Average => "AVERAGE",
+        AverageSumOrgUnit => "AVERAGE_SUM_ORG_UNIT",
+        Count => "COUNT", Min => "MIN", Max => "MAX",
+        StdDev => "STDDEV", Variance => "VARIANCE",
+        Last => "LAST", LastInPeriod => "LAST_IN_PERIOD",
+        None => "NONE", Custom => "CUSTOM",
+    }
+}
+
+fn period_type_str(p: PeriodType) -> &'static str {
+    use PeriodType::*;
+    match p {
+        Daily => "Daily", Weekly => "Weekly",
+        WeeklyWednesday => "WeeklyWednesday",
+        WeeklyThursday  => "WeeklyThursday",
+        WeeklySaturday  => "WeeklySaturday",
+        WeeklySunday    => "WeeklySunday",
+        BiWeekly => "BiWeekly", Monthly => "Monthly",
+        BiMonthly => "BiMonthly", Quarterly => "Quarterly",
+        SixMonthly => "SixMonthly",
+        SixMonthlyApril => "SixMonthlyApril",
+        Yearly => "Yearly",
+        FinancialApril    => "FinancialApril",
+        FinancialJuly     => "FinancialJuly",
+        FinancialOctober  => "FinancialOct",
+        FinancialNovember => "FinancialNov",
+    }
+}
+
+fn program_type_str(p: ProgramType) -> &'static str {
+    use ProgramType::*;
+    match p {
+        WithRegistration    => "WITH_REGISTRATION",
+        WithoutRegistration => "WITHOUT_REGISTRATION",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
