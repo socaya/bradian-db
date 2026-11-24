@@ -1408,6 +1408,100 @@ fn find_in_subquery(sql: &[u8], from: usize) -> Option<(usize, usize)> {
 /// ADR 0229 — find the position of the paren that closes the
 /// one at `open` (which must point AT the `(`).  Returns `None`
 /// when unbalanced.
+/// ADR 0274 — resolve a top-level non-recursive `WITH` CTE
+/// clause. Scope: `WITH <name> AS ( <inner> ) SELECT * FROM
+/// <name> [WHERE / ORDER BY / LIMIT …]`. The outer is rewritten
+/// so every top-level `FROM <name>` becomes a reference
+/// to the inner's result-equivalent — practically, we
+/// substitute the inner SELECT as the outer by stripping the
+/// WITH prefix and replacing the outer's `FROM <name>` span
+/// with the inner's `FROM <inner_table>` (or equivalent). For
+/// the simplest shape `SELECT * FROM <name>` we return the
+/// inner verbatim.
+pub(crate) fn resolve_with_cte(sql: &str) -> SqlResult<String> {
+    let trimmed = sql.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("with ") && !lower.starts_with("with\t") && lower != "with" {
+        return Ok(sql.to_owned());
+    }
+    // Strip leading whitespace; parse: WITH <name> AS ( <inner> ) <outer>
+    let after_with = &trimmed["with".len()..];
+    let after_with = after_with.trim_start();
+    // Read CTE name (identifier).
+    let (cte_name, rest) = split_identifier(after_with)
+        .ok_or_else(|| SqlError::Syntax("WITH requires a CTE identifier".into()))?;
+    let rest = rest.trim_start();
+    // Expect AS.
+    let rest_lower = rest.to_ascii_lowercase();
+    if !rest_lower.starts_with("as") {
+        return Err(SqlError::Syntax(
+            "WITH <name> must be followed by AS".into()));
+    }
+    let rest = rest[2..].trim_start();
+    if !rest.starts_with('(') {
+        return Err(SqlError::Syntax(
+            "WITH <name> AS must be followed by (".into()));
+    }
+    let close = find_matching_paren(rest.as_bytes(), 0)
+        .ok_or_else(|| SqlError::Syntax(
+            "WITH <name> AS ( … ) has unbalanced parens".into()))?;
+    let inner = &rest[1..close];
+    let outer = rest[close + 1..].trim_start();
+    // Simple shape: `SELECT * FROM <name>` (optional tail).
+    let outer_lower = outer.to_ascii_lowercase();
+    if outer_lower.starts_with("select") {
+        // Pass whatever appears after select intact; just
+        // substitute `FROM <cte_name>` with the inner's own
+        // FROM target. The inner must be a plain SELECT.
+        let select_body = &outer[6..];
+        let select_body_lower = select_body.to_ascii_lowercase();
+        if let Some(from_pos) = select_body_lower.find(" from ") {
+            let proj = select_body[..from_pos].trim();
+            let after_from = select_body[from_pos + 6..].trim_start();
+            let (seen_name, tail) = split_identifier(after_from)
+                .ok_or_else(|| SqlError::Syntax(
+                    "CTE outer: expected table name after FROM".into()))?;
+            if !seen_name.eq_ignore_ascii_case(&cte_name) {
+                return Err(SqlError::Unsupported(format!(
+                    "CTE outer references {seen_name} but WITH defined {cte_name}; \
+                     this slice only supports a single-CTE outer that references the CTE directly")));
+            }
+            // If the outer is `SELECT * FROM <name>` with no tail,
+            // the inner is the whole result. Return inner.
+            if proj == "*" && tail.trim().is_empty() {
+                return Ok(inner.to_string());
+            }
+            // Otherwise substitute: rewrite inner's SELECT list
+            // and merge. Simplest tractable form:
+            //   outer = "SELECT <proj> FROM <inner_from_tail>"
+            // where <inner_from_tail> is whatever came after
+            // "SELECT * FROM" in the inner. Reject if the inner
+            // is not a plain `SELECT * FROM <table>` shape.
+            let inner_trim = inner.trim();
+            let inner_lower = inner_trim.to_ascii_lowercase();
+            if inner_lower.starts_with("select * from ") {
+                let inner_from = &inner_trim[14..];
+                return Ok(format!("SELECT {proj} FROM {inner_from}{tail}"));
+            }
+            return Err(SqlError::Unsupported(
+                "CTE outer with projection beyond SELECT * requires inner to be \
+                 `SELECT * FROM <table>` in this slice".into()));
+        }
+    }
+    Err(SqlError::Unsupported(
+        "CTE outer must be `SELECT <proj> FROM <cte_name> [tail]`".into()))
+}
+
+fn split_identifier(s: &str) -> Option<(String, &str)> {
+    let mut end = 0;
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b'_' { end = i + 1; } else { break; }
+    }
+    if end == 0 { return None; }
+    Some((s[..end].to_string(), &s[end..]))
+}
+
 /// ADR 0271 — locate the next `EXISTS` keyword at top-level
 /// paren depth. Returns the byte offset of the `E` in EXISTS.
 /// Skips string literals so EXISTS inside a quoted string is
@@ -5090,7 +5184,10 @@ impl SqlEngine {
         // executing each eagerly and rewriting the SQL with a
         // literal list.  This runs BEFORE the UNION splitter so
         // a subquery inside a UNION arm still gets expanded.
-        let sql = self.resolve_in_subqueries(sql, control)?;
+        // ADR 0274 — WITH / CTE pre-pass. Must run before
+        // every other pass so the inner is the full query.
+        let sql = resolve_with_cte(sql)?;
+        let sql = self.resolve_in_subqueries(&sql, control)?;
         // ADR 0271 — EXISTS (SELECT …) → TRUE if the inner
         // returns any rows, FALSE otherwise. Must run AFTER the
         // IN-subquery pass so nested EXISTS inside IN resolves
