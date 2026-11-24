@@ -16,6 +16,83 @@
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// ADR 0288 — injectable fault policy. The trait is the
+/// contract a future storage-layer shim will consult before
+/// every `write` / `sync_data` call. Current test code can
+/// poll it manually in scripted workloads via ADR 0289.
+pub trait FaultPolicy: Send + Sync {
+    /// Called before a logical write. Returning `Err`
+    /// simulates a storage write failure.
+    fn on_write(&self) -> io::Result<()> { Ok(()) }
+    /// Called before a logical sync. Returning `Err`
+    /// simulates an fsync failure (durability lost).
+    fn on_sync(&self) -> io::Result<()> { Ok(()) }
+}
+
+/// Default policy — nothing fails.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NeverFail;
+impl FaultPolicy for NeverFail {}
+
+/// ADR 0288 — fail the Nth write. After the fault fires,
+/// subsequent writes succeed (one-shot).
+pub struct FailAfterNWrites {
+    remaining: AtomicUsize,
+    fired: std::sync::atomic::AtomicBool,
+}
+impl FailAfterNWrites {
+    pub fn new(n: usize) -> Self {
+        Self { remaining: AtomicUsize::new(n),
+               fired: std::sync::atomic::AtomicBool::new(false) }
+    }
+    pub fn has_fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+}
+impl FaultPolicy for FailAfterNWrites {
+    fn on_write(&self) -> io::Result<()> {
+        if self.fired.load(Ordering::SeqCst) { return Ok(()); }
+        let left = self.remaining.fetch_update(
+            Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1));
+        match left {
+            Ok(1) => {
+                self.fired.store(true, Ordering::SeqCst);
+                Err(io::Error::new(io::ErrorKind::Other, "simulated write fault"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// ADR 0288 — simulate an fsync that silently loses
+/// durability. Returns Ok but marks the fire so test code
+/// knows to treat the store as not-durably-synced.
+pub struct DropOnNthSync {
+    remaining: AtomicUsize,
+    fired: std::sync::atomic::AtomicBool,
+}
+impl DropOnNthSync {
+    pub fn new(n: usize) -> Self {
+        Self { remaining: AtomicUsize::new(n),
+               fired: std::sync::atomic::AtomicBool::new(false) }
+    }
+    pub fn has_fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+}
+impl FaultPolicy for DropOnNthSync {
+    fn on_sync(&self) -> io::Result<()> {
+        if self.fired.load(Ordering::SeqCst) { return Ok(()); }
+        let left = self.remaining.fetch_update(
+            Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1));
+        if matches!(left, Ok(1)) {
+            self.fired.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
 
 /// Return the length of a file in bytes. Thin wrapper around
 /// `fs::metadata().len()`, exposed so callers can compute
