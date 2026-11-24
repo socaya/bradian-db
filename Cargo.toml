@@ -86,6 +86,9 @@ rand             = "0.8"
 rand_chacha      = "0.3"
 argon2           = { version = "0.5", features = ["std"] }
 password-hash    = { version = "0.5", features = ["alloc"] }
+rustls           = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
+rustls-pemfile   = "2"
+rcgen            = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 humantime        = "2"
 clap             = { version = "4", features = ["derive"] }
 reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }

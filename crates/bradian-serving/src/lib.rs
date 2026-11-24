@@ -12,8 +12,14 @@ pub mod error;
 pub mod jobs;
 pub mod routes;
 pub mod state;
+/// ADR 0283 + ADR 0284 — rustls-backed TLS and optional mTLS.
+pub mod tls;
 
 pub use engine::AnalyticsEngine;
 pub use jobs::{JobProgress, JobRecord, JobRegistry, JobStatus};
 pub use routes::router;
 pub use state::{ServerState, SharedState};
+pub use tls::{
+    TlsAcceptorState, TlsError, TlsMaterial, TlsResult,
+    load_pem, load_pem_with_client_ca,
+};
