@@ -179,6 +179,23 @@ pub struct Table {
     /// SQL engine. Empty map preserves pre-ADR-0182 bytes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub column_checks: std::collections::BTreeMap<String, Vec<(CheckOp, crate::typed_table::Value)>>,
+    /// ADR 0259 — per-column expression DEFAULT. Evaluated at
+    /// INSERT time when the column is omitted. Overrides the
+    /// literal `column_defaults` for the same column. Empty
+    /// map preserves pre-ADR-0259 bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub column_default_exprs: std::collections::BTreeMap<String, DefaultExpr>,
+}
+
+/// ADR 0259 — supported default expressions. Deliberately a
+/// small closed set so the catalog file format remains
+/// portable; adding a new variant is a format-version bump.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DefaultExpr {
+    /// `CURRENT_TIMESTAMP` / `NOW()` — resolves to the current
+    /// wall-clock time (unix micros) at INSERT.
+    CurrentTimestamp,
 }
 
 #[cfg(test)]

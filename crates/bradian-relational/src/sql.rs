@@ -1716,6 +1716,24 @@ fn numeric_as_i128(v: &Value) -> SqlResult<(i128, bool)> {
 
 /// ADR 0235 — convert a `Value` to a target `DataType`.
 /// NULL stays NULL. Unsupported pairs surface `SqlError::Type`.
+/// ADR 0259 — evaluate a `DefaultExpr` at INSERT time.
+/// `CurrentTimestamp` resolves to the current wall-clock
+/// time as unix microseconds. Failure to read the system
+/// clock is treated as the UNIX epoch (not an error) since
+/// a default must never block an INSERT; the clock-skew
+/// scenario is operator-visible via the resulting value.
+pub(crate) fn evaluate_default_expr(expr: &crate::model::DefaultExpr) -> Value {
+    match expr {
+        crate::model::DefaultExpr::CurrentTimestamp => {
+            let micros = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros())
+                .unwrap_or(0);
+            Value::TimestampTz(micros.try_into().unwrap_or(0))
+        }
+    }
+}
+
 pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
     if matches!(v, Value::Null) { return Ok(Value::Null); }
     let invalid = || SqlError::Type(format!(
@@ -2981,6 +2999,7 @@ pub(crate) fn build_composite_table(
         column_collations: Default::default(),
         policies: Default::default(),
         column_checks: Default::default(),
+        column_default_exprs: Default::default(),
     }
 }
 
@@ -5404,14 +5423,26 @@ impl SqlEngine {
                 // ADR 0221 — optional RETURNING tail.
                 let returning = parse_returning(&mut p, &table)?;
                 p.end()?;
-                if names.len() != table.columns.len() {
-                    return Err(SqlError::Unsupported(
-                        "INSERT must list all table columns once".into()));
-                }
+                // ADR 0259 — a column may be omitted from the
+                // INSERT column list if it carries a default
+                // (literal or expression) or is nullable.
                 for lits in &tuples {
                     if lits.len() != names.len() {
                         return Err(SqlError::Unsupported(
                             "every INSERT VALUES tuple must match the column list".into()));
+                    }
+                }
+                let listed: std::collections::BTreeSet<&str> =
+                    names.iter().map(|s| s.as_str()).collect();
+                for column in &table.columns {
+                    if !listed.contains(column.name.as_str())
+                        && !table.column_defaults.contains_key(&column.name)
+                        && !table.column_default_exprs.contains_key(&column.name)
+                        && !column.nullable
+                    {
+                        return Err(SqlError::Type(format!(
+                            "INSERT omits column {} which is NOT NULL without a default",
+                            column.name)));
                     }
                 }
                 // Build and coerce every candidate row before
@@ -5428,10 +5459,20 @@ impl SqlEngine {
                         locate(&table, &field)?;
                     }
                     let values = table.columns.iter().map(|column| {
-                        let literal = fields.remove(&column.name)
-                            .ok_or_else(|| SqlError::Resolution(format!(
-                                "missing column {}", column.name)))?;
-                        coerce(&literal, column)
+                        // ADR 0259 — omitted columns resolve via
+                        // expression default, literal default, or NULL.
+                        if let Some(literal) = fields.remove(&column.name) {
+                            return coerce(&literal, column);
+                        }
+                        if let Some(expr) = table.column_default_exprs.get(&column.name) {
+                            return Ok(evaluate_default_expr(expr));
+                        }
+                        if let Some(v) = table.column_defaults.get(&column.name) {
+                            return Ok(v.clone());
+                        }
+                        if column.nullable { Ok(Value::Null) }
+                        else { Err(SqlError::Type(format!(
+                            "missing column {} (no default)", column.name))) }
                     }).collect::<SqlResult<Vec<_>>>()?;
                     rows.push(values);
                 }
@@ -6140,6 +6181,23 @@ impl SqlEngine {
                             .find(|c| c.name == col)
                             .ok_or_else(|| SqlError::Resolution(
                                 format!("unknown column {col}")))?;
+                        // ADR 0259 — DEFAULT CURRENT_TIMESTAMP /
+                        // DEFAULT NOW() dispatch to the expression
+                        // path. Everything else is a literal.
+                        if p.consume_word("current_timestamp") {
+                            p.end()?;
+                            self.catalog.set_column_default_expr(table.id, &col,
+                                crate::model::DefaultExpr::CurrentTimestamp)?;
+                            return Ok(SqlResultSet::Command { affected: 0 });
+                        }
+                        if p.consume_word("now") {
+                            p.symbol('(')?;
+                            p.symbol(')')?;
+                            p.end()?;
+                            self.catalog.set_column_default_expr(table.id, &col,
+                                crate::model::DefaultExpr::CurrentTimestamp)?;
+                            return Ok(SqlResultSet::Command { affected: 0 });
+                        }
                         let literal = p.literal()?;
                         let value = coerce(&literal, column)?;
                         p.end()?;
@@ -6149,7 +6207,12 @@ impl SqlEngine {
                     if p.consume_word("drop") {
                         p.expect("default")?;
                         p.end()?;
+                        // ADR 0259 — drop both literal and
+                        // expression defaults in one DROP so the
+                        // user doesn't need to know which kind
+                        // was set.
                         self.catalog.drop_column_default(table.id, &col)?;
+                        self.catalog.drop_column_default_expr(table.id, &col)?;
                         return Ok(SqlResultSet::Command { affected: 0 });
                     }
                     if p.consume_word("type") {

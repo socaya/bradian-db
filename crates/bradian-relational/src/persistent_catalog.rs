@@ -80,6 +80,10 @@ enum Command {
     /// bit after the SQL engine has validated that no existing
     /// row carries NULL in the column.
     StrengthenColumnNotNull { table: TableId, column: String },
+    /// ADR 0259 — SET DEFAULT <expression>.
+    SetColumnDefaultExpr { table: TableId, column: String, expr: crate::model::DefaultExpr },
+    /// ADR 0259 — DROP expression default.
+    DropColumnDefaultExpr { table: TableId, column: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +166,14 @@ impl Event {
             }
             Command::StrengthenColumnNotNull { table, column } => {
                 catalog.strengthen_column_not_null(*table, column)?;
+                None
+            }
+            Command::SetColumnDefaultExpr { table, column, expr } => {
+                catalog.set_column_default_expr(*table, column, expr.clone())?;
+                None
+            }
+            Command::DropColumnDefaultExpr { table, column } => {
+                catalog.drop_column_default_expr(*table, column)?;
                 None
             }
             Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } | Command::ProposeDefaultedRevision { table, proposed } => {
@@ -522,6 +534,24 @@ impl PersistentCatalog {
         &self, table: TableId, column: &str,
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::StrengthenColumnNotNull {
+            table, column: column.into(),
+        })?.1)
+    }
+
+    /// ADR 0259 — SET DEFAULT <expression>.
+    pub fn set_column_default_expr(
+        &self, table: TableId, column: &str, expr: crate::model::DefaultExpr,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::SetColumnDefaultExpr {
+            table, column: column.into(), expr,
+        })?.1)
+    }
+
+    /// ADR 0259 — DROP expression default.
+    pub fn drop_column_default_expr(
+        &self, table: TableId, column: &str,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::DropColumnDefaultExpr {
             table, column: column.into(),
         })?.1)
     }

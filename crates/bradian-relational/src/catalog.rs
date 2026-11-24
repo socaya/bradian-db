@@ -392,6 +392,7 @@ impl Catalog {
             column_collations,
             policies: BTreeMap::new(),
             column_checks,
+            column_default_exprs: BTreeMap::new(),
         });
         self.schema_versions.insert(id, 1);
         Ok(id)
@@ -765,6 +766,52 @@ impl Catalog {
             if c.name == name { c.nullable = false; }
         }
         self.bump_schema_version(id);
+        Ok(())
+    }
+
+    /// ADR 0259 — SET DEFAULT <expression>. Stores a
+    /// `DefaultExpr` (currently only `CurrentTimestamp`).
+    /// Overrides any literal default for the same column.
+    pub fn set_column_default_expr(
+        &mut self, id: TableId, name: &str, expr: crate::model::DefaultExpr,
+    ) -> Result<(), CatalogError> {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        let col = table.columns.iter().find(|c| c.name == name)
+            .ok_or_else(|| CatalogError::NotFound(format!("column {name}")))?;
+        // CurrentTimestamp requires TIMESTAMPTZ.
+        if matches!(expr, crate::model::DefaultExpr::CurrentTimestamp)
+            && !matches!(col.data_type, DataType::TimestampTz)
+        {
+            return Err(CatalogError::InvalidDefinition(format!(
+                "CURRENT_TIMESTAMP default requires TIMESTAMPTZ; {name} is {:?}",
+                col.data_type)));
+        }
+        let t = self.tables.get_mut(&id).expect("validated table");
+        // Expression default replaces any literal default to
+        // keep INSERT resolution unambiguous.
+        t.column_defaults.remove(&name);
+        t.column_default_exprs.insert(name, expr);
+        self.bump_schema_version(id);
+        Ok(())
+    }
+
+    /// ADR 0259 — DROP a column's expression default. No-op if
+    /// none set.
+    pub fn drop_column_default_expr(&mut self, id: TableId, name: &str)
+        -> Result<(), CatalogError>
+    {
+        let name = identifier(name)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        if !table.columns.iter().any(|c| c.name == name) {
+            return Err(CatalogError::NotFound(format!("column {name}")));
+        }
+        let t = self.tables.get_mut(&id).expect("validated table");
+        if t.column_default_exprs.remove(&name).is_some() {
+            self.bump_schema_version(id);
+        }
         Ok(())
     }
 
