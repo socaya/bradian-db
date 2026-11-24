@@ -113,6 +113,64 @@ impl FilterPredicate {
     }
 }
 
+/// ADR 0297 — structural EXPLAIN node derived from a
+/// `SqlLogicalNode`. No text templating; deterministic
+/// `Display` output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqlExplainNode {
+    pub operator: String,
+    pub details:  Vec<(&'static str, String)>,
+    pub children: Vec<SqlExplainNode>,
+}
+
+pub fn explain(node: &SqlLogicalNode) -> SqlExplainNode {
+    match node {
+        SqlLogicalNode::Scan { source, column_names } => SqlExplainNode {
+            operator: "Scan".into(),
+            details:  vec![
+                ("source",  source.clone()),
+                ("columns", column_names.join(", ")),
+            ],
+            children: vec![],
+        },
+        SqlLogicalNode::Filter { input, predicate } => {
+            let (op, column, literal) = match predicate {
+                FilterPredicate::Eq { column, literal } => ("=",  column, literal),
+                FilterPredicate::Gt { column, literal } => (">",  column, literal),
+                FilterPredicate::Lt { column, literal } => ("<",  column, literal),
+            };
+            SqlExplainNode {
+                operator: "Filter".into(),
+                details:  vec![
+                    ("predicate", format!("{column} {op} {literal:?}")),
+                ],
+                children: vec![explain(input)],
+            }
+        }
+        SqlLogicalNode::Project { input, keep } => SqlExplainNode {
+            operator: "Project".into(),
+            details:  vec![("columns", keep.join(", "))],
+            children: vec![explain(input)],
+        },
+    }
+}
+
+impl std::fmt::Display for SqlExplainNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn render(node: &SqlExplainNode, depth: usize,
+                  f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let pad = "  ".repeat(depth);
+            writeln!(f, "{pad}{}", node.operator)?;
+            for (k, v) in &node.details {
+                writeln!(f, "{pad}  {k}: {v}")?;
+            }
+            for child in &node.children { render(child, depth + 1, f)?; }
+            Ok(())
+        }
+        render(self, 0, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +243,71 @@ mod tests {
         assert_eq!(out.schema.columns[0].name, "label");
         assert_eq!(out.schema.columns[1].name, "id");
         assert_eq!(out.rows[0], vec![Value::Str("alpha".into()), Value::I64(1)]);
+    }
+
+    #[test]
+    fn explain_single_scan_node() {
+        let node = SqlLogicalNode::Scan {
+            source: "t.public.items".into(),
+            column_names: vec!["id".into(), "qty".into()],
+        };
+        let ex = explain(&node);
+        assert_eq!(ex.operator, "Scan");
+        assert!(ex.children.is_empty());
+        assert_eq!(format!("{ex}"),
+            "Scan\n  source: t.public.items\n  columns: id, qty\n");
+    }
+
+    #[test]
+    fn explain_filter_scan_tree_is_two_levels() {
+        let node = SqlLogicalNode::Filter {
+            input: Box::new(SqlLogicalNode::Scan {
+                source: "t.public.items".into(),
+                column_names: vec!["id".into(), "qty".into()],
+            }),
+            predicate: FilterPredicate::Eq {
+                column: "id".into(),
+                literal: Value::I64(7),
+            },
+        };
+        let ex = explain(&node);
+        assert_eq!(ex.operator, "Filter");
+        assert_eq!(ex.children.len(), 1);
+        assert_eq!(ex.children[0].operator, "Scan");
+        let display = format!("{ex}");
+        assert!(display.contains("Filter"));
+        assert!(display.contains("predicate: id = I64(7)"));
+        assert!(display.contains("  Scan"),
+            "expected nested Scan with two-space indent, got:\n{display}");
+    }
+
+    #[test]
+    fn explain_project_filter_scan_renders_three_indented_levels() {
+        let node = SqlLogicalNode::Project {
+            input: Box::new(SqlLogicalNode::Filter {
+                input: Box::new(SqlLogicalNode::Scan {
+                    source: "t.public.items".into(),
+                    column_names: vec!["id".into(), "qty".into(), "label".into()],
+                }),
+                predicate: FilterPredicate::Gt {
+                    column: "qty".into(),
+                    literal: Value::I64(15),
+                },
+            }),
+            keep: vec!["id".into()],
+        };
+        let ex = explain(&node);
+        let display = format!("{ex}");
+        let expected = "\
+Project
+  columns: id
+  Filter
+    predicate: qty > I64(15)
+    Scan
+      source: t.public.items
+      columns: id, qty, label
+";
+        assert_eq!(display, expected);
     }
 
     #[test]
