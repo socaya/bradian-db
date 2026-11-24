@@ -183,25 +183,8 @@ fn bare_compare_mixed_with_is_null() {
     assert_eq!(got, vec![3, 4, 5]);
 }
 
-#[test]
-fn bare_like_still_rejected() {
-    let dir = tempdir().unwrap();
-    let db = seed(dir.path());
-    let err = db.execute(
-        "SELECT id FROM t.public.items WHERE note LIKE 'a%'"
-    ).unwrap_err();
-    assert!(matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)), "got {err:?}");
-}
-
-#[test]
-fn bare_in_still_rejected() {
-    let dir = tempdir().unwrap();
-    let db = seed(dir.path());
-    let err = db.execute(
-        "SELECT id FROM t.public.items WHERE grade IN (10, 20)"
-    ).unwrap_err();
-    // Either the dispatcher stays on the PK path and complains
-    // about a missing `=`, or the tree parser reports an
-    // Unsupported matcher — both are correct rejections.
-    assert!(matches!(err, SqlError::Unsupported(_) | SqlError::Syntax(_)), "got {err:?}");
-}
+// ADR 0246 landed bare-column LIKE and IN; the earlier
+// `bare_like_still_rejected` and `bare_in_still_rejected`
+// canaries from ADR 0245 are now obsolete — the behavior
+// they asserted no longer holds. Their positive counterparts
+// live in `tests/scalar_in_between_like.rs`.

@@ -68,6 +68,10 @@ pub enum SqlError {
     /// columns it covers.
     #[error(transparent)]
     Unique(#[from] crate::unique_check::UniqueViolation),
+    /// ADR 0249 — user catalog mutation failed (invalid name,
+    /// duplicate / not found, empty password, journal error).
+    #[error(transparent)]
+    User(#[from] crate::persistent_user_catalog::PersistentUserCatalogError),
     /// ADR 0182 — per-column CHECK constraint violated by a
     /// candidate row at INSERT or UPDATE.
     #[error("CHECK constraint on column {column:?} failed: value does not satisfy {op} {literal}")]
@@ -4273,6 +4277,9 @@ pub struct SqlEngine {
     /// Default `GlobalBudget::default()` is unlimited and
     /// never rejects, so existing callers see no change.
     global_budget: crate::workspace_usage::GlobalBudget,
+    /// ADR 0249 — WAL-backed user catalog. Opened at
+    /// `<root>/users`; separate journal from the DDL catalog.
+    users: crate::persistent_user_catalog::PersistentUserCatalog,
 }
 
 impl SqlEngine {
@@ -4299,13 +4306,33 @@ impl SqlEngine {
             Some(w) => PersistentCatalog::open_with_bace(root.join("catalog"), w.clone())?,
             None    => PersistentCatalog::open(root.join("catalog"))?,
         };
+        let users = crate::persistent_user_catalog::PersistentUserCatalog::open(
+            root.join("users"),
+        ).map_err(|e| SqlError::Table(crate::typed_table::TableError::Schema(
+            format!("open user catalog: {e}"),
+        )))?;
         Ok(Self {
             root: root.to_owned(),
             catalog,
             operation: Mutex::new(()),
             bace_wiring: wiring,
             global_budget: crate::workspace_usage::GlobalBudget::default(),
+            users,
         })
+    }
+
+    /// ADR 0249 — verify a user's plaintext password against
+    /// the persistent user catalog. Returns Ok(()) only for
+    /// known, active users with matching passwords.
+    pub fn verify_password(&self, user: &str, password: &str) -> SqlResult<()> {
+        self.users.verify_password(user, password)?;
+        Ok(())
+    }
+
+    /// ADR 0249 — snapshot the current user catalog. Useful
+    /// for tests and diagnostics; does not reveal plaintext.
+    pub fn user_catalog_snapshot(&self) -> crate::user_catalog::UserCatalog {
+        self.users.snapshot()
     }
 
     /// ADR 0170 — attach a workspace-wide admission cap.
@@ -4912,6 +4939,20 @@ impl SqlEngine {
             "create" => {
                 let kind = p.word()?;
                 match kind.as_str() {
+                    // ADR 0249 — CREATE USER <name> WITH PASSWORD '<pw>'
+                    "user" => {
+                        let name = p.word()?;
+                        p.expect("with")?;
+                        p.expect("password")?;
+                        let password = match p.literal()? {
+                            Literal::Text(s) => s,
+                            _ => return Err(SqlError::Syntax(
+                                "CREATE USER requires a single-quoted password literal".into())),
+                        };
+                        p.end()?;
+                        self.users.create_user(&name, &password)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
                     "database" => {
                         let name = p.name()?;
                         qualified(&name, 1)?;
@@ -5830,6 +5871,33 @@ impl SqlEngine {
             //   ALTER TABLE <name> ALTER COLUMN <col> DROP DEFAULT
             //   ALTER TABLE <name> ALTER COLUMN <col> TYPE <type>
             "alter" => {
+                // ADR 0249 — ALTER USER <name> SET PASSWORD '<pw>'
+                //            ALTER USER <name> SET ACTIVE { TRUE | FALSE }
+                if p.consume_word("user") {
+                    let user_name = p.word()?;
+                    p.expect("set")?;
+                    if p.consume_word("password") {
+                        let password = match p.literal()? {
+                            Literal::Text(s) => s,
+                            _ => return Err(SqlError::Syntax(
+                                "ALTER USER SET PASSWORD requires a single-quoted password literal".into())),
+                        };
+                        p.end()?;
+                        self.users.set_password(&user_name, &password)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
+                    if p.consume_word("active") {
+                        let active = if p.consume_word("true") { true }
+                            else if p.consume_word("false") { false }
+                            else { return Err(SqlError::Syntax(
+                                "ALTER USER SET ACTIVE expects TRUE or FALSE".into())); };
+                        p.end()?;
+                        self.users.set_active(&user_name, active)?;
+                        return Ok(SqlResultSet::Command { affected: 0 });
+                    }
+                    return Err(SqlError::Syntax(
+                        "ALTER USER expects SET PASSWORD or SET ACTIVE".into()));
+                }
                 p.expect("table")?;
                 let name = p.name()?;
                 let table = self.resolve(&name)?;
@@ -5934,6 +6002,14 @@ impl SqlEngine {
                 }
                 Err(SqlError::Syntax(
                     "ALTER TABLE expects RENAME / DROP COLUMN / ALTER COLUMN".into()))
+            }
+            // ADR 0249 — DROP USER <name>
+            "drop" => {
+                p.expect("user")?;
+                let name = p.word()?;
+                p.end()?;
+                self.users.drop_user(&name)?;
+                Ok(SqlResultSet::Command { affected: 0 })
             }
             _ => Err(SqlError::Unsupported(format!("statement {action}"))),
         }
