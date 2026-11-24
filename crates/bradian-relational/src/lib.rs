@@ -29,6 +29,9 @@ pub mod persistent_catalog;
 pub mod user_catalog;
 /// ADR 0248 — WAL-backed, replay-validated UserCatalog journal.
 pub mod persistent_user_catalog;
+/// ADR 0252 — byte-level fault injection utilities for test
+/// harnesses. NOT for production use.
+pub mod fault_injection;
 pub mod sql;
 pub mod transaction_domain;
 pub mod domain_sql;
