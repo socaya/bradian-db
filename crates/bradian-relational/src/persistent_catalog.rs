@@ -84,6 +84,10 @@ enum Command {
     SetColumnDefaultExpr { table: TableId, column: String, expr: crate::model::DefaultExpr },
     /// ADR 0259 — DROP expression default.
     DropColumnDefaultExpr { table: TableId, column: String },
+    /// ADR 0260 — change a column's type (widen or narrow).
+    /// Caller is responsible for row-level validation before
+    /// journaling.
+    ChangeColumnType { table: TableId, column: String, new_type: crate::model::DataType },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +178,10 @@ impl Event {
             }
             Command::DropColumnDefaultExpr { table, column } => {
                 catalog.drop_column_default_expr(*table, column)?;
+                None
+            }
+            Command::ChangeColumnType { table, column, new_type } => {
+                catalog.change_column_type(*table, column, new_type.clone())?;
                 None
             }
             Command::ProposeTableRevision { table, proposed } | Command::ProposeNullableRevision { table, proposed } | Command::ProposeDefaultedRevision { table, proposed } => {
@@ -553,6 +561,16 @@ impl PersistentCatalog {
     ) -> PersistentCatalogResult<u64> {
         Ok(self.commit(Command::DropColumnDefaultExpr {
             table, column: column.into(),
+        })?.1)
+    }
+
+    /// ADR 0260 — change a column type (widen or narrow).
+    /// Caller must have validated / rewritten rows first.
+    pub fn change_column_type(
+        &self, table: TableId, column: &str, new_type: crate::model::DataType,
+    ) -> PersistentCatalogResult<u64> {
+        Ok(self.commit(Command::ChangeColumnType {
+            table, column: column.into(), new_type,
         })?.1)
     }
 

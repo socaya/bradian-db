@@ -6218,7 +6218,49 @@ impl SqlEngine {
                     if p.consume_word("type") {
                         let new_type = p.data_type()?;
                         p.end()?;
-                        self.catalog.widen_column_type(table.id, &col, new_type)?;
+                        // ADR 0260 — unified type change path:
+                        //   1. Scan rows; cast every value (fails early).
+                        //   2. Flip catalog metadata.
+                        //   3. Rewrite TableStore pin (publishes new schema).
+                        //   4. Replace rows through the new-schema validators.
+                        // Widening (ADR 0130) is a special case that happens
+                        // to succeed at step 2 through `widen_column_type`;
+                        // every other target goes through `change_column_type`.
+                        let col_idx = locate(&table, &col)?;
+                        let mut store = self.table_store(&table)?;
+                        let original_rows = store.scan()?;
+                        let rewritten: Vec<Vec<Value>> = original_rows.into_iter()
+                            .map(|row| {
+                                let mut r = row.clone();
+                                r[col_idx] = cast_value(row[col_idx].clone(), &new_type)
+                                    .map_err(|e| SqlError::Type(format!(
+                                        "ALTER COLUMN TYPE: {e}")))?;
+                                Ok(r)
+                            })
+                            .collect::<SqlResult<Vec<_>>>()?;
+                        // Try widen first; its invalid-definition rejection
+                        // falls through to the general change.
+                        match self.catalog.widen_column_type(
+                            table.id, &col, new_type.clone())
+                        {
+                            Ok(_) => {}
+                            Err(PersistentCatalogError::Catalog(
+                                crate::CatalogError::InvalidDefinition(_))) => {
+                                self.catalog.change_column_type(
+                                    table.id, &col, new_type.clone())?;
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                        let new_table = self.catalog.snapshot().table(table.id)
+                            .ok_or_else(|| SqlError::Resolution(
+                                "table disappeared after TYPE change".into()))?
+                            .clone();
+                        store.rewrite_schema_pin(new_table)
+                            .map_err(|e| SqlError::Type(format!(
+                                "ALTER COLUMN TYPE pin rewrite: {e}")))?;
+                        for r in &rewritten {
+                            store.replace(r)?;
+                        }
                         return Ok(SqlResultSet::Command { affected: 0 });
                     }
                     return Err(SqlError::Syntax(

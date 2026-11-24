@@ -745,6 +745,38 @@ impl Catalog {
         Ok(())
     }
 
+    /// ADR 0260 — change a column's declared type to any
+    /// target (widen or narrow). Caller must have already
+    /// validated / rewritten every stored row to fit `new_type`.
+    /// Rejects on dependency edges (same rule as widen).
+    pub fn change_column_type(
+        &mut self, id: TableId, column: &str, new_type: DataType,
+    ) -> Result<(), CatalogError> {
+        let column = identifier(column)?;
+        let table = self.tables.get(&id)
+            .ok_or_else(|| CatalogError::NotFound(format!("table {}", id.0)))?;
+        let col = table.columns.iter().find(|c| c.name == column)
+            .ok_or_else(|| CatalogError::NotFound(format!("column {column}")))?;
+        if col.data_type == new_type { return Ok(()); }
+        let deps = self.column_dependents(id, &column);
+        if !deps.is_empty() {
+            return Err(CatalogError::DependentObjects(format!(
+                "column {column} has {} dependency edge(s); narrow requires removing them first",
+                deps.len())));
+        }
+        validate_type(&new_type)?;
+        let t = self.tables.get_mut(&id).expect("validated table");
+        for c in &mut t.columns {
+            if c.name == column { c.data_type = new_type.clone(); }
+        }
+        // Expression default on a type change may still be
+        // valid — but literal default is now suspect. Drop it
+        // to avoid a mismatched default.
+        t.column_defaults.remove(&column);
+        self.bump_schema_version(id);
+        Ok(())
+    }
+
     /// ADR 0241 — SET NOT NULL. Flips the nullable bit from
     /// true → false. Row-level validation (no NULLs remaining)
     /// is the caller's responsibility; the catalog only
