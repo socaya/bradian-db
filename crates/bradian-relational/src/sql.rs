@@ -1761,8 +1761,77 @@ pub(crate) fn cast_value(v: Value, target: &DataType) -> SqlResult<Value> {
         (DataType::Json, Value::String(s)) =>
             if serde_json::from_str::<serde_json::Value>(s).is_ok() { Value::Json(s.clone()) }
             else { return Err(invalid()); },
+        // ADR 0257 — TIMESTAMPTZ ↔ integer micros + Text out.
+        (DataType::TimestampTz, Value::TimestampTz(_)) => v,
+        (DataType::TimestampTz, Value::Int64(n)) => Value::TimestampTz(*n),
+        (DataType::TimestampTz, Value::Int32(n)) => Value::TimestampTz(i64::from(*n)),
+        (DataType::Int64, Value::TimestampTz(n)) => Value::Int64(*n),
+        (DataType::Text | DataType::Varchar { .. }, Value::TimestampTz(n)) =>
+            Value::String(n.to_string()),
+        // ADR 0257 — UUID ↔ canonical hyphenated string.
+        (DataType::Uuid, Value::Uuid(_)) => v,
+        (DataType::Uuid, Value::String(s)) => {
+            let bytes = parse_uuid_text(s).ok_or_else(invalid)?;
+            Value::Uuid(bytes)
+        }
+        (DataType::Text | DataType::Varchar { .. }, Value::Uuid(b)) =>
+            Value::String(format_uuid_text(b)),
         _ => return Err(invalid()),
     })
+}
+
+/// ADR 0257 — parse a hyphenated UUID string
+/// (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, 36 chars).
+/// Case-insensitive on hex digits. Returns None on any
+/// structural mismatch so the caller can surface
+/// `SqlError::Type` through the generic cast error.
+fn parse_uuid_text(s: &str) -> Option<[u8; 16]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 { return None; }
+    let hyphens = [8, 13, 18, 23];
+    for &i in &hyphens {
+        if bytes[i] != b'-' { return None; }
+    }
+    let mut out = [0u8; 16];
+    let mut out_idx = 0;
+    let mut i = 0;
+    while i < 36 {
+        if hyphens.contains(&i) { i += 1; continue; }
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out[out_idx] = (hi << 4) | lo;
+        out_idx += 1;
+        i += 2;
+    }
+    Some(out)
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// ADR 0257 — render a 16-byte UUID as canonical hyphenated
+/// lowercase text.
+fn format_uuid_text(bytes: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(36);
+    for (i, b) in bytes.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) { s.push('-'); }
+        s.push(nibble_hex(b >> 4));
+        s.push(nibble_hex(b & 0x0f));
+    }
+    s
+}
+
+fn nibble_hex(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        _ => (b'a' + n - 10) as char,
+    }
 }
 
 /// ADR 0235 — parse a type name after `AS` in a CAST.
@@ -1774,6 +1843,9 @@ fn parse_cast_target(p: &mut Parser) -> SqlResult<DataType> {
         "text" => DataType::Text,
         "boolean" | "bool" => DataType::Boolean,
         "json" => DataType::Json,
+        // ADR 0257 — TIMESTAMPTZ and UUID targets.
+        "timestamp" | "timestamptz" => DataType::TimestampTz,
+        "uuid" => DataType::Uuid,
         _ => return Err(SqlError::Unsupported(format!(
             "CAST target type {name} is not supported"))),
     })
