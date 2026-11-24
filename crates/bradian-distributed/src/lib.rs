@@ -24,6 +24,8 @@ pub mod worker;
 pub mod consensus;
 /// ADR 0310 — distributed commit + global snapshot skeleton.
 pub mod distributed_commit;
+/// ADR 0311 — shard placement + fencing skeleton.
+pub mod shard_placement;
 
 pub use coordinator::{Coordinator, FederatedResult};
 pub use fragment::{Fragment, FragmentKind, FragmentResult};
