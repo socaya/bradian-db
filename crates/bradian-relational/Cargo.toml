@@ -18,6 +18,9 @@ parking_lot = { workspace = true }
 zstd = { workspace = true, features = ["zdict_builder"] }
 blake3 = { workspace = true }
 subtle = { workspace = true }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

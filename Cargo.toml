@@ -84,6 +84,8 @@ byteorder        = "1"
 hex              = "0.4"
 rand             = "0.8"
 rand_chacha      = "0.3"
+argon2           = { version = "0.5", features = ["std"] }
+password-hash    = { version = "0.5", features = ["alloc"] }
 humantime        = "2"
 clap             = { version = "4", features = ["derive"] }
 reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
