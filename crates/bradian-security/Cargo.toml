@@ -20,6 +20,11 @@ chacha20poly1305 = { workspace = true }
 parking_lot = { workspace = true }
 tracing     = { workspace = true }
 ahash       = { workspace = true }
+# ADR 0323 — enterprise OIDC JWT verification (HS256).
+hmac        = { workspace = true }
+sha2        = { workspace = true }
+base64      = { workspace = true }
+subtle      = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
