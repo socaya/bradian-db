@@ -1,19 +1,11 @@
-//! ADR 0316 — Relational wire protocol + reference driver.
+//! ADR 0316 — Relational wire protocol + reference driver
+//! (plaintext TCP).
 //!
-//! A real tokio-based TCP transport for Bradian SQL
-//! sessions. Framing is a 4-byte big-endian length prefix
-//! followed by a JSON-encoded `WireMessage`. The reference
-//! `WireServer` binds to a `TcpListener`, accepts
-//! connections, performs the Hello → HelloOk handshake,
-//! and dispatches `Execute` to a bound
-//! `bradian_relational::SqlEngine`. `WireClient` is a
-//! thin tokio-side counterpart that dials, handshakes,
-//! executes, and closes.
-//!
-//! TLS binding (ADR 0283 ships rustls under the HTTP
-//! stack) is not wired here. The transport is explicitly
-//! cleartext TCP — fine for in-process tests + trusted
-//! control planes; a TLS wrapper is a dedicated follow-up.
+//! ADR 0330 — TLS-wrapped variant of the same protocol
+//! using `tokio-rustls`. The framing + handshake logic
+//! is generic over `AsyncRead + AsyncWrite + Unpin`, so
+//! the server + client handle the plaintext and TLS
+//! streams through one implementation.
 
 use std::io;
 use std::sync::Arc;
@@ -21,8 +13,9 @@ use std::sync::Arc;
 use bradian_relational::sql::{SqlEngine, SqlResultSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::{rustls::pki_types::ServerName, TlsAcceptor, TlsConnector};
 
 /// Max frame size (1 MiB). Refuse anything larger so a
 /// buggy / hostile peer cannot allocate unbounded memory
@@ -55,6 +48,8 @@ pub enum WireError {
     Unexpected(WireMessage),
     #[error("peer closed the connection")]
     Closed,
+    #[error("tls: {0}")]
+    Tls(String),
 }
 pub type WireResult<T> = Result<T, WireError>;
 
@@ -123,7 +118,21 @@ impl WireServer {
         self.handle_connection(stream).await
     }
 
-    async fn handle_connection(&self, mut stream: TcpStream) -> WireResult<()> {
+    /// ADR 0330 — accept one TCP connection, wrap it in
+    /// a rustls TlsStream via the supplied acceptor, then
+    /// dispatch through the same handler as `serve_one`.
+    pub async fn serve_one_tls(
+        &self, listener: &TcpListener, acceptor: &TlsAcceptor,
+    ) -> WireResult<()> {
+        let (stream, _addr) = listener.accept().await?;
+        let tls = acceptor.accept(stream).await
+            .map_err(|e| WireError::Tls(format!("accept: {e}")))?;
+        self.handle_connection(tls).await
+    }
+
+    async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
+        &self, mut stream: S,
+    ) -> WireResult<()> {
         match read_frame(&mut stream).await? {
             WireMessage::Hello { .. } => {}
             other => return Err(WireError::Handshake(format!("expected Hello, got {other:?}"))),
@@ -170,27 +179,19 @@ impl WireServer {
 // ---------------------------------------------------------------------------
 // Client
 
+/// Generic client parameterised by the underlying stream.
+/// Use the `WireClient` / `WireTlsClient` type aliases for
+/// the two shipped variants.
 #[derive(Debug)]
-pub struct WireClient {
-    stream:  TcpStream,
+pub struct WireClientT<S> {
+    stream:  S,
     session: u64,
 }
 
-impl WireClient {
-    pub async fn connect(
-        addr: std::net::SocketAddr, principal: impl Into<String>,
-    ) -> WireResult<Self> {
-        let mut stream = TcpStream::connect(addr).await?;
-        write_frame(&mut stream, &WireMessage::Hello {
-            version: 1, principal: principal.into() }).await?;
-        let reply = read_frame(&mut stream).await?;
-        let session = match reply {
-            WireMessage::HelloOk { session } => session,
-            other => return Err(WireError::Handshake(format!("expected HelloOk, got {other:?}"))),
-        };
-        Ok(Self { stream, session })
-    }
+pub type WireClient    = WireClientT<TcpStream>;
+pub type WireTlsClient = WireClientT<tokio_rustls::client::TlsStream<TcpStream>>;
 
+impl<S: AsyncRead + AsyncWrite + Unpin> WireClientT<S> {
     pub fn session(&self) -> u64 { self.session }
 
     pub async fn execute(&mut self, sql: &str) -> WireResult<WireMessage> {
@@ -206,6 +207,48 @@ impl WireClient {
             Err(WireError::Closed) => Ok(()),
             Err(e)                => Err(e),
         }
+    }
+}
+
+async fn handshake_client<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S, principal: String,
+) -> WireResult<WireClientT<S>> {
+    write_frame(&mut stream, &WireMessage::Hello {
+        version: 1, principal }).await?;
+    let reply = read_frame(&mut stream).await?;
+    let session = match reply {
+        WireMessage::HelloOk { session } => session,
+        other => return Err(WireError::Handshake(format!("expected HelloOk, got {other:?}"))),
+    };
+    Ok(WireClientT { stream, session })
+}
+
+impl WireClient {
+    /// Plaintext TCP connect + handshake.
+    pub async fn connect(
+        addr: std::net::SocketAddr, principal: impl Into<String>,
+    ) -> WireResult<Self> {
+        let stream = TcpStream::connect(addr).await?;
+        handshake_client(stream, principal.into()).await
+    }
+}
+
+impl WireTlsClient {
+    /// ADR 0330 — TLS-wrapped connect. `connector` is a
+    /// caller-configured rustls client (so the caller
+    /// chooses the root-cert store, ALPN, SNI, etc.);
+    /// `server_name` is the SNI name to send (also used
+    /// for cert-subject matching).
+    pub async fn connect_tls(
+        addr: std::net::SocketAddr,
+        server_name: ServerName<'static>,
+        connector: &TlsConnector,
+        principal: impl Into<String>,
+    ) -> WireResult<Self> {
+        let tcp = TcpStream::connect(addr).await?;
+        let tls = connector.connect(server_name, tcp).await
+            .map_err(|e| WireError::Tls(format!("connect: {e}")))?;
+        handshake_client(tls, principal.into()).await
     }
 }
 
@@ -325,5 +368,133 @@ mod tests {
             .await.unwrap();
         let outcome = server_handle.await.unwrap();
         assert!(matches!(outcome, Err(WireError::Handshake(_))), "got {outcome:?}");
+    }
+
+    // ---------- ADR 0330: TLS-wrapped wire tests ----------
+
+    use tokio_rustls::rustls::{
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
+        ClientConfig, RootCertStore, ServerConfig,
+    };
+
+    fn gen_tls_fixture() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+        let key_der  = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            cert.key_pair.serialize_der()));
+        (vec![cert_der], key_der)
+    }
+
+    fn build_server_config(chain: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>)
+        -> Arc<ServerConfig>
+    {
+        rustls::crypto::ring::default_provider().install_default().ok();
+        Arc::new(ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .expect("rustls server config"))
+    }
+
+    fn build_client_config(trust: &[CertificateDer<'static>]) -> Arc<ClientConfig> {
+        rustls::crypto::ring::default_provider().install_default().ok();
+        let mut roots = RootCertStore::empty();
+        for c in trust { roots.add(c.clone()).unwrap(); }
+        Arc::new(ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tls_round_trip_runs_sql_through_the_engine() {
+        let (_dir, engine) = fresh_engine();
+        let (chain, key)   = gen_tls_fixture();
+        let server_cfg = build_server_config(chain.clone(), key);
+        let client_cfg = build_client_config(&chain);
+        let acceptor   = TlsAcceptor::from(server_cfg);
+        let connector  = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move { s.serve_one_tls(&listener, &acc).await }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut client = WireTlsClient::connect_tls(
+            addr, name, &connector, "alice").await.unwrap();
+        assert_eq!(client.session(), 1);
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        match reply {
+            WireMessage::RowSet { columns, rows } => {
+                assert_eq!(columns.len(), 1);
+                assert_eq!(rows.len(),    1);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tls_client_with_untrusted_server_cert_is_rejected() {
+        let (_dir, engine) = fresh_engine();
+        let (chain, key)   = gen_tls_fixture();
+        let server_cfg = build_server_config(chain, key);
+        let acceptor   = TlsAcceptor::from(server_cfg);
+        // A DIFFERENT fixture → client doesn't trust the
+        // server's cert.
+        let (other_chain, _) = gen_tls_fixture();
+        let client_cfg = build_client_config(&other_chain);
+        let connector  = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move { s.serve_one_tls(&listener, &acc).await }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let err = WireTlsClient::connect_tls(
+            addr, name, &connector, "alice").await.unwrap_err();
+        assert!(matches!(err, WireError::Tls(_)),
+            "expected TLS verification error, got {err:?}");
+        // The server's handshake future also surfaces an
+        // error (or Closed). Drain it so the task isn't
+        // left dangling.
+        let _ = server_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plaintext_client_against_tls_server_is_rejected() {
+        let (_dir, engine) = fresh_engine();
+        let (chain, key)   = gen_tls_fixture();
+        let server_cfg = build_server_config(chain, key);
+        let acceptor   = TlsAcceptor::from(server_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move { s.serve_one_tls(&listener, &acc).await }
+        });
+        // Dial as plaintext — the TLS handshake on the
+        // server side rejects the non-ClientHello bytes.
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Send what a plaintext client would start with:
+        // a full Hello frame.
+        write_frame(&mut stream, &WireMessage::Hello {
+            version: 1, principal: "bob".into() }).await.unwrap();
+        let outcome = server_handle.await.unwrap();
+        assert!(matches!(outcome, Err(WireError::Tls(_))),
+            "plaintext bytes into TLS acceptor should surface Tls error, got {outcome:?}");
     }
 }
