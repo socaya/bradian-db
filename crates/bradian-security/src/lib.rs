@@ -19,7 +19,8 @@ pub mod token;
 pub use audit::{AuditEntry, AuditLog};
 pub use authz::{cache_key, policy_predicate, PolicyContext};
 pub use cert_principal::{
-    extract_common_name, principal_from_peer_chain,
+    extract_common_name, extract_san_dns_names,
+    principal_from_peer_chain, principal_from_peer_chain_san,
     CertPrincipalError, CertPrincipalResult,
 };
 pub use encryption::{seal, unseal, DataKey, KeyId, KeyRing, SealedPayload};
