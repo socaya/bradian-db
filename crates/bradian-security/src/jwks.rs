@@ -11,6 +11,7 @@
 //! optionally fetches the JWKS over HTTPS.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -111,15 +112,30 @@ pub struct JwksCache {
 struct Inner {
     ttl:   Duration,
     state: RwLock<Snapshot>,
+    /// ADR 0336 — observability counters for the rotation
+    /// loop. `fetch_attempts` ticks every scheduled fetch
+    /// try, `fetch_errors` counts the ones that failed.
+    fetch_attempts: AtomicU64,
+    fetch_errors:   AtomicU64,
 }
 
 impl JwksCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
             inner: Arc::new(Inner {
-                ttl, state: RwLock::new(Snapshot::default()),
+                ttl,
+                state: RwLock::new(Snapshot::default()),
+                fetch_attempts: AtomicU64::new(0),
+                fetch_errors:   AtomicU64::new(0),
             }),
         }
+    }
+
+    pub fn fetch_attempts(&self) -> u64 {
+        self.inner.fetch_attempts.load(Ordering::Relaxed)
+    }
+    pub fn fetch_errors(&self) -> u64 {
+        self.inner.fetch_errors.load(Ordering::Relaxed)
     }
 
     /// Replace the cache from an already-parsed `JwkSet`.
@@ -158,17 +174,64 @@ impl JwksCache {
     /// Fetch a JWKS document over HTTPS and replace the
     /// cache. Caller supplies a `reqwest::Client` so TLS
     /// config, proxies, etc. are not this module's business.
+    /// Increments `fetch_attempts`; on failure increments
+    /// `fetch_errors` and leaves the cache untouched.
     pub async fn fetch_from(
         &self, client: &reqwest::Client, url: &str,
     ) -> JwksResult<()> {
-        let bytes = client.get(url).send().await
-            .map_err(|e| JwksError::Http(format!("{e}")))?
-            .error_for_status()
-            .map_err(|e| JwksError::Http(format!("{e}")))?
-            .bytes().await
-            .map_err(|e| JwksError::Http(format!("{e}")))?;
-        let set = JwkSet::from_json(&bytes)?;
-        self.load(&set)
+        self.inner.fetch_attempts.fetch_add(1, Ordering::Relaxed);
+        let result = async {
+            let bytes = client.get(url).send().await
+                .map_err(|e| JwksError::Http(format!("{e}")))?
+                .error_for_status()
+                .map_err(|e| JwksError::Http(format!("{e}")))?
+                .bytes().await
+                .map_err(|e| JwksError::Http(format!("{e}")))?;
+            let set = JwkSet::from_json(&bytes)?;
+            self.load(&set)
+        }.await;
+        if result.is_err() {
+            self.inner.fetch_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// ADR 0336 — spawn a tokio task that refreshes the
+    /// cache on `interval`. The returned `JoinHandle` can
+    /// be awaited / aborted by the caller. Errors are
+    /// logged via `tracing::warn!` and counted in
+    /// `fetch_errors`; a transient error does NOT kill
+    /// the loop — the next tick retries.
+    pub fn spawn_rotation(
+        &self, client: reqwest::Client, url: impl Into<String>,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let cache  = self.clone();
+        let url    = url.into();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // Don't burst-fire if the task runs behind.
+            ticker.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match cache.fetch_from(&client, &url).await {
+                    Ok(()) => {
+                        tracing::debug!(
+                            url = %url,
+                            attempts = cache.fetch_attempts(),
+                            "JWKS rotation: cache refreshed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            url = %url,
+                            error = %e,
+                            errors = cache.fetch_errors(),
+                            "JWKS rotation: fetch failed, will retry next tick");
+                    }
+                }
+            }
+        })
     }
 
     /// Verify a JWT using the key selected by its `kid`
@@ -383,5 +446,58 @@ mod tests {
             serde_json::json!({ "sub": "a", "exp": u64::MAX }));
         let err = cache.verify(&token).unwrap_err();
         assert!(matches!(err, JwksError::UnknownKid(_)));
+    }
+
+    // ---------- ADR 0336: scheduled rotation ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_attempts_and_errors_counters_are_wired() {
+        // Point reqwest at a localhost port that nobody
+        // is listening on — fetch should fail fast.
+        let cache = JwksCache::new(Duration::from_secs(60));
+        let client = reqwest::Client::builder().build().unwrap();
+        assert_eq!(cache.fetch_attempts(), 0);
+        assert_eq!(cache.fetch_errors(),   0);
+        let err = cache.fetch_from(&client, "http://127.0.0.1:1/jwks.json").await;
+        assert!(err.is_err());
+        assert_eq!(cache.fetch_attempts(), 1);
+        assert_eq!(cache.fetch_errors(),   1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_rotation_survives_fetch_errors_and_keeps_ticking() {
+        let cache = JwksCache::new(Duration::from_secs(60));
+        let client = reqwest::Client::builder().build().unwrap();
+        let handle = cache.spawn_rotation(
+            client, "http://127.0.0.1:1/jwks.json",
+            Duration::from_millis(40),
+        );
+        // Wait for several ticks to land.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let attempts = cache.fetch_attempts();
+        let errors   = cache.fetch_errors();
+        assert!(attempts >= 2,
+            "rotation should have fired ≥ 2 times in 200 ms: attempts={attempts}");
+        assert_eq!(attempts, errors,
+            "every attempt should have failed against the dead URL");
+        // The task is still alive; aborting cleans up.
+        assert!(!handle.is_finished(),
+            "rotation task must NOT exit on a transient fetch error");
+        handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_rotation_cache_stays_stale_until_fetch_succeeds() {
+        let cache = JwksCache::new(Duration::from_millis(100));
+        let client = reqwest::Client::builder().build().unwrap();
+        let handle = cache.spawn_rotation(
+            client, "http://127.0.0.1:1/jwks.json",
+            Duration::from_millis(30),
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!cache.is_fresh(),
+            "no successful fetch → cache should remain stale");
+        assert!(cache.is_empty());
+        handle.abort();
     }
 }
