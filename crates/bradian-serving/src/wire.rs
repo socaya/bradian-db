@@ -497,4 +497,142 @@ mod tests {
         assert!(matches!(outcome, Err(WireError::Tls(_))),
             "plaintext bytes into TLS acceptor should surface Tls error, got {outcome:?}");
     }
+
+    // ---------- ADR 0331: mTLS wire tests ----------
+    //
+    // These exercise the composition: ADR 0283's
+    // `load_pem_with_client_ca` builds a WebPkiClientVerifier-
+    // backed ServerConfig; ADR 0330's `serve_one_tls`
+    // accepts any TlsAcceptor; the client supplies a cert
+    // via rustls::ClientConfig::with_client_auth_cert.
+
+    use tokio_rustls::rustls::server::WebPkiClientVerifier;
+
+    fn build_mtls_server_config(
+        server_chain: Vec<CertificateDer<'static>>,
+        server_key:   PrivateKeyDer<'static>,
+        client_ca:    Vec<CertificateDer<'static>>,
+    ) -> Arc<ServerConfig> {
+        rustls::crypto::ring::default_provider().install_default().ok();
+        let mut roots = RootCertStore::empty();
+        for c in client_ca { roots.add(c).unwrap(); }
+        let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+            .build().expect("mtls verifier");
+        Arc::new(ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(server_chain, server_key)
+            .expect("mtls server config"))
+    }
+
+    fn build_mtls_client_config(
+        server_trust: &[CertificateDer<'static>],
+        client_chain: Vec<CertificateDer<'static>>,
+        client_key:   PrivateKeyDer<'static>,
+    ) -> Arc<ClientConfig> {
+        rustls::crypto::ring::default_provider().install_default().ok();
+        let mut roots = RootCertStore::empty();
+        for c in server_trust { roots.add(c.clone()).unwrap(); }
+        Arc::new(ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(client_chain, client_key)
+            .expect("mtls client config"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtls_round_trip_accepts_valid_client_cert() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_chain, client_key) = gen_tls_fixture();
+
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_chain.clone());
+        let client_cfg = build_mtls_client_config(
+            &server_chain, client_chain, client_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move { s.serve_one_tls(&listener, &acc).await }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut client = WireTlsClient::connect_tls(
+            addr, name, &connector, "alice").await.unwrap();
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(reply, WireMessage::RowSet { .. }), "{reply:?}");
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtls_server_rejects_client_without_a_cert() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_trust, _unused)    = gen_tls_fixture();
+
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_trust);
+        // Client config has NO client cert.
+        let client_cfg = build_client_config(&server_chain);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move { s.serve_one_tls(&listener, &acc).await }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let outcome = WireTlsClient::connect_tls(
+            addr, name, &connector, "alice").await;
+        assert!(outcome.is_err(),
+            "mTLS server must refuse a cert-less client; got {outcome:?}");
+        let server_outcome = server_handle.await.unwrap();
+        assert!(matches!(server_outcome, Err(WireError::Tls(_))),
+            "server-side task should surface Tls; got {server_outcome:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtls_server_rejects_client_cert_from_untrusted_ca() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (trusted_client_ca, _)     = gen_tls_fixture();
+        // Client presents a DIFFERENT cert.
+        let (rogue_chain, rogue_key)   = gen_tls_fixture();
+
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, trusted_client_ca);
+        let client_cfg = build_mtls_client_config(
+            &server_chain, rogue_chain, rogue_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move { s.serve_one_tls(&listener, &acc).await }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let outcome = WireTlsClient::connect_tls(
+            addr, name, &connector, "mallory").await;
+        assert!(outcome.is_err(),
+            "mTLS server must refuse an untrusted client cert; got {outcome:?}");
+        let server_outcome = server_handle.await.unwrap();
+        assert!(matches!(server_outcome, Err(WireError::Tls(_))),
+            "server-side task should surface Tls; got {server_outcome:?}");
+    }
 }
