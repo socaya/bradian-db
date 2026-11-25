@@ -258,7 +258,7 @@ writes, etc.) are listed per row.
 | G1-LOCAL-ACCESS | **DONE on Linux ACL** | POSIX ACL inspection shipped (ADR 0321). Windows ACL (0322) + enterprise identity (0323) are infra-deferred. |
 | G1-FAULTS | **DONE** | WAL / user / DDL / BRPG / manifest sweeps + FaultPolicy trait + scripted harness + fsync-power-loss simulation (0290). Device-torn-write lab (0324) remains hardware infra. |
 | G1-REFERENCE | **DONE** | SQL subset corpus, ANSI schedule corpus (0276), SQLLogicTest-compatible runner + 6 cases (0277). External-suite imports are incremental. |
-| G1-PORTABILITY | **DONE on code** | macOS runs verified; Windows code path (0291) `#[cfg(windows)]` shipped. Windows binary build in CI (0325) is infra. |
+| G1-PORTABILITY | **DONE** | macOS runs verified; Windows code path (ADR 0291); Windows binary build CI (ADR 0325) — manual-trigger workflow emits unsigned `bradian-admin.exe` + `bradian-db.exe` + build-input receipt pinned to `Cargo.lock`. Signed installers remain ADR 0326. |
 | G1-INSTALL | Partial | Signed portable installers (0326), 3-OS matrix (0325) — all infra. |
 
 ---

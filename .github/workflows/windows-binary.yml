@@ -1,0 +1,108 @@
+name: Bradian Windows binary build
+
+# ADR 0325 — Windows binary build.
+#
+# Manual-only (workflow_dispatch) per CLAUDE.md "Automatic
+# CI triggers remain disabled". Produces the two shipped
+# binaries (bradian-admin.exe, bradian-db.exe) as workflow
+# artefacts so an operator who manually triggers the run
+# can download a Windows build pinned to this commit's
+# Cargo.lock.
+#
+# Honest scope: this workflow builds + tests + emits
+# unsigned release binaries. Code-signing + MSI/MSIX
+# packaging + SmartScreen reputation (G1-INSTALL /
+# ADR 0326) are a separate workflow that will reuse these
+# artefacts as input once owner approves the signing key
+# strategy.
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Run cargo test before building (slower, recommended)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  windows-binary:
+    name: Build on windows-latest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-binary-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-binary-${{ runner.os }}-
+
+      - name: Record build inputs
+        shell: pwsh
+        run: |
+          rustc --version | Tee-Object -FilePath rustc-version.txt
+          Get-FileHash Cargo.lock -Algorithm SHA256 | Tee-Object -FilePath cargo-lock-sha256.txt
+
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+      - name: Test workspace (unit + integration)
+        if: ${{ github.event.inputs.run_tests != 'false' }}
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked --bin bradian-admin
+          cargo build --release --locked --bin bradian-db
+
+      - name: Verify artefacts exist
+        shell: pwsh
+        run: |
+          if (-not (Test-Path target/release/bradian-admin.exe)) {
+            throw "bradian-admin.exe missing after build"
+          }
+          if (-not (Test-Path target/release/bradian-db.exe)) {
+            throw "bradian-db.exe missing after build"
+          }
+
+      - name: Upload bradian-admin.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: bradian-admin-windows-x86_64
+          path: target/release/bradian-admin.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload bradian-db.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: bradian-db-windows-x86_64
+          path: target/release/bradian-db.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build-input receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-receipt
+          path: |
+            rustc-version.txt
+            cargo-lock-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
