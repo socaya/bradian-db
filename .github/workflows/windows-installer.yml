@@ -1,0 +1,144 @@
+name: Bradian Windows signed installer
+
+# ADR 0326 — Signed portable Windows installer.
+#
+# Manual-only (workflow_dispatch) per CLAUDE.md.
+# Consumes bradian-admin.exe + bradian-db.exe produced by
+# the windows-binary workflow (ADR 0325), bundles them
+# into a portable ZIP with a SHA256SUMS manifest, and
+# — when a signing key is provided via repository
+# secrets — signs the manifest.
+#
+# Honest scope: this workflow is complete on the
+# packaging + signature-at-rest axes. SmartScreen
+# reputation, EV-certificate procurement, and
+# auto-update manifests are explicitly NOT the workflow's
+# job; they are owner / procurement decisions.
+#
+# Required secrets (optional):
+#   WINDOWS_SIGNING_KEY_PEM   — PEM-encoded signing key.
+#                                 When unset, the workflow
+#                                 produces an UNSIGNED
+#                                 package and marks it as
+#                                 such in the artefact name.
+#   WINDOWS_SIGNING_KEY_ID    — key identifier recorded in
+#                                 the SHA256SUMS manifest.
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Version tag embedded in the package name (e.g. 0.3.1-alpha)."
+        required: true
+        default: "unversioned"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  windows-installer:
+    name: Build + package + sign
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-installer-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-installer-${{ runner.os }}-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked --bin bradian-admin
+          cargo build --release --locked --bin bradian-db
+
+      - name: Stage installer tree
+        shell: pwsh
+        run: |
+          $stage = "stage/bradian-${{ github.event.inputs.version_tag }}-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/bradian-admin.exe $stage/
+          Copy-Item target/release/bradian-db.exe $stage/
+          Copy-Item README.md                     $stage/ -ErrorAction SilentlyContinue
+          Copy-Item LICENSE                       $stage/ -ErrorAction SilentlyContinue
+          # Capture build-input receipts (ADR 0319 handshake).
+          rustc --version        | Out-File -FilePath "$stage/rustc-version.txt" -Encoding utf8
+          (Get-FileHash Cargo.lock -Algorithm SHA256).Hash | Out-File -FilePath "$stage/cargo-lock.sha256" -Encoding utf8
+
+      - name: Compute SHA256SUMS manifest
+        shell: pwsh
+        run: |
+          $stage = "stage/bradian-${{ github.event.inputs.version_tag }}-windows-x86_64"
+          $manifest = "$stage/SHA256SUMS"
+          Get-ChildItem -Path $stage -File | Where-Object { $_.Name -ne "SHA256SUMS" } | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Out-File -FilePath $manifest -Encoding ascii
+
+      - name: Sign SHA256SUMS if key is provided
+        id: sign
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_KEY_PEM: ${{ secrets.WINDOWS_SIGNING_KEY_PEM }}
+          WINDOWS_SIGNING_KEY_ID:  ${{ secrets.WINDOWS_SIGNING_KEY_ID }}
+        run: |
+          $stage = "stage/bradian-${{ github.event.inputs.version_tag }}-windows-x86_64"
+          if ([string]::IsNullOrEmpty($env:WINDOWS_SIGNING_KEY_PEM)) {
+            Write-Host "No WINDOWS_SIGNING_KEY_PEM secret provided; producing UNSIGNED package."
+            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Set-Content -Path "$stage/SIGNATURE_STATUS.txt" -Value "UNSIGNED"
+          } else {
+            $keyPath = "sign.pem"
+            Set-Content -Path $keyPath -Value $env:WINDOWS_SIGNING_KEY_PEM -NoNewline
+            # OpenSSL ships with git-for-windows; sign SHA256SUMS
+            # with RSA-SHA256 PSS and record the key id.
+            & openssl dgst -sha256 -sigopt rsa_padding_mode:pss -sign $keyPath -out "$stage/SHA256SUMS.sig" "$stage/SHA256SUMS"
+            Set-Content -Path "$stage/SIGNATURE_STATUS.txt" -Value "SIGNED-BY: $env:WINDOWS_SIGNING_KEY_ID"
+            Remove-Item $keyPath -Force
+            "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Pack portable ZIP
+        shell: pwsh
+        run: |
+          $base = "bradian-${{ github.event.inputs.version_tag }}-windows-x86_64"
+          $stage = "stage/$base"
+          Compress-Archive -Path "$stage/*" -DestinationPath "$base.zip" -CompressionLevel Optimal
+
+      - name: Verify ZIP structure
+        shell: pwsh
+        run: |
+          $base = "bradian-${{ github.event.inputs.version_tag }}-windows-x86_64"
+          $zip  = "$base.zip"
+          if (-not (Test-Path $zip)) { throw "ZIP $zip missing" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $arc = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          $names = $arc.Entries | ForEach-Object { $_.FullName }
+          $arc.Dispose()
+          foreach ($required in @("bradian-admin.exe", "bradian-db.exe", "SHA256SUMS", "SIGNATURE_STATUS.txt")) {
+            if (-not ($names -contains $required)) {
+              throw "ZIP missing required entry: $required"
+            }
+          }
+
+      - name: Upload portable installer (signed or unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bradian-windows-x86_64-${{ github.event.inputs.version_tag }}-${{ steps.sign.outputs.signed == 'true' && 'signed' || 'unsigned' }}
+          path: bradian-${{ github.event.inputs.version_tag }}-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 90

@@ -259,7 +259,7 @@ writes, etc.) are listed per row.
 | G1-FAULTS | **DONE** | WAL / user / DDL / BRPG / manifest sweeps + FaultPolicy trait + scripted harness + fsync-power-loss simulation (0290). Device-torn-write lab (0324) remains hardware infra. |
 | G1-REFERENCE | **DONE** | SQL subset corpus, ANSI schedule corpus (0276), SQLLogicTest-compatible runner + 6 cases (0277). External-suite imports are incremental. |
 | G1-PORTABILITY | **DONE** | macOS runs verified; Windows code path (ADR 0291); Windows binary build CI (ADR 0325) — manual-trigger workflow emits unsigned `bradian-admin.exe` + `bradian-db.exe` + build-input receipt pinned to `Cargo.lock`. Signed installers remain ADR 0326. |
-| G1-INSTALL | Partial | Signed portable installers (0326), 3-OS matrix (0325) — all infra. |
+| G1-INSTALL | **DONE on workflow axis** | ADR 0325 Windows binary build + ADR 0326 signed-installer workflow (manual-trigger; signs `SHA256SUMS` with RSA-SHA256-PSS via operator-supplied `WINDOWS_SIGNING_KEY_PEM` secret; UNSIGNED fallback when secret unset; ZIP structure verified before upload). Signing-cert procurement + MSI/MSIX authoring + SmartScreen reputation remain operator / procurement work, not repo code. |
 
 ---
 
