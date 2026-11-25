@@ -96,6 +96,11 @@ async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> WireResult<WireMessag
 pub struct WireServer {
     engine: Arc<SqlEngine>,
     next_session: Arc<std::sync::atomic::AtomicU64>,
+    /// ADR 0337 — optional memory-pressure policy consulted
+    /// on every `RowSet` emission. `None` → no admission
+    /// (preserves pre-0337 behaviour).
+    memory_pressure:
+        Option<Arc<bradian_relational::memory_pressure::MemoryPressureHarness>>,
 }
 
 impl std::fmt::Debug for WireServer {
@@ -109,7 +114,22 @@ impl WireServer {
         Self {
             engine,
             next_session: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            memory_pressure: None,
         }
+    }
+
+    /// ADR 0337 — install a `MemoryPressureHarness` that
+    /// gates every `RowSet` emission. Before formatting
+    /// rows into a wire frame, the handler admits the
+    /// estimated byte size of the result set against the
+    /// harness; a refusal is reported as `ErrorMsg { code:
+    /// 4 }` without executing the frame.
+    pub fn with_memory_pressure(
+        mut self,
+        harness: Arc<bradian_relational::memory_pressure::MemoryPressureHarness>,
+    ) -> Self {
+        self.memory_pressure = Some(harness);
+        self
     }
 
     /// Accept one connection from `listener`, drive the
@@ -256,7 +276,29 @@ impl WireServer {
                             let rows: Vec<Vec<String>> = rows.into_iter()
                                 .map(|r| r.into_iter().map(|v| format!("{v:?}")).collect())
                                 .collect();
-                            WireMessage::RowSet { columns, rows }
+                            // ADR 0337 — admit the result
+                            // set against the memory
+                            // pressure harness before
+                            // emission. On refusal, return
+                            // a typed ErrorMsg and keep the
+                            // session alive.
+                            let maybe_guard = if let Some(h) = &self.memory_pressure {
+                                let bytes: usize = columns.iter().map(|c| c.len()).sum::<usize>()
+                                    + rows.iter().flatten().map(|v| v.len()).sum::<usize>();
+                                match h.admit(bytes) {
+                                    Ok(g) => Some(g),
+                                    Err(e) => {
+                                        let msg = format!("{e}");
+                                        write_frame(&mut stream, &WireMessage::ErrorMsg {
+                                            code: 4, message: msg }).await?;
+                                        continue;
+                                    }
+                                }
+                            } else { None };
+                            let reply = WireMessage::RowSet { columns, rows };
+                            write_frame(&mut stream, &reply).await?;
+                            drop(maybe_guard);  // release in-flight bytes
+                            continue;
                         }
                         Ok(SqlResultSet::Command { affected }) =>
                             WireMessage::Command { affected },
@@ -975,5 +1017,124 @@ mod tests {
         client.bye().await.unwrap();
         let p = server_handle.await.unwrap().unwrap();
         assert_eq!(p.id, "bob");
+    }
+
+    // ---------- ADR 0337: memory-pressure on RowSet emission ----------
+
+    use bradian_relational::memory_pressure::{
+        FixedBudget, MemoryPressureHarness, UnboundedMemory,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_pressure_refuses_rowset_over_budget() {
+        let (_dir, engine) = fresh_engine();
+        // Budget too small to admit any real RowSet.
+        let harness = Arc::new(MemoryPressureHarness::new(FixedBudget::new(4)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine).with_memory_pressure(harness.clone());
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        match reply {
+            WireMessage::ErrorMsg { code, message } => {
+                assert_eq!(code, 4);
+                assert!(message.contains("budget"),
+                    "expected budget-exceeded message, got {message:?}");
+            }
+            other => panic!("expected ErrorMsg(4), got {other:?}"),
+        }
+        // Session stays alive.
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+        // Harness recorded one failure.
+        let stats = harness.stats();
+        assert_eq!(stats.failures, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_pressure_admits_rowset_within_budget() {
+        let (_dir, engine) = fresh_engine();
+        // Budget comfortably larger than any single RowSet.
+        let harness = Arc::new(MemoryPressureHarness::new(FixedBudget::new(1 << 20)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine).with_memory_pressure(harness.clone());
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(reply, WireMessage::RowSet { .. }), "{reply:?}");
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+        let stats = harness.stats();
+        assert_eq!(stats.failures, 0,
+            "a comfortable budget should admit without refusal");
+        assert!(stats.admitted_cumulative > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_pressure_releases_on_rowset_drop_between_statements() {
+        let (_dir, engine) = fresh_engine();
+        // Budget big enough for exactly one RowSet. If the
+        // release-on-drop is wired correctly, a second
+        // statement reuses the budget.
+        let harness = Arc::new(MemoryPressureHarness::new(FixedBudget::new(256)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine).with_memory_pressure(harness.clone());
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let r1 = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(r1, WireMessage::RowSet { .. }));
+        let r2 = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 2").await.unwrap();
+        assert!(matches!(r2, WireMessage::RowSet { .. }));
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+        assert_eq!(harness.in_flight(), 0,
+            "all admitted bytes must have been released after the session");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn without_memory_pressure_rowset_behaviour_is_unchanged() {
+        // Baseline: no harness installed → no admission
+        // path runs; RowSet is emitted exactly as before.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);     // no with_memory_pressure
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let r = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(r, WireMessage::RowSet { .. }));
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn unbounded_memory_pressure_never_refuses() {
+        // Direct unit check: an UnboundedMemory harness
+        // wired into the server never bumps the failures
+        // counter.
+        let harness = MemoryPressureHarness::new(UnboundedMemory::default());
+        let g = harness.admit(1 << 24).unwrap();
+        drop(g);
+        assert_eq!(harness.stats().failures, 0);
     }
 }
