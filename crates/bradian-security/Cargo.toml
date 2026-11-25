@@ -30,6 +30,8 @@ rsa         = { workspace = true }
 # ADR 0329 — JWKS fetch for RS256 key rotation.
 reqwest     = { workspace = true }
 tokio       = { workspace = true }
+# ADR 0332 — principal-from-cert mapping for mTLS peers.
+x509-parser = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }
@@ -37,3 +39,5 @@ tempfile    = { workspace = true }
 # ADR 0328 — generate a fixture RSA keypair for RS256 tests.
 rand        = { workspace = true }
 rand_chacha = { workspace = true }
+# ADR 0332 — generate fixture mTLS client certs for tests.
+rcgen       = { workspace = true }

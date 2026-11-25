@@ -6,6 +6,8 @@
 
 pub mod audit;
 pub mod authz;
+/// ADR 0332 — principal-from-cert mapping for mTLS peers.
+pub mod cert_principal;
 pub mod encryption;
 /// ADR 0323 (HS256) + ADR 0328 (RS256) — enterprise OIDC JWT verification.
 pub mod enterprise_identity;
@@ -16,6 +18,10 @@ pub mod token;
 
 pub use audit::{AuditEntry, AuditLog};
 pub use authz::{cache_key, policy_predicate, PolicyContext};
+pub use cert_principal::{
+    extract_common_name, principal_from_peer_chain,
+    CertPrincipalError, CertPrincipalResult,
+};
 pub use encryption::{seal, unseal, DataKey, KeyId, KeyRing, SealedPayload};
 pub use enterprise_identity::{
     JwtError, JwtHeader, JwtHs256Verifier, JwtResult, JwtRs256Verifier,
