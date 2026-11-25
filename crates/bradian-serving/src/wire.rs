@@ -22,13 +22,82 @@ use tokio_rustls::{rustls::pki_types::ServerName, TlsAcceptor, TlsConnector};
 /// on the far side.
 pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
 
+/// ADR 0338 — typed wire value. Mirrors
+/// `bradian_relational::typed_table::Value` so clients
+/// can parse row cells back into language-level types
+/// without a debug-format round-trip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireValue {
+    Null,
+    Bool { value: bool },
+    Int32 { value: i32 },
+    Int64 { value: i64 },
+    /// Signed 128-bit decimal; scale is carried by the
+    /// column schema separately (not shipped in this
+    /// slice — a follow-up adds per-column type hints to
+    /// the RowSet header).
+    Decimal { value: String },
+    String { value: String },
+    /// Microseconds since Unix epoch (UTC).
+    TimestampTz { micros: i64 },
+    /// Hex-encoded 16-byte UUID (canonical dashed form).
+    Uuid { value: String },
+    Json { value: String },
+}
+
+impl From<bradian_relational::typed_table::Value> for WireValue {
+    fn from(v: bradian_relational::typed_table::Value) -> Self {
+        use bradian_relational::typed_table::Value as R;
+        match v {
+            R::Null              => WireValue::Null,
+            R::Boolean(b)        => WireValue::Bool  { value: b },
+            R::Int32(i)          => WireValue::Int32 { value: i },
+            R::Int64(i)          => WireValue::Int64 { value: i },
+            R::Decimal(d)        => WireValue::Decimal { value: d.to_string() },
+            R::String(s)         => WireValue::String  { value: s },
+            R::TimestampTz(t)    => WireValue::TimestampTz { micros: t },
+            R::Uuid(b)           => WireValue::Uuid { value: format_uuid(&b) },
+            R::Json(s)           => WireValue::Json { value: s },
+        }
+    }
+}
+
+fn format_uuid(b: &[u8; 16]) -> String {
+    // Canonical 8-4-4-4-12 dashed form.
+    let mut out = String::with_capacity(36);
+    for (i, byte) in b.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 { out.push('-'); }
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Cheap byte-cost estimator for the memory-pressure
+/// gate. Owned byte-buffers only; constant overhead is
+/// ignored since it is dominated by payload size for
+/// non-trivial result sets.
+fn wire_value_bytes(v: &WireValue) -> usize {
+    match v {
+        WireValue::Null                  => 1,
+        WireValue::Bool { .. }           => 1,
+        WireValue::Int32 { .. }          => 4,
+        WireValue::Int64 { .. }          => 8,
+        WireValue::Decimal { value }     => value.len(),
+        WireValue::String  { value }     => value.len(),
+        WireValue::TimestampTz { .. }    => 8,
+        WireValue::Uuid { value }        => value.len(),
+        WireValue::Json { value }        => value.len(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireMessage {
     Hello    { version: u32, principal: String },
     HelloOk  { session: u64 },
     Execute  { sql: String },
-    RowSet   { columns: Vec<String>, rows: Vec<Vec<String>> },
+    RowSet   { columns: Vec<String>, rows: Vec<Vec<WireValue>> },
     Command  { affected: u64 },
     ErrorMsg { code: u32, message: String },
     Bye,
@@ -273,8 +342,11 @@ impl WireServer {
                         }
                     } else { match self.engine.execute(&sql) {
                         Ok(SqlResultSet::Rows { columns, rows }) => {
-                            let rows: Vec<Vec<String>> = rows.into_iter()
-                                .map(|r| r.into_iter().map(|v| format!("{v:?}")).collect())
+                            // ADR 0338 — typed wire row:
+                            // convert each cell via
+                            // WireValue::from(Value).
+                            let rows: Vec<Vec<WireValue>> = rows.into_iter()
+                                .map(|r| r.into_iter().map(WireValue::from).collect())
                                 .collect();
                             // ADR 0337 — admit the result
                             // set against the memory
@@ -284,7 +356,8 @@ impl WireServer {
                             // session alive.
                             let maybe_guard = if let Some(h) = &self.memory_pressure {
                                 let bytes: usize = columns.iter().map(|c| c.len()).sum::<usize>()
-                                    + rows.iter().flatten().map(|v| v.len()).sum::<usize>();
+                                    + rows.iter().flatten()
+                                        .map(wire_value_bytes).sum::<usize>();
                                 match h.admit(bytes) {
                                     Ok(g) => Some(g),
                                     Err(e) => {
@@ -1125,6 +1198,88 @@ mod tests {
         assert!(matches!(r, WireMessage::RowSet { .. }));
         client.bye().await.unwrap();
         server_handle.await.unwrap().unwrap();
+    }
+
+    // ---------- ADR 0338: typed WireValue encoding ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rowset_carries_typed_wire_values_not_debug_strings() {
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        match reply {
+            WireMessage::RowSet { columns, rows } => {
+                assert_eq!(columns, vec!["value".to_string()]);
+                assert_eq!(rows.len(), 1);
+                // The fixture inserts `value = 100` as a
+                // BIGINT, which lands on the wire as
+                // WireValue::Int64.
+                match &rows[0][0] {
+                    WireValue::Int64 { value } => assert_eq!(*value, 100),
+                    other => panic!("expected Int64(100), got {other:?}"),
+                }
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn wire_value_from_every_relational_variant_is_lossless_for_the_wire_shape() {
+        use bradian_relational::typed_table::Value as R;
+        assert!(matches!(WireValue::from(R::Null), WireValue::Null));
+        assert!(matches!(WireValue::from(R::Boolean(true)),
+            WireValue::Bool { value: true }));
+        assert!(matches!(WireValue::from(R::Int32(-1)),
+            WireValue::Int32 { value: -1 }));
+        assert!(matches!(WireValue::from(R::Int64(1 << 40)),
+            WireValue::Int64 { value } if value == 1i64 << 40));
+        match WireValue::from(R::Decimal(123_456_789i128)) {
+            WireValue::Decimal { value } => assert_eq!(value, "123456789"),
+            other => panic!("decimal variant wrong: {other:?}"),
+        }
+        match WireValue::from(R::String("hello".into())) {
+            WireValue::String { value } => assert_eq!(value, "hello"),
+            other => panic!("string variant wrong: {other:?}"),
+        }
+        match WireValue::from(R::TimestampTz(1_700_000_000_000_000)) {
+            WireValue::TimestampTz { micros } =>
+                assert_eq!(micros, 1_700_000_000_000_000),
+            other => panic!("ts variant wrong: {other:?}"),
+        }
+        match WireValue::from(R::Uuid([0xab; 16])) {
+            WireValue::Uuid { value } => {
+                assert_eq!(value, "abababab-abab-abab-abab-abababababab");
+            }
+            other => panic!("uuid variant wrong: {other:?}"),
+        }
+        match WireValue::from(R::Json("{\"a\":1}".into())) {
+            WireValue::Json { value } => assert_eq!(value, "{\"a\":1}"),
+            other => panic!("json variant wrong: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_value_json_tag_round_trips_through_serde() {
+        // Clients parse WireValue via serde; verify the
+        // tag names are stable so a language-level
+        // deserialiser in another language can match on
+        // "type":"int64" and the "value" field.
+        let v = WireValue::Int64 { value: 42 };
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("\"type\":\"int64\""));
+        assert!(json.contains("\"value\":42"));
+        let back: WireValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, v);
     }
 
     #[test]
