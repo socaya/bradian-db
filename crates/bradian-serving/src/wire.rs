@@ -170,6 +170,10 @@ pub struct WireServer {
     /// (preserves pre-0337 behaviour).
     memory_pressure:
         Option<Arc<bradian_relational::memory_pressure::MemoryPressureHarness>>,
+    /// ADR 0339 — optional audit log. When set, every
+    /// authenticated statement writes a
+    /// `bradian_security::AuditEntry` record.
+    audit: Option<Arc<bradian_security::AuditLog>>,
 }
 
 impl std::fmt::Debug for WireServer {
@@ -184,6 +188,7 @@ impl WireServer {
             engine,
             next_session: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             memory_pressure: None,
+            audit: None,
         }
     }
 
@@ -198,6 +203,16 @@ impl WireServer {
         harness: Arc<bradian_relational::memory_pressure::MemoryPressureHarness>,
     ) -> Self {
         self.memory_pressure = Some(harness);
+        self
+    }
+
+    /// ADR 0339 — install a shared `AuditLog`. When set,
+    /// the wire handler appends an `AuditEntry` for every
+    /// authenticated statement (success, authz denial,
+    /// pressure denial, and engine error) plus one
+    /// connection-close entry.
+    pub fn with_audit_log(mut self, log: Arc<bradian_security::AuditLog>) -> Self {
+        self.audit = Some(log);
         self
     }
 
@@ -263,7 +278,9 @@ impl WireServer {
             &peer_certs, mapper,
         ).map_err(|e| WireError::Auth(format!("{e}")))?;
 
-        self.handle_connection(tls).await?;
+        self.handle_connection_with_authz(
+            tls, Some(principal.id.clone()), |_| true,
+        ).await?;
         Ok(principal)
     }
 
@@ -297,23 +314,28 @@ impl WireServer {
         ).map_err(|e| WireError::Auth(format!("{e}")))?;
 
         let p_ref = principal.clone();
-        self.handle_connection_with_authz(tls, move |sql| authz(&p_ref, sql)).await?;
+        let id    = principal.id.clone();
+        self.handle_connection_with_authz(
+            tls, Some(id), move |sql| authz(&p_ref, sql),
+        ).await?;
         Ok(principal)
     }
 
     async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
         &self, stream: S,
     ) -> WireResult<()> {
-        self.handle_connection_with_authz(stream, |_| true).await
+        self.handle_connection_with_authz(stream, None, |_| true).await
     }
 
     /// Dispatch a connection with an authz predicate run
     /// against every `Execute`. Returning `false` from
     /// the predicate replies `ErrorMsg { code: 3 }` and
     /// keeps the session alive so the peer can try other
-    /// statements.
+    /// statements. `principal_id` seeds the audit entries
+    /// (ADR 0339) with the authenticated identity; `None`
+    /// records entries as `anonymous`.
     async fn handle_connection_with_authz<S, F>(
-        &self, mut stream: S, mut authz: F,
+        &self, mut stream: S, principal_id: Option<String>, mut authz: F,
     ) -> WireResult<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -327,15 +349,28 @@ impl WireServer {
             std::sync::atomic::Ordering::SeqCst) + 1;
         write_frame(&mut stream, &WireMessage::HelloOk { session }).await?;
 
+        let who = principal_id.unwrap_or_else(|| "anonymous".to_string());
+        self.audit_record(&who, "session_open", &format!("session={session}"), None);
+
         loop {
             let req = match read_frame(&mut stream).await {
                 Ok(m) => m,
-                Err(WireError::Closed) => return Ok(()),
-                Err(e) => return Err(e),
+                Err(WireError::Closed) => {
+                    self.audit_record(&who, "session_close",
+                        &format!("session={session}"), Some("eof".into()));
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.audit_record(&who, "session_close",
+                        &format!("session={session}"), Some(format!("{e}")));
+                    return Err(e);
+                }
             };
             match req {
                 WireMessage::Execute { sql } => {
                     let reply = if !authz(&sql) {
+                        self.audit_record(&who, "authz_deny",
+                            &audit_target_of(&sql), Some(truncate_sql(&sql)));
                         WireMessage::ErrorMsg {
                             code: 3,
                             message: format!("authorization denied for statement: {sql}"),
@@ -362,26 +397,44 @@ impl WireServer {
                                     Ok(g) => Some(g),
                                     Err(e) => {
                                         let msg = format!("{e}");
+                                        self.audit_record(&who, "pressure_deny",
+                                            &audit_target_of(&sql), Some(truncate_sql(&sql)));
                                         write_frame(&mut stream, &WireMessage::ErrorMsg {
                                             code: 4, message: msg }).await?;
                                         continue;
                                     }
                                 }
                             } else { None };
+                            let rows_returned = rows.len();
                             let reply = WireMessage::RowSet { columns, rows };
                             write_frame(&mut stream, &reply).await?;
                             drop(maybe_guard);  // release in-flight bytes
+                            self.audit_record(&who, "execute_rows",
+                                &audit_target_of(&sql),
+                                Some(format!("rows={rows_returned}; sql={}",
+                                    truncate_sql(&sql))));
                             continue;
                         }
-                        Ok(SqlResultSet::Command { affected }) =>
-                            WireMessage::Command { affected },
-                        Err(e) => WireMessage::ErrorMsg {
-                            code: 1, message: format!("{e}") },
+                        Ok(SqlResultSet::Command { affected }) => {
+                            self.audit_record(&who, "execute_command",
+                                &audit_target_of(&sql),
+                                Some(format!("affected={affected}; sql={}",
+                                    truncate_sql(&sql))));
+                            WireMessage::Command { affected }
+                        }
+                        Err(e) => {
+                            self.audit_record(&who, "execute_error",
+                                &audit_target_of(&sql),
+                                Some(format!("err={e}; sql={}", truncate_sql(&sql))));
+                            WireMessage::ErrorMsg { code: 1, message: format!("{e}") }
+                        }
                     }};
                     write_frame(&mut stream, &reply).await?;
                 }
                 WireMessage::Bye => {
                     write_frame(&mut stream, &WireMessage::Bye).await?;
+                    self.audit_record(&who, "session_close",
+                        &format!("session={session}"), Some("bye".into()));
                     return Ok(());
                 }
                 other => {
@@ -391,6 +444,54 @@ impl WireServer {
             }
         }
     }
+
+    fn audit_record(&self, principal_id: &str, action: &str, target: &str, detail: Option<String>) {
+        if let Some(log) = &self.audit {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64).unwrap_or(0);
+            let entry = bradian_security::AuditEntry {
+                timestamp_ms: ts,
+                principal_id: principal_id.to_string(),
+                action: action.to_string(),
+                target: target.to_string(),
+                plan_fingerprint: None,
+                detail,
+            };
+            // Audit write failures are logged, not
+            // propagated: losing the connection because the
+            // audit log is temporarily unwritable is the
+            // wrong trade-off for operators.
+            if let Err(e) = log.record(&entry) {
+                tracing::warn!(error = %e, principal = %principal_id,
+                    action = %action, "audit log write failed");
+            }
+        }
+    }
+}
+
+/// Clip SQL text to a reasonable audit-detail length so a
+/// long literal doesn't bloat the log. 256 bytes is plenty
+/// for action attribution; the full text belongs in the
+/// engine's query log.
+fn truncate_sql(sql: &str) -> String {
+    const MAX: usize = 256;
+    if sql.len() <= MAX { sql.to_string() }
+    else {
+        let mut s = sql[..MAX].to_string();
+        s.push('…');
+        s
+    }
+}
+
+/// Derive a crude "target" for the audit entry from the
+/// SQL statement verb. Not a parse — just a prefix so
+/// filtering by action class is tractable.
+fn audit_target_of(sql: &str) -> String {
+    let trimmed = sql.trim_start();
+    let verb = trimmed.split_ascii_whitespace().next().unwrap_or("?")
+        .to_ascii_uppercase();
+    format!("sql:{verb}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,6 +1381,170 @@ mod tests {
         assert!(json.contains("\"value\":42"));
         let back: WireValue = serde_json::from_str(&json).unwrap();
         assert_eq!(back, v);
+    }
+
+    // ---------- ADR 0339: audit-log integration ----------
+
+    use bradian_security::AuditLog;
+
+    fn read_audit(path: &std::path::Path) -> Vec<serde_json::Value> {
+        let bytes = std::fs::read_to_string(path).unwrap();
+        bytes.lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_records_session_open_close_and_execute() {
+        let (_dir, engine) = fresh_engine();
+        let logdir = tempdir().unwrap();
+        let log_path = logdir.path().join("audit.log");
+        let audit = Arc::new(AuditLog::open(log_path.clone()).unwrap());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine).with_audit_log(audit);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let _ = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+
+        let entries = read_audit(&log_path);
+        // open + execute_rows + close = 3 entries.
+        assert!(entries.len() >= 3,
+            "expected ≥ 3 audit entries, got {}: {entries:?}",
+            entries.len());
+        let actions: Vec<String> = entries.iter()
+            .map(|e| e["action"].as_str().unwrap().to_string())
+            .collect();
+        assert!(actions.contains(&"session_open".to_string()));
+        assert!(actions.contains(&"execute_rows".to_string()));
+        assert!(actions.contains(&"session_close".to_string()));
+        // Anonymous since plaintext path.
+        for entry in &entries {
+            assert_eq!(entry["principal_id"], "anonymous");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_authz_denial_records_authz_deny_entry() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_chain, client_key) = gen_tls_fixture_with_cn("bradian-analyst-bob");
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_chain.clone());
+        let client_cfg = build_mtls_client_config(
+            &server_chain, client_chain, client_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let logdir = tempdir().unwrap();
+        let log_path = logdir.path().join("audit.log");
+        let audit = Arc::new(AuditLog::open(log_path.clone()).unwrap());
+        let server = WireServer::new(engine).with_audit_log(audit);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move {
+                s.serve_one_mtls_authz(&listener, &acc,
+                    |cn| cn.strip_prefix("bradian-analyst-").map(|id| Principal {
+                        id: id.into(), role: Role::Analyst, ou_scope: vec![],
+                    }),
+                    |p, sql| {
+                        let s = sql.trim_start().to_ascii_lowercase();
+                        matches!(p.role, Role::Administrator)
+                            || s.starts_with("select")
+                    },
+                ).await
+            }
+        });
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut client = WireTlsClient::connect_tls(
+            addr, name, &connector, "x").await.unwrap();
+        // Denied INSERT.
+        let _ = client.execute(
+            "INSERT INTO t.public.items(id, value) VALUES(777, 777)").await.unwrap();
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+
+        let entries = read_audit(&log_path);
+        let deny: Vec<_> = entries.iter()
+            .filter(|e| e["action"] == "authz_deny").collect();
+        assert_eq!(deny.len(), 1, "expected exactly one authz_deny entry");
+        assert_eq!(deny[0]["principal_id"], "bob");
+        assert_eq!(deny[0]["target"], "sql:INSERT");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_pressure_denial_records_pressure_deny_entry() {
+        let (_dir, engine) = fresh_engine();
+        let harness = Arc::new(MemoryPressureHarness::new(FixedBudget::new(4)));
+        let logdir = tempdir().unwrap();
+        let log_path = logdir.path().join("audit.log");
+        let audit = Arc::new(AuditLog::open(log_path.clone()).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine)
+            .with_memory_pressure(harness.clone())
+            .with_audit_log(audit);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let _ = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+
+        let entries = read_audit(&log_path);
+        let deny: Vec<_> = entries.iter()
+            .filter(|e| e["action"] == "pressure_deny").collect();
+        assert_eq!(deny.len(), 1);
+        assert_eq!(deny[0]["target"], "sql:SELECT");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn without_audit_log_no_entries_are_emitted() {
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // No with_audit_log call.
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let _ = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+        // Nothing to verify directly — this is a smoke
+        // test that the no-audit path doesn't panic.
+    }
+
+    #[test]
+    fn audit_sql_truncation_caps_at_256_bytes_with_ellipsis() {
+        let long = "x".repeat(400);
+        let truncated = super::truncate_sql(&long);
+        assert!(truncated.len() < 400);
+        assert!(truncated.ends_with('…'));
+        assert_eq!(super::truncate_sql("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn audit_target_extracts_verb_regardless_of_whitespace_or_case() {
+        assert_eq!(super::audit_target_of("SELECT * FROM t"), "sql:SELECT");
+        assert_eq!(super::audit_target_of("  insert into x"), "sql:INSERT");
+        assert_eq!(super::audit_target_of(""), "sql:?");
     }
 
     #[test]
