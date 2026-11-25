@@ -9,6 +9,8 @@ pub mod authz;
 pub mod encryption;
 /// ADR 0323 (HS256) + ADR 0328 (RS256) — enterprise OIDC JWT verification.
 pub mod enterprise_identity;
+/// ADR 0329 — JWKS fetch + kid-indexed cache.
+pub mod jwks;
 pub mod principal;
 pub mod token;
 
@@ -19,5 +21,6 @@ pub use enterprise_identity::{
     JwtError, JwtHeader, JwtHs256Verifier, JwtResult, JwtRs256Verifier,
     StandardClaims, Verified,
 };
+pub use jwks::{Jwk, JwkSet, JwksCache, JwksError, JwksResult, rsa_public_key_from_jwk};
 pub use principal::{Principal, Role};
 pub use token::TokenStore;

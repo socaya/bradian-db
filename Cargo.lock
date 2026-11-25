@@ -538,6 +538,7 @@ dependencies = [
  "proptest",
  "rand 0.8.8",
  "rand_chacha",
+ "reqwest",
  "rsa",
  "serde",
  "serde_json",
@@ -545,6 +546,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
