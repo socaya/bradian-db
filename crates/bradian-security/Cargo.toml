@@ -27,6 +27,8 @@ base64      = { workspace = true }
 subtle      = { workspace = true }
 # ADR 0328 — enterprise OIDC JWT verification (RS256).
 rsa         = { workspace = true }
+# ADR 0341 — enterprise OIDC JWT verification (ES256).
+p256        = { workspace = true }
 # ADR 0329 — JWKS fetch for RS256 key rotation.
 reqwest     = { workspace = true }
 tokio       = { workspace = true }

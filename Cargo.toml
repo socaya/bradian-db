@@ -92,6 +92,8 @@ sha2             = "0.10"
 base64           = "0.22"
 # ADR 0328 — enterprise OIDC JWT verification (RS256).
 rsa              = { version = "0.9", features = ["sha2", "pem"] }
+# ADR 0341 — enterprise OIDC JWT verification (ES256).
+p256             = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
 rustls           = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
 rustls-pemfile   = "2"
 # ADR 0330 — TLS-wrapped wire protocol (bridges rustls to tokio TCP from ADR 0316).
