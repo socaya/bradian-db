@@ -33,10 +33,9 @@ pub enum WireValue {
     Bool { value: bool },
     Int32 { value: i32 },
     Int64 { value: i64 },
-    /// Signed 128-bit decimal; scale is carried by the
-    /// column schema separately (not shipped in this
-    /// slice — a follow-up adds per-column type hints to
-    /// the RowSet header).
+    /// Signed 128-bit decimal shipped as a decimal
+    /// string. Column scale is published in the RowSet
+    /// header's `column_types` list (ADR 0340).
     Decimal { value: String },
     String { value: String },
     /// Microseconds since Unix epoch (UTC).
@@ -44,6 +43,67 @@ pub enum WireValue {
     /// Hex-encoded 16-byte UUID (canonical dashed form).
     Uuid { value: String },
     Json { value: String },
+}
+
+/// ADR 0340 — per-column wire type hint. The
+/// `WireMessage::RowSet.column_types` list carries one
+/// entry per column so a client knows the expected cell
+/// variant before parsing the first row — essential for
+/// empty-row-set responses where variant inference from
+/// row data is impossible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireType {
+    /// Column type could not be inferred (empty row set,
+    /// or engine returned no type metadata). Clients
+    /// SHOULD treat this as "accept any variant".
+    Unknown,
+    Bool,
+    Int32,
+    Int64,
+    Decimal,
+    String,
+    TimestampTz,
+    Uuid,
+    Json,
+}
+
+impl WireValue {
+    /// Return the `WireType` discriminant of this value.
+    /// `Null` maps to `Unknown` since a single null tells
+    /// a client nothing about the column's declared type.
+    pub fn wire_type(&self) -> WireType {
+        match self {
+            WireValue::Null              => WireType::Unknown,
+            WireValue::Bool { .. }       => WireType::Bool,
+            WireValue::Int32 { .. }      => WireType::Int32,
+            WireValue::Int64 { .. }      => WireType::Int64,
+            WireValue::Decimal { .. }    => WireType::Decimal,
+            WireValue::String { .. }     => WireType::String,
+            WireValue::TimestampTz { .. }=> WireType::TimestampTz,
+            WireValue::Uuid { .. }       => WireType::Uuid,
+            WireValue::Json { .. }       => WireType::Json,
+        }
+    }
+}
+
+/// Infer per-column types from the row set's data:
+/// scan the first non-null cell per column; columns
+/// that remain all-null (or empty row set) stay
+/// `Unknown`. This is a best-effort shape until the
+/// engine ships column metadata in `SqlResultSet`.
+fn infer_column_types(columns: &[String], rows: &[Vec<WireValue>]) -> Vec<WireType> {
+    let mut out = vec![WireType::Unknown; columns.len()];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate().take(out.len()) {
+            if matches!(out[i], WireType::Unknown) {
+                let t = cell.wire_type();
+                if !matches!(t, WireType::Unknown) { out[i] = t; }
+            }
+        }
+        if out.iter().all(|t| !matches!(t, WireType::Unknown)) { break; }
+    }
+    out
 }
 
 impl From<bradian_relational::typed_table::Value> for WireValue {
@@ -97,7 +157,14 @@ pub enum WireMessage {
     Hello    { version: u32, principal: String },
     HelloOk  { session: u64 },
     Execute  { sql: String },
-    RowSet   { columns: Vec<String>, rows: Vec<Vec<WireValue>> },
+    /// ADR 0340 — `column_types` carries one `WireType`
+    /// per entry in `columns`, best-effort inferred from
+    /// the row data (or `Unknown` on empty / all-null).
+    RowSet   {
+        columns: Vec<String>,
+        column_types: Vec<WireType>,
+        rows: Vec<Vec<WireValue>>,
+    },
     Command  { affected: u64 },
     ErrorMsg { code: u32, message: String },
     Bye,
@@ -406,7 +473,8 @@ impl WireServer {
                                 }
                             } else { None };
                             let rows_returned = rows.len();
-                            let reply = WireMessage::RowSet { columns, rows };
+                            let column_types = infer_column_types(&columns, &rows);
+                            let reply = WireMessage::RowSet { columns, column_types, rows };
                             write_frame(&mut stream, &reply).await?;
                             drop(maybe_guard);  // release in-flight bytes
                             self.audit_record(&who, "execute_rows",
@@ -604,7 +672,7 @@ mod tests {
         let reply = client.execute(
             "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
         match reply {
-            WireMessage::RowSet { columns, rows } => {
+            WireMessage::RowSet { columns, rows, .. } => {
                 assert_eq!(columns.len(), 1);
                 assert_eq!(rows.len(),    1);
             }
@@ -747,7 +815,7 @@ mod tests {
         let reply = client.execute(
             "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
         match reply {
-            WireMessage::RowSet { columns, rows } => {
+            WireMessage::RowSet { columns, rows, .. } => {
                 assert_eq!(columns.len(), 1);
                 assert_eq!(rows.len(),    1);
             }
@@ -1317,7 +1385,7 @@ mod tests {
         let reply = client.execute(
             "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
         match reply {
-            WireMessage::RowSet { columns, rows } => {
+            WireMessage::RowSet { columns, rows, .. } => {
                 assert_eq!(columns, vec!["value".to_string()]);
                 assert_eq!(rows.len(), 1);
                 // The fixture inserts `value = 100` as a
@@ -1545,6 +1613,90 @@ mod tests {
         assert_eq!(super::audit_target_of("SELECT * FROM t"), "sql:SELECT");
         assert_eq!(super::audit_target_of("  insert into x"), "sql:INSERT");
         assert_eq!(super::audit_target_of(""), "sql:?");
+    }
+
+    // ---------- ADR 0340: per-column type hints ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rowset_carries_inferred_column_types() {
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        match reply {
+            WireMessage::RowSet { columns, column_types, rows } => {
+                assert_eq!(columns, vec!["value".to_string()]);
+                assert_eq!(rows.len(), 1);
+                assert_eq!(column_types.len(), 1);
+                assert_eq!(column_types[0], WireType::Int64);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn wire_value_wire_type_discriminant_is_stable() {
+        assert_eq!(WireValue::Null.wire_type(), WireType::Unknown);
+        assert_eq!(WireValue::Bool { value: true }.wire_type(), WireType::Bool);
+        assert_eq!(WireValue::Int32 { value: 0 }.wire_type(), WireType::Int32);
+        assert_eq!(WireValue::Int64 { value: 0 }.wire_type(), WireType::Int64);
+        assert_eq!(WireValue::Decimal { value: "0".into() }.wire_type(), WireType::Decimal);
+        assert_eq!(WireValue::String { value: "".into() }.wire_type(), WireType::String);
+        assert_eq!(WireValue::TimestampTz { micros: 0 }.wire_type(), WireType::TimestampTz);
+        assert_eq!(WireValue::Uuid { value: "".into() }.wire_type(), WireType::Uuid);
+        assert_eq!(WireValue::Json { value: "{}".into() }.wire_type(), WireType::Json);
+    }
+
+    #[test]
+    fn infer_column_types_skips_nulls_and_picks_first_typed_cell() {
+        let columns = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let rows = vec![
+            vec![WireValue::Null, WireValue::Null, WireValue::String { value: "x".into() }],
+            vec![WireValue::Int64 { value: 1 }, WireValue::Null, WireValue::String { value: "y".into() }],
+            vec![WireValue::Int64 { value: 2 }, WireValue::Bool { value: true }, WireValue::String { value: "z".into() }],
+        ];
+        let types = infer_column_types(&columns, &rows);
+        assert_eq!(types, vec![WireType::Int64, WireType::Bool, WireType::String]);
+    }
+
+    #[test]
+    fn infer_column_types_all_null_column_stays_unknown() {
+        let columns = vec!["x".to_string(), "y".to_string()];
+        let rows = vec![
+            vec![WireValue::Int64 { value: 1 }, WireValue::Null],
+            vec![WireValue::Int64 { value: 2 }, WireValue::Null],
+        ];
+        assert_eq!(
+            infer_column_types(&columns, &rows),
+            vec![WireType::Int64, WireType::Unknown],
+        );
+    }
+
+    #[test]
+    fn infer_column_types_empty_rowset_yields_all_unknown() {
+        let columns = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            infer_column_types(&columns, &[]),
+            vec![WireType::Unknown, WireType::Unknown],
+        );
+    }
+
+    #[test]
+    fn wire_type_serialisation_is_snake_case() {
+        let t = WireType::TimestampTz;
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, "\"timestamp_tz\"");
+        let back: WireType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
     }
 
     #[test]
