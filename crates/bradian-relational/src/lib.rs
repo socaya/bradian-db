@@ -56,9 +56,11 @@ pub mod schema_activation;
 pub mod local_access;
 pub mod workspace_usage;
 pub mod mutable_page;
-/// ADR 0308 — buffer-pool / dirty-page-manager skeleton
-/// layered over `mutable_page`. In-memory for this slice.
+/// ADR 0308 — buffer-pool / dirty-page-manager over
+/// `mutable_page`.
 pub mod page_buffer;
+/// ADR 0327 — memory-pressure fault harness.
+pub mod memory_pressure;
 pub mod unique_check;
 pub mod pitr;
 /// ADR 0317 — PITR incremental archive skeleton.
