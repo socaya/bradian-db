@@ -22,9 +22,7 @@ use rsa::{BigUint, RsaPublicKey};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::enterprise_identity::{
-    JwtError, JwtHeader, JwtRs256Verifier, Verified,
-};
+use crate::enterprise_identity::{JwtError, JwtHeader, Verified};
 
 #[derive(Debug, Error)]
 pub enum JwksError {
@@ -51,8 +49,7 @@ pub struct Jwk {
     pub kty: String,
     #[serde(default)]
     pub kid: Option<String>,
-    /// JWS algorithm this key signs under (RS256 for our
-    /// purposes).
+    /// JWS algorithm this key signs under (RS256 or ES256).
     #[serde(default)]
     pub alg: Option<String>,
     /// Intended usage — `"sig"` or `"enc"`.
@@ -64,6 +61,15 @@ pub struct Jwk {
     /// RSA exponent, base64url-encoded big-endian bytes.
     #[serde(default)]
     pub e: Option<String>,
+    /// ADR 0342 — EC curve name (e.g. "P-256").
+    #[serde(default)]
+    pub crv: Option<String>,
+    /// ADR 0342 — EC X coordinate, base64url-encoded.
+    #[serde(default)]
+    pub x: Option<String>,
+    /// ADR 0342 — EC Y coordinate, base64url-encoded.
+    #[serde(default)]
+    pub y: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -92,12 +98,63 @@ pub fn rsa_public_key_from_jwk(jwk: &Jwk) -> JwksResult<RsaPublicKey> {
         .map_err(|e| JwksError::RsaKey(format!("{e}")))
 }
 
+/// ADR 0342 — convert a `kty: "EC", crv: "P-256"` JWK
+/// entry into a `p256::ecdsa::VerifyingKey`. The x and y
+/// base64url components must each decode to 32 bytes
+/// (uncompressed point halves).
+pub fn p256_public_key_from_jwk(jwk: &Jwk)
+    -> JwksResult<p256::ecdsa::VerifyingKey>
+{
+    use p256::elliptic_curve::sec1::FromEncodedPoint;
+    use p256::{EncodedPoint, PublicKey};
+    if jwk.kty != "EC" {
+        return Err(JwksError::Malformed("kty must be \"EC\""));
+    }
+    if jwk.crv.as_deref() != Some("P-256") {
+        return Err(JwksError::Malformed("crv must be \"P-256\""));
+    }
+    let x_b64 = jwk.x.as_deref().ok_or(JwksError::Malformed("missing x"))?;
+    let y_b64 = jwk.y.as_deref().ok_or(JwksError::Malformed("missing y"))?;
+    let x = URL_SAFE_NO_PAD.decode(x_b64).map_err(|e|
+        JwksError::RsaKey(format!("x base64: {e}")))?;
+    let y = URL_SAFE_NO_PAD.decode(y_b64).map_err(|e|
+        JwksError::RsaKey(format!("y base64: {e}")))?;
+    if x.len() != 32 || y.len() != 32 {
+        return Err(JwksError::Malformed(
+            "EC P-256 coordinates must each decode to 32 bytes"));
+    }
+    let point = EncodedPoint::from_affine_coordinates(
+        (&*x).into(), (&*y).into(), false);
+    let pk: PublicKey = Option::from(PublicKey::from_encoded_point(&point))
+        .ok_or(JwksError::Malformed(
+            "EC P-256 coordinates do not describe a valid curve point"))?;
+    Ok(pk.into())
+}
+
+/// ADR 0342 — a verifying key the cache stores. One
+/// variant per algorithm family.
+#[derive(Clone, Debug)]
+pub enum JwkVerifyingKey {
+    Rsa(RsaPublicKey),
+    Es256(p256::ecdsa::VerifyingKey),
+}
+
+impl JwkVerifyingKey {
+    pub fn from_jwk(jwk: &Jwk) -> JwksResult<Self> {
+        match jwk.kty.as_str() {
+            "RSA" => Ok(Self::Rsa(rsa_public_key_from_jwk(jwk)?)),
+            "EC"  => Ok(Self::Es256(p256_public_key_from_jwk(jwk)?)),
+            _     => Err(JwksError::Malformed("unsupported kty")),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
 struct Snapshot {
-    keys:     HashMap<String, RsaPublicKey>,
-    unkeyed:  Vec<RsaPublicKey>,  // JWKs that omit `kid`
+    keys:     HashMap<String, JwkVerifyingKey>,
+    unkeyed:  Vec<JwkVerifyingKey>,
     fetched:  Option<Instant>,
 }
 
@@ -139,13 +196,15 @@ impl JwksCache {
     }
 
     /// Replace the cache from an already-parsed `JwkSet`.
-    /// Non-RSA keys are silently skipped (log-only
-    /// diagnostic); malformed RSA JWKs surface as error.
+    /// Unsupported `kty` values are silently skipped;
+    /// malformed RSA / EC JWKs surface as error.
     pub fn load(&self, set: &JwkSet) -> JwksResult<()> {
         let mut snap = Snapshot::default();
         for jwk in &set.keys {
-            if jwk.kty != "RSA" { continue; }
-            let key = rsa_public_key_from_jwk(jwk)?;
+            let key = match jwk.kty.as_str() {
+                "RSA" | "EC" => JwkVerifyingKey::from_jwk(jwk)?,
+                _ => continue,
+            };
             match jwk.kid.as_ref() {
                 Some(kid) => { snap.keys.insert(kid.clone(), key); }
                 None      => snap.unkeyed.push(key),
@@ -164,7 +223,7 @@ impl JwksCache {
         }
     }
 
-    pub fn get(&self, kid: &str) -> Option<RsaPublicKey> {
+    pub fn get(&self, kid: &str) -> Option<JwkVerifyingKey> {
         self.inner.state.read().keys.get(kid).cloned()
     }
 
@@ -235,9 +294,16 @@ impl JwksCache {
     }
 
     /// Verify a JWT using the key selected by its `kid`
-    /// header. If the token has no `kid` and the cache
-    /// has exactly one unkeyed entry, that key is used
-    /// (OIDC "single-key tenant" convention).
+    /// header, dispatching to the right verifier based on
+    /// the cached key variant. If the token has no `kid`
+    /// and the cache has exactly one unkeyed entry, that
+    /// key is used (OIDC "single-key tenant" convention).
+    ///
+    /// ADR 0342 — alg routing: an RSA cache key is used
+    /// with `JwtRs256Verifier`; an EC cache key is used
+    /// with `JwtEs256Verifier`. The verifier picks up the
+    /// token's declared `alg` from the header and
+    /// enforces alg match itself.
     pub fn verify(&self, token: &str) -> JwksResult<Verified> {
         let (h_b64, _) = split_token(token)?;
         let header_bytes = URL_SAFE_NO_PAD.decode(h_b64)
@@ -254,7 +320,12 @@ impl JwksCache {
                 else { return Err(JwksError::MissingKid); }
             }
         };
-        Ok(JwtRs256Verifier::new(key).verify(token)?)
+        Ok(match key {
+            JwkVerifyingKey::Rsa(rsa_key) =>
+                crate::enterprise_identity::JwtRs256Verifier::new(rsa_key).verify(token)?,
+            JwkVerifyingKey::Es256(ec_key) =>
+                crate::enterprise_identity::JwtEs256Verifier::new(ec_key).verify(token)?,
+        })
     }
 }
 
@@ -306,6 +377,7 @@ mod tests {
             alg: Some("RS256".into()),
             use_: Some("sig".into()),
             n: Some(n), e: Some(e),
+            crv: None, x: None, y: None,
         }
     }
 
@@ -324,6 +396,7 @@ mod tests {
         let jwk = Jwk {
             kty: "EC".into(), kid: None, alg: None, use_: None,
             n: None, e: None,
+            crv: None, x: None, y: None,
         };
         assert!(matches!(rsa_public_key_from_jwk(&jwk),
             Err(JwksError::Malformed("kty must be \"RSA\""))));
@@ -334,6 +407,7 @@ mod tests {
         let mut jwk = Jwk {
             kty: "RSA".into(), kid: None, alg: None, use_: None,
             n: Some("AQAB".into()), e: None,
+            crv: None, x: None, y: None,
         };
         assert!(matches!(rsa_public_key_from_jwk(&jwk),
             Err(JwksError::Malformed("missing e"))));
@@ -499,5 +573,143 @@ mod tests {
             "no successful fetch → cache should remain stale");
         assert!(cache.is_empty());
         handle.abort();
+    }
+
+    // ---------- ADR 0342: EC / ES256 JWK support ----------
+
+    use p256::ecdsa::{signature::Signer as _, SigningKey as EcdsaSigningKey};
+    #[allow(unused_imports)]
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+    fn fixture_ec_keypair(seed: u64)
+        -> (EcdsaSigningKey, p256::ecdsa::VerifyingKey)
+    {
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let sk = EcdsaSigningKey::random(&mut rng);
+        let vk = *sk.verifying_key();
+        (sk, vk)
+    }
+
+    fn jwk_from_ec_pub(vk: &p256::ecdsa::VerifyingKey, kid: Option<&str>) -> Jwk {
+        let point = vk.to_encoded_point(false);
+        let x = B64.encode(point.x().unwrap());
+        let y = B64.encode(point.y().unwrap());
+        Jwk {
+            kty: "EC".into(),
+            kid: kid.map(str::to_string),
+            alg: Some("ES256".into()),
+            use_: Some("sig".into()),
+            n: None, e: None,
+            crv: Some("P-256".into()),
+            x: Some(x), y: Some(y),
+        }
+    }
+
+    fn mint_es256(sk: &EcdsaSigningKey, kid: Option<&str>,
+                  claims: serde_json::Value) -> String {
+        let mut header = serde_json::json!({ "alg": "ES256", "typ": "JWT" });
+        if let Some(k) = kid { header["kid"] = serde_json::Value::String(k.into()); }
+        let h = B64.encode(serde_json::to_vec(&header).unwrap());
+        let p = B64.encode(serde_json::to_vec(&claims).unwrap());
+        let signing = format!("{h}.{p}");
+        let sig: p256::ecdsa::Signature = sk.sign(signing.as_bytes());
+        format!("{signing}.{}", B64.encode(sig.to_bytes()))
+    }
+
+    #[test]
+    fn ec_jwk_round_trips_through_p256_verifying_key() {
+        let (_sk, vk) = fixture_ec_keypair(1);
+        let jwk = jwk_from_ec_pub(&vk, Some("ec-1"));
+        let back = p256_public_key_from_jwk(&jwk).unwrap();
+        // VerifyingKey implements PartialEq.
+        assert_eq!(back, vk);
+    }
+
+    #[test]
+    fn ec_jwk_requires_p256_curve() {
+        let (_, vk) = fixture_ec_keypair(2);
+        let mut jwk = jwk_from_ec_pub(&vk, None);
+        jwk.crv = Some("secp384r1".into());
+        assert!(matches!(p256_public_key_from_jwk(&jwk),
+            Err(JwksError::Malformed("crv must be \"P-256\""))));
+    }
+
+    #[test]
+    fn ec_jwk_missing_x_or_y_rejected() {
+        let (_, vk) = fixture_ec_keypair(3);
+        let mut jwk = jwk_from_ec_pub(&vk, None);
+        jwk.y = None;
+        assert!(matches!(p256_public_key_from_jwk(&jwk),
+            Err(JwksError::Malformed("missing y"))));
+        jwk.y = Some("short".into());
+        jwk.x = None;
+        assert!(matches!(p256_public_key_from_jwk(&jwk),
+            Err(JwksError::Malformed("missing x"))));
+    }
+
+    #[test]
+    fn cache_dispatches_rsa_and_ec_keys_by_variant() {
+        let (sk_rsa, pub_rsa) = fixture_key(10);
+        let (sk_ec,  pub_ec)  = fixture_ec_keypair(11);
+        let set = JwkSet { keys: vec![
+            jwk_from_pub(&pub_rsa, Some("rsa-key")),
+            jwk_from_ec_pub(&pub_ec, Some("ec-key")),
+        ]};
+        let cache = JwksCache::new(Duration::from_secs(60));
+        cache.load(&set).unwrap();
+        assert_eq!(cache.len(), 2);
+        // RSA-signed token verified via RS256.
+        let rsa_token = mint_rs256(&sk_rsa, Some("rsa-key"), serde_json::json!({
+            "sub": "a", "exp": u64::MAX,
+        }));
+        // mint_rs256 doesn't add kid; wrap to add it.
+        let rsa_token = add_kid_to_token(&rsa_token, "rsa-key");
+        cache.verify(&rsa_token).unwrap();
+        // EC-signed token verified via ES256.
+        let ec_token = mint_es256(&sk_ec, Some("ec-key"),
+            serde_json::json!({ "sub": "b", "exp": u64::MAX }));
+        cache.verify(&ec_token).unwrap();
+    }
+
+    #[test]
+    fn cache_ec_key_rejects_mismatched_signature() {
+        let (sk_rsa, _) = fixture_key(12);
+        let (_, pub_ec) = fixture_ec_keypair(13);
+        let set = JwkSet { keys: vec![jwk_from_ec_pub(&pub_ec, Some("ec-key"))] };
+        let cache = JwksCache::new(Duration::from_secs(60));
+        cache.load(&set).unwrap();
+        // RS256-signed token claiming the EC key's kid → ES256
+        // verifier gets the wrong alg in the header.
+        let rsa_token = mint_rs256(&sk_rsa, Some("rsa-key"), serde_json::json!({
+            "sub": "a", "exp": u64::MAX,
+        }));
+        let twisted = add_kid_to_token(&rsa_token, "ec-key");
+        let err = cache.verify(&twisted).unwrap_err();
+        // ES256 verifier refuses alg=RS256 as UnsupportedAlg,
+        // which bubbles up through JwksError::Jwt.
+        assert!(matches!(err,
+            JwksError::Jwt(crate::enterprise_identity::JwtError::UnsupportedAlg(_))),
+            "got {err:?}");
+    }
+
+    /// Rewrite a JWT's header to include a `kid` and
+    /// re-encode. Only touches the header b64 segment —
+    /// the signature stays bound to the original header
+    /// bytes, which is desired for the mismatch test.
+    fn add_kid_to_token(token: &str, kid: &str) -> String {
+        let parts: Vec<&str> = token.splitn(3, '.').collect();
+        let hb = B64.decode(parts[0]).unwrap();
+        let mut hv: serde_json::Value = serde_json::from_slice(&hb).unwrap();
+        hv["kid"] = serde_json::Value::String(kid.into());
+        let new_h = B64.encode(serde_json::to_vec(&hv).unwrap());
+        // Also re-sign isn't possible here without the
+        // key; the signature verify will fail unless the
+        // caller used this helper correctly (e.g. match
+        // the kid to the cert that actually signed it).
+        // In our tests we use it either to add a kid to an
+        // existing fixture-signed token or to deliberately
+        // break verification via a forged kid.
+        let _ = new_h.clone();
+        format!("{new_h}.{}.{}", parts[1], parts[2])
     }
 }
