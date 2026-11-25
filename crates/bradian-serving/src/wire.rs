@@ -50,6 +50,8 @@ pub enum WireError {
     Closed,
     #[error("tls: {0}")]
     Tls(String),
+    #[error("auth: {0}")]
+    Auth(String),
 }
 pub type WireResult<T> = Result<T, WireError>;
 
@@ -128,6 +130,52 @@ impl WireServer {
         let tls = acceptor.accept(stream).await
             .map_err(|e| WireError::Tls(format!("accept: {e}")))?;
         self.handle_connection(tls).await
+    }
+
+    /// ADR 0333 — accept one mTLS connection and derive
+    /// the authenticated `Principal` from the verified
+    /// peer certificate before dispatching the wire
+    /// handler. The `mapper` is called with the leaf
+    /// certificate's Subject CN; refusal (`None`) or an
+    /// empty peer chain fails the connection with
+    /// `WireError::Auth`.
+    ///
+    /// The underlying `acceptor` must be an mTLS acceptor
+    /// built from a `ServerConfig::with_client_cert_verifier`
+    /// (ADR 0283 `load_pem_with_client_ca`); otherwise the
+    /// peer chain will be empty and the call errors out
+    /// before the wire handshake runs.
+    pub async fn serve_one_mtls<M>(
+        &self, listener: &TcpListener, acceptor: &TlsAcceptor,
+        mapper: M,
+    ) -> WireResult<bradian_security::Principal>
+    where
+        M: FnOnce(&str) -> Option<bradian_security::Principal>,
+    {
+        let (stream, _addr) = listener.accept().await?;
+        let tls = acceptor.accept(stream).await
+            .map_err(|e| WireError::Tls(format!("accept: {e}")))?;
+
+        // Extract the peer certificate chain BEFORE
+        // dispatching any wire bytes. If the acceptor was
+        // built with `with_no_client_auth` (not mTLS), the
+        // chain is empty and we refuse — this slice is
+        // specifically the mTLS entrypoint.
+        let peer_certs: Vec<Vec<u8>> = {
+            let session_ref = tls.get_ref();
+            match session_ref.1.peer_certificates() {
+                Some(chain) if !chain.is_empty() =>
+                    chain.iter().map(|c| c.as_ref().to_vec()).collect(),
+                _ => return Err(WireError::Auth(
+                    "mTLS requires a peer certificate chain".into())),
+            }
+        };
+        let principal = bradian_security::principal_from_peer_chain(
+            &peer_certs, mapper,
+        ).map_err(|e| WireError::Auth(format!("{e}")))?;
+
+        self.handle_connection(tls).await?;
+        Ok(principal)
     }
 
     async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
@@ -634,5 +682,144 @@ mod tests {
         let server_outcome = server_handle.await.unwrap();
         assert!(matches!(server_outcome, Err(WireError::Tls(_))),
             "server-side task should surface Tls; got {server_outcome:?}");
+    }
+
+    // ---------- ADR 0333: serve_one_mtls → cert-derived principal ----------
+
+    use bradian_security::{Principal, Role};
+
+    /// Variant of `gen_tls_fixture` that forces a specific
+    /// CommonName on the self-signed cert so the principal
+    /// mapper has something deterministic to key on.
+    fn gen_tls_fixture_with_cn(cn: &str)
+        -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)
+    {
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let cert_der = CertificateDer::from(cert.der().to_vec());
+        let key_der  = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            key.serialize_der()));
+        (vec![cert_der], key_der)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtls_derives_principal_from_leaf_cert_cn() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_chain, client_key) = gen_tls_fixture_with_cn("bradian-admin-alice");
+
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_chain.clone());
+        let client_cfg = build_mtls_client_config(
+            &server_chain, client_chain, client_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move {
+                s.serve_one_mtls(&listener, &acc, |cn| {
+                    cn.strip_prefix("bradian-admin-").map(|id| Principal {
+                        id: id.into(),
+                        role: Role::Administrator,
+                        ou_scope: vec![],
+                    })
+                }).await
+            }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut client = WireTlsClient::connect_tls(
+            addr, name, &connector, "ignored-by-server").await.unwrap();
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(reply, WireMessage::RowSet { .. }), "{reply:?}");
+        client.bye().await.unwrap();
+
+        let principal = server_handle.await.unwrap().unwrap();
+        assert_eq!(principal.id, "alice");
+        assert_eq!(principal.role, Role::Administrator);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtls_server_rejects_when_mapper_refuses_the_cn() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_chain, client_key) = gen_tls_fixture_with_cn("unknown-principal");
+
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_chain.clone());
+        let client_cfg = build_mtls_client_config(
+            &server_chain, client_chain, client_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move {
+                s.serve_one_mtls(&listener, &acc, |cn| {
+                    cn.strip_prefix("bradian-admin-").map(|id| Principal {
+                        id: id.into(), role: Role::Administrator, ou_scope: vec![],
+                    })
+                }).await
+            }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        // The TLS handshake succeeds; the mapper then
+        // refuses on the CN, so the wire handshake never
+        // runs. The client's connect_tls either errors
+        // during handshake framing OR completes the TLS
+        // handshake and gets an EOF when the server drops.
+        let _ = WireTlsClient::connect_tls(addr, name, &connector, "x").await;
+
+        let outcome = server_handle.await.unwrap();
+        assert!(matches!(outcome, Err(WireError::Auth(_))),
+            "mapper refusal should surface as Auth error, got {outcome:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_one_mtls_refuses_when_underlying_acceptor_is_non_mtls() {
+        // If the caller mis-wires a non-mTLS acceptor
+        // (with_no_client_auth) into serve_one_mtls, the
+        // peer_certificates() call returns None/empty and
+        // we fail closed BEFORE any wire bytes land.
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+
+        let server_cfg = build_server_config(server_chain.clone(), server_key);
+        let client_cfg = build_client_config(&server_chain);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move {
+                s.serve_one_mtls(&listener, &acc, |_cn| Some(Principal {
+                    id: "whatever".into(), role: Role::System, ou_scope: vec![],
+                })).await
+            }
+        });
+
+        let name = ServerName::try_from("localhost").unwrap();
+        let _ = WireTlsClient::connect_tls(addr, name, &connector, "x").await;
+
+        let outcome = server_handle.await.unwrap();
+        assert!(matches!(outcome, Err(WireError::Auth(ref m)) if m.contains("peer certificate")),
+            "non-mTLS acceptor plumbed into serve_one_mtls should surface Auth; got {outcome:?}");
     }
 }
