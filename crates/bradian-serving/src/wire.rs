@@ -178,9 +178,58 @@ impl WireServer {
         Ok(principal)
     }
 
+    /// ADR 0334 — same as `serve_one_mtls`, but each
+    /// `Execute` is gated by `authz(&principal, &sql)`.
+    /// A `false` return from `authz` replies `ErrorMsg
+    /// { code: 3 }` and keeps the session alive so the
+    /// peer can try other statements.
+    pub async fn serve_one_mtls_authz<M, A>(
+        &self, listener: &TcpListener, acceptor: &TlsAcceptor,
+        mapper: M, mut authz: A,
+    ) -> WireResult<bradian_security::Principal>
+    where
+        M: FnOnce(&str) -> Option<bradian_security::Principal>,
+        A: FnMut(&bradian_security::Principal, &str) -> bool,
+    {
+        let (stream, _addr) = listener.accept().await?;
+        let tls = acceptor.accept(stream).await
+            .map_err(|e| WireError::Tls(format!("accept: {e}")))?;
+        let peer_certs: Vec<Vec<u8>> = {
+            let session_ref = tls.get_ref();
+            match session_ref.1.peer_certificates() {
+                Some(chain) if !chain.is_empty() =>
+                    chain.iter().map(|c| c.as_ref().to_vec()).collect(),
+                _ => return Err(WireError::Auth(
+                    "mTLS requires a peer certificate chain".into())),
+            }
+        };
+        let principal = bradian_security::principal_from_peer_chain(
+            &peer_certs, mapper,
+        ).map_err(|e| WireError::Auth(format!("{e}")))?;
+
+        let p_ref = principal.clone();
+        self.handle_connection_with_authz(tls, move |sql| authz(&p_ref, sql)).await?;
+        Ok(principal)
+    }
+
     async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
-        &self, mut stream: S,
+        &self, stream: S,
     ) -> WireResult<()> {
+        self.handle_connection_with_authz(stream, |_| true).await
+    }
+
+    /// Dispatch a connection with an authz predicate run
+    /// against every `Execute`. Returning `false` from
+    /// the predicate replies `ErrorMsg { code: 3 }` and
+    /// keeps the session alive so the peer can try other
+    /// statements.
+    async fn handle_connection_with_authz<S, F>(
+        &self, mut stream: S, mut authz: F,
+    ) -> WireResult<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        F: FnMut(&str) -> bool,
+    {
         match read_frame(&mut stream).await? {
             WireMessage::Hello { .. } => {}
             other => return Err(WireError::Handshake(format!("expected Hello, got {other:?}"))),
@@ -197,7 +246,12 @@ impl WireServer {
             };
             match req {
                 WireMessage::Execute { sql } => {
-                    let reply = match self.engine.execute(&sql) {
+                    let reply = if !authz(&sql) {
+                        WireMessage::ErrorMsg {
+                            code: 3,
+                            message: format!("authorization denied for statement: {sql}"),
+                        }
+                    } else { match self.engine.execute(&sql) {
                         Ok(SqlResultSet::Rows { columns, rows }) => {
                             let rows: Vec<Vec<String>> = rows.into_iter()
                                 .map(|r| r.into_iter().map(|v| format!("{v:?}")).collect())
@@ -208,7 +262,7 @@ impl WireServer {
                             WireMessage::Command { affected },
                         Err(e) => WireMessage::ErrorMsg {
                             code: 1, message: format!("{e}") },
-                    };
+                    }};
                     write_frame(&mut stream, &reply).await?;
                 }
                 WireMessage::Bye => {
@@ -821,5 +875,105 @@ mod tests {
         let outcome = server_handle.await.unwrap();
         assert!(matches!(outcome, Err(WireError::Auth(ref m)) if m.contains("peer certificate")),
             "non-mTLS acceptor plumbed into serve_one_mtls should surface Auth; got {outcome:?}");
+    }
+
+    // ---------- ADR 0334: serve_one_mtls_authz — role-gated Execute ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authz_admin_can_run_select_and_insert() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_chain, client_key) = gen_tls_fixture_with_cn("bradian-admin-alice");
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_chain.clone());
+        let client_cfg = build_mtls_client_config(
+            &server_chain, client_chain, client_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move {
+                s.serve_one_mtls_authz(&listener, &acc,
+                    |cn| cn.strip_prefix("bradian-admin-").map(|id| Principal {
+                        id: id.into(), role: Role::Administrator, ou_scope: vec![],
+                    }),
+                    |p, _sql| matches!(p.role, Role::Administrator),
+                ).await
+            }
+        });
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut client = WireTlsClient::connect_tls(addr, name, &connector, "x").await.unwrap();
+        // SELECT allowed.
+        let r = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(r, WireMessage::RowSet { .. }), "{r:?}");
+        // INSERT also allowed under Admin.
+        let r = client.execute(
+            "INSERT INTO t.public.items(id, value) VALUES(99, 999)").await.unwrap();
+        assert!(matches!(r, WireMessage::Command { affected: 1 }), "{r:?}");
+        client.bye().await.unwrap();
+        let p = server_handle.await.unwrap().unwrap();
+        assert_eq!(p.id, "alice");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authz_analyst_denied_on_write_but_select_allowed() {
+        let (_dir, engine) = fresh_engine();
+        let (server_chain, server_key) = gen_tls_fixture();
+        let (client_chain, client_key) = gen_tls_fixture_with_cn("bradian-analyst-bob");
+        let server_cfg = build_mtls_server_config(
+            server_chain.clone(), server_key, client_chain.clone());
+        let client_cfg = build_mtls_client_config(
+            &server_chain, client_chain, client_key);
+        let acceptor  = TlsAcceptor::from(server_cfg);
+        let connector = TlsConnector::from(client_cfg);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            let acc = acceptor.clone();
+            async move {
+                s.serve_one_mtls_authz(&listener, &acc,
+                    |cn| cn.strip_prefix("bradian-analyst-").map(|id| Principal {
+                        id: id.into(), role: Role::Analyst, ou_scope: vec![],
+                    }),
+                    // Analysts may SELECT; everything else
+                    // requires Administrator.
+                    |p, sql| {
+                        let s = sql.trim_start().to_ascii_lowercase();
+                        matches!(p.role, Role::Administrator)
+                            || s.starts_with("select")
+                    },
+                ).await
+            }
+        });
+        let name = ServerName::try_from("localhost").unwrap();
+        let mut client = WireTlsClient::connect_tls(addr, name, &connector, "x").await.unwrap();
+        // SELECT allowed under Analyst role.
+        let r = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        assert!(matches!(r, WireMessage::RowSet { .. }), "{r:?}");
+        // INSERT denied → ErrorMsg code 3, session stays alive.
+        let r = client.execute(
+            "INSERT INTO t.public.items(id, value) VALUES(100, 1000)").await.unwrap();
+        match r {
+            WireMessage::ErrorMsg { code, message } => {
+                assert_eq!(code, 3);
+                assert!(message.contains("authorization denied"));
+            }
+            other => panic!("expected ErrorMsg(3), got {other:?}"),
+        }
+        // Session still alive — another SELECT works.
+        let r = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 2").await.unwrap();
+        assert!(matches!(r, WireMessage::RowSet { .. }), "{r:?}");
+        client.bye().await.unwrap();
+        let p = server_handle.await.unwrap().unwrap();
+        assert_eq!(p.id, "bob");
     }
 }
