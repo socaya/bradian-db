@@ -25,6 +25,16 @@ rand = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# ADR 0322 — Windows DACL inspection via Win32 API.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # ADR 0292 — vectorized SELECT path parity test. Dev-only until ADR 0293

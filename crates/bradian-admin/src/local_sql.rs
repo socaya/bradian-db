@@ -220,6 +220,9 @@ fn private_root(root: &Path) -> Result<()> {
         Err(LocalAccessError::ExtendedAcl { path }) => anyhow::bail!(
             "SQL root {path:?} has an extended POSIX ACL; the base mode-0o700 check alone does not bound access (ADR 0321)",
         ),
+        Err(LocalAccessError::ExtendedDacl { path, ace_count }) => anyhow::bail!(
+            "SQL root {path:?} has {ace_count} non-owner DACL ACE(s); Windows strict policy refuses the root (ADR 0322)",
+        ),
         Err(LocalAccessError::Io(err)) => Err(err.into()),
     }
 }

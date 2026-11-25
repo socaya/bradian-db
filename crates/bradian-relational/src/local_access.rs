@@ -44,6 +44,11 @@ pub enum LocalAccessError {
     /// the base mode-0o700 check alone no longer suffices.
     #[error("root {path:?} has an extended POSIX ACL; strict policy rejects")]
     ExtendedAcl { path: std::path::PathBuf },
+    /// ADR 0322 — the directory has a DACL with ACEs beyond
+    /// the owner (Windows). Either a NULL DACL (allows
+    /// everyone) or at least one non-owner ACE was found.
+    #[error("root {path:?} has {ace_count} non-owner DACL ACE(s); strict policy rejects")]
+    ExtendedDacl { path: std::path::PathBuf, ace_count: u32 },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -161,20 +166,22 @@ pub fn ensure_private_root_owned_by(path: &Path, policy: PrivateRootPolicy, expe
     { Err(LocalAccessError::Unsupported) }
 }
 
-/// ADR 0321 — enforce the private-root invariants AND
-/// reject if the root carries an extended POSIX ACL
-/// (Linux: `system.posix_acl_access` xattr). Under
-/// `AclPolicy::Ignore` this degrades to `ensure_private_root`.
-/// On non-Linux platforms the check is a no-op regardless
-/// of policy — the OS-specific ACL surface is documented
-/// in the Platform Gaps Plan rather than silently skipped.
+/// ADR 0321 + 0322 — enforce the private-root invariants
+/// AND run the platform-appropriate extended-ACL check.
+/// On Linux this inspects the POSIX ACL
+/// (`system.posix_acl_access` xattr); on Windows it
+/// inspects the DACL (owner-only). Under
+/// `AclPolicy::Ignore` both checks degrade to no-ops.
+/// Macs and other Unices fall through to no-op since the
+/// OS-specific ACL surfaces are not yet modelled.
 pub fn ensure_private_root_with_acl(
     path: &Path,
     policy: PrivateRootPolicy,
     acl_policy: AclPolicy,
 ) -> Result<(), LocalAccessError> {
     ensure_private_root(path, policy)?;
-    check_posix_acl(path, acl_policy)
+    check_posix_acl(path, acl_policy)?;
+    check_windows_dacl(path, acl_policy)
 }
 
 /// ADR 0321 — standalone ACL inspection helper so callers
@@ -213,6 +220,157 @@ pub fn check_posix_acl(path: &Path, policy: AclPolicy) -> Result<(), LocalAccess
         // Both are acceptable — treat as "no extended ACL".
     }
     Ok(())
+}
+
+/// ADR 0322 — standalone Windows DACL inspection. Returns
+/// `ExtendedDacl` under `AclPolicy::StrictReject` if the
+/// directory has a NULL DACL (allows everyone) or any ACE
+/// whose SID does not match the owner. On non-Windows
+/// platforms the check is a no-op regardless of policy
+/// (mirrors `check_posix_acl`'s Linux-only shape).
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn check_windows_dacl(path: &Path, policy: AclPolicy) -> Result<(), LocalAccessError> {
+    if matches!(policy, AclPolicy::Ignore) { return Ok(()); }
+    #[cfg(windows)]
+    { windows_dacl::inspect(path) }
+    #[cfg(not(windows))]
+    { Ok(()) }
+}
+
+#[cfg(windows)]
+mod windows_dacl {
+    use super::LocalAccessError;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+    use windows_sys::Win32::Security::Authorization::{
+        GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        EqualSid, GetAce, GetAclInformation,
+        AclSizeInformation, ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID,
+    };
+
+    /// Inspect the DACL of `path`. Returns `ExtendedDacl`
+    /// if the DACL is NULL (allow-everyone) or any ACE's
+    /// SID differs from the owner SID.
+    pub(super) fn inspect(path: &Path) -> Result<(), LocalAccessError> {
+        // Null-terminated UTF-16.
+        let wide: Vec<u16> = path.as_os_str().encode_wide()
+            .chain(std::iter::once(0)).collect();
+
+        let mut owner_sid: PSID = std::ptr::null_mut();
+        let mut dacl:      *mut ACL = std::ptr::null_mut();
+        let mut sd:        PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+
+        // SAFETY: GetNamedSecurityInfoW takes a null-
+        // terminated wide path, returns pointers into the
+        // allocated SD (which we LocalFree), and writes
+        // ERROR_SUCCESS on success. All outputs are
+        // nullable and we null-check below.
+        #[allow(unsafe_code)]
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+                &mut owner_sid,
+                std::ptr::null_mut(),       // group
+                &mut dacl,
+                std::ptr::null_mut(),       // sacl
+                &mut sd,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            // Treat a failed security-info read as IO — the
+            // path exists (ensure_private_root already
+            // checked that), so this is a permission or
+            // system error.
+            return Err(LocalAccessError::Io(std::io::Error::from_raw_os_error(rc as i32)));
+        }
+
+        // Guard to free the SD regardless of exit path.
+        struct SdGuard(PSECURITY_DESCRIPTOR);
+        impl Drop for SdGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    // SAFETY: LocalFree accepts the exact
+                    // pointer GetNamedSecurityInfoW wrote.
+                    #[allow(unsafe_code)]
+                    unsafe { LocalFree(self.0 as HLOCAL); }
+                }
+            }
+        }
+        let _guard = SdGuard(sd);
+
+        if dacl.is_null() {
+            // NULL DACL = "everyone has full access". We
+            // can't audit individual ACEs because the API
+            // definition is "no DACL object" — report with
+            // ace_count = 0 so the caller sees the unsafe
+            // state explicitly.
+            return Err(LocalAccessError::ExtendedDacl {
+                path: path.to_path_buf(), ace_count: 0,
+            });
+        }
+
+        let mut info: ACL_SIZE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: dacl is a non-null ACL pointer owned by
+        // the SD above; info is a writable local.
+        #[allow(unsafe_code)]
+        let ok = unsafe {
+            GetAclInformation(
+                dacl,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        };
+        if ok == 0 {
+            return Err(LocalAccessError::Io(std::io::Error::last_os_error()));
+        }
+
+        let mut non_owner = 0u32;
+        for i in 0..info.AceCount {
+            let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+            // SAFETY: GetAce writes a pointer into the
+            // DACL's memory on success; the lifetime is
+            // the SD guard above.
+            #[allow(unsafe_code)]
+            let ok = unsafe { GetAce(dacl, i, &mut ace_ptr) };
+            if ok == 0 {
+                return Err(LocalAccessError::Io(std::io::Error::last_os_error()));
+            }
+            // Every ACE type (allow / deny / audit / etc.)
+            // places the SID at the same offset. We treat
+            // the ACE as an ACCESS_ALLOWED_ACE to read the
+            // SidStart field regardless of the actual sub-
+            // type — the SidStart offset is stable across
+            // all standard ACE types in the Win32 headers.
+            #[allow(unsafe_code)]
+            let sid_start = unsafe {
+                let header = ace_ptr as *const ACCESS_ALLOWED_ACE;
+                &(*header).SidStart as *const u32 as PSID
+            };
+            // SAFETY: EqualSid compares two SID structures.
+            // Both pointers are non-null and point into
+            // allocations we own (owner_sid into the SD,
+            // sid_start into the DACL within the SD).
+            #[allow(unsafe_code)]
+            let equal = unsafe { EqualSid(sid_start, owner_sid) };
+            if equal == 0 { non_owner += 1; }
+        }
+
+        if non_owner > 0 {
+            return Err(LocalAccessError::ExtendedDacl {
+                path: path.to_path_buf(), ace_count: non_owner,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// ADR 0109 — enforce the private-root invariants AND walk
@@ -595,5 +753,46 @@ mod tests {
             Err(LocalAccessError::LooseMode { .. }) => {}
             other => panic!("expected LooseMode first; got {other:?}"),
         }
+    }
+}
+
+/// Cross-platform tests for the AclPolicy dispatch surface.
+/// These run on every target — the Windows DACL path is
+/// exercised by the ADR 0325 Windows CI workflow.
+#[cfg(test)]
+mod cross_platform_tests {
+    use super::*;
+
+    #[test]
+    fn check_windows_dacl_is_a_noop_under_ignore_everywhere() {
+        // Under Ignore the function returns Ok(()) with no
+        // IO on any platform. We pass a path that doesn't
+        // exist to prove the function never touches the
+        // filesystem under Ignore.
+        let bogus = std::path::Path::new("/definitely/not/a/path/0322-ignore");
+        check_windows_dacl(bogus, AclPolicy::Ignore).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn check_windows_dacl_under_strict_is_a_noop_on_non_windows() {
+        // Non-Windows platforms have no DACL — the function
+        // is a documented no-op regardless of policy,
+        // mirroring check_posix_acl's Linux-only shape.
+        let bogus = std::path::Path::new("/definitely/not/a/path/0322-strict-non-windows");
+        check_windows_dacl(bogus, AclPolicy::StrictReject).unwrap();
+    }
+
+    #[test]
+    fn extended_dacl_error_display_carries_path_and_count() {
+        let err = LocalAccessError::ExtendedDacl {
+            path: std::path::PathBuf::from("C:\\bradian\\root"),
+            ace_count: 3,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("3 non-owner DACL ACE"),
+            "display should name the ACE count: {s}");
+        assert!(s.contains("bradian"),
+            "display should include the path: {s}");
     }
 }
