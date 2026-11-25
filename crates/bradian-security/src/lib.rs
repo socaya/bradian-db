@@ -7,7 +7,7 @@
 pub mod audit;
 pub mod authz;
 pub mod encryption;
-/// ADR 0323 — enterprise OIDC JWT verification.
+/// ADR 0323 (HS256) + ADR 0328 (RS256) — enterprise OIDC JWT verification.
 pub mod enterprise_identity;
 pub mod principal;
 pub mod token;
@@ -15,6 +15,9 @@ pub mod token;
 pub use audit::{AuditEntry, AuditLog};
 pub use authz::{cache_key, policy_predicate, PolicyContext};
 pub use encryption::{seal, unseal, DataKey, KeyId, KeyRing, SealedPayload};
-pub use enterprise_identity::{JwtError, JwtHeader, JwtHs256Verifier, JwtResult, StandardClaims, Verified};
+pub use enterprise_identity::{
+    JwtError, JwtHeader, JwtHs256Verifier, JwtResult, JwtRs256Verifier,
+    StandardClaims, Verified,
+};
 pub use principal::{Principal, Role};
 pub use token::TokenStore;

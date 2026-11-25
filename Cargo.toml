@@ -90,6 +90,8 @@ password-hash    = { version = "0.5", features = ["alloc"] }
 hmac             = "0.12"
 sha2             = "0.10"
 base64           = "0.22"
+# ADR 0328 — enterprise OIDC JWT verification (RS256).
+rsa              = { version = "0.9", features = ["sha2", "pem"] }
 rustls           = { version = "0.23", default-features = false, features = ["std", "ring", "logging"] }
 rustls-pemfile   = "2"
 rcgen            = { version = "0.13", default-features = false, features = ["pem", "ring"] }

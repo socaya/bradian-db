@@ -1,21 +1,24 @@
-//! ADR 0323 — Enterprise identity (OIDC JWT verification).
+//! Enterprise identity — OIDC JWT verification.
 //!
-//! Verifies a JSON Web Token (JWS compact format) signed
-//! with HS256 against a shared secret. Returns the parsed
-//! claims on success, a typed error on failure.
+//! ADR 0323 ships HS256 (shared-secret HMAC-SHA256);
+//! ADR 0328 extends with RS256 (RSA-SHA256 PKCS#1 v1.5)
+//! for IdPs that use asymmetric keys (Keycloak / Okta /
+//! Azure AD / Google default).
 //!
-//! HS256 is the conservative shared-secret algorithm;
-//! every mainstream IdP (Keycloak, Okta, Azure AD,
-//! Google) supports it as a client-credential option.
-//! RS256 / ES256 / Ed25519 verification are dedicated
-//! follow-ups once an asymmetric-key workflow is agreed
-//! with operators.
+//! Each verifier parses a JWS compact token, enforces its
+//! algorithm (refuses `none` and anything else), verifies
+//! the signature, enforces `exp` / `nbf` with a
+//! configurable clock skew, and optionally enforces
+//! `iss` / `aud`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey as RsaVerifyingKey};
+use rsa::signature::Verifier as _;
+use rsa::RsaPublicKey;
 use serde::Deserialize;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -29,6 +32,8 @@ pub enum JwtError {
     Malformed(&'static str),
     #[error("unsupported algorithm: {0}")]
     UnsupportedAlg(String),
+    #[error("public-key parse error: {0}")]
+    KeyParse(String),
     #[error("signature mismatch")]
     BadSignature,
     #[error("token expired: exp={exp}, now={now}")]
@@ -182,6 +187,111 @@ impl JwtHs256Verifier {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ADR 0328 — RS256 verifier (RSA-SHA256 PKCS#1 v1.5).
+
+/// RS256 verifier. Holds an `rsa::RsaPublicKey` plus the
+/// same issuer / audience / skew policy knobs as the HS256
+/// verifier.
+#[derive(Clone, Debug)]
+pub struct JwtRs256Verifier {
+    key: RsaPublicKey,
+    expected_iss: Option<String>,
+    expected_aud: Option<String>,
+    skew_secs:    u64,
+}
+
+impl JwtRs256Verifier {
+    pub fn new(key: RsaPublicKey) -> Self {
+        Self { key, expected_iss: None, expected_aud: None, skew_secs: 30 }
+    }
+
+    /// Load the verifier from a PEM-encoded SPKI
+    /// `-----BEGIN PUBLIC KEY-----` block (the format every
+    /// mainstream IdP publishes).
+    pub fn from_public_key_pem(pem: &str) -> JwtResult<Self> {
+        use rsa::pkcs8::DecodePublicKey;
+        let key = RsaPublicKey::from_public_key_pem(pem)
+            .map_err(|e| JwtError::KeyParse(format!("SPKI PEM: {e}")))?;
+        Ok(Self::new(key))
+    }
+
+    pub fn with_issuer  (mut self, iss: impl Into<String>) -> Self {
+        self.expected_iss = Some(iss.into()); self
+    }
+    pub fn with_audience(mut self, aud: impl Into<String>) -> Self {
+        self.expected_aud = Some(aud.into()); self
+    }
+    pub fn with_clock_skew_secs(mut self, secs: u64) -> Self {
+        self.skew_secs = secs; self
+    }
+
+    pub fn verify(&self, token: &str) -> JwtResult<Verified> {
+        self.verify_at(token, SystemTime::now())
+    }
+
+    pub fn verify_at(&self, token: &str, now: SystemTime) -> JwtResult<Verified> {
+        let mut parts = token.split('.');
+        let h_b64 = parts.next().ok_or(JwtError::Malformed("missing header"))?;
+        let p_b64 = parts.next().ok_or(JwtError::Malformed("missing payload"))?;
+        let s_b64 = parts.next().ok_or(JwtError::Malformed("missing signature"))?;
+        if parts.next().is_some() {
+            return Err(JwtError::Malformed("extra segments after signature"));
+        }
+
+        let header_bytes  = decode_b64(h_b64)?;
+        let payload_bytes = decode_b64(p_b64)?;
+        let signature     = decode_b64(s_b64)?;
+
+        let header: JwtHeader = serde_json::from_slice(&header_bytes)
+            .map_err(|e| JwtError::Json(format!("header: {e}")))?;
+        if header.alg != "RS256" {
+            return Err(JwtError::UnsupportedAlg(header.alg.clone()));
+        }
+
+        // Verify RSA-SHA256 PKCS#1 v1.5 signature over the
+        // ASCII bytes of "header.payload".
+        let signing_input = format!("{h_b64}.{p_b64}");
+        let sig = RsaSignature::try_from(signature.as_slice())
+            .map_err(|_| JwtError::BadSignature)?;
+        let verifying = RsaVerifyingKey::<Sha256>::new(self.key.clone());
+        verifying.verify(signing_input.as_bytes(), &sig)
+            .map_err(|_| JwtError::BadSignature)?;
+
+        let claims: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|e| JwtError::Json(format!("payload: {e}")))?;
+        let std: StandardClaims = serde_json::from_slice(&payload_bytes)
+            .map_err(|e| JwtError::Json(format!("standard-claims: {e}")))?;
+
+        let now_secs = now.duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+        if let Some(exp) = std.exp {
+            if now_secs > exp.saturating_add(self.skew_secs) {
+                return Err(JwtError::Expired { exp, now: now_secs });
+            }
+        }
+        if let Some(nbf) = std.nbf {
+            if now_secs.saturating_add(self.skew_secs) < nbf {
+                return Err(JwtError::NotYetValid { nbf, now: now_secs });
+            }
+        }
+        if let Some(want) = &self.expected_iss {
+            match &std.iss {
+                Some(got) if got == want => {}
+                _ => return Err(JwtError::BadSignature),
+            }
+        }
+        if let Some(want) = &self.expected_aud {
+            if !matches_audience(&std.aud, want) {
+                return Err(JwtError::BadSignature);
+            }
+        }
+        Ok(Verified { header, claims, std })
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 fn decode_b64(s: &str) -> JwtResult<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(s).map_err(|e| JwtError::Base64(format!("{e}")))
 }
@@ -327,5 +437,137 @@ mod tests {
         v.verify_at(&token, now_at(0)).unwrap();
         let bad = JwtHs256Verifier::new(secret).with_audience("d");
         assert_eq!(bad.verify_at(&token, now_at(0)).unwrap_err(), JwtError::BadSignature);
+    }
+
+    // ----------------------------------------------------------
+    // ADR 0328 — RS256 tests. Fixture keypair generated once
+    // per test from a deterministic seed so runs are
+    // reproducible (ChaCha20Rng with fixed seed).
+
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use rsa::pkcs1v15::SigningKey as RsaSigningKey;
+    use rsa::pkcs8::EncodePublicKey;
+    use rsa::signature::{RandomizedSigner, SignatureEncoding};
+    use rsa::RsaPrivateKey;
+
+    fn fixture_rsa_keypair() -> (RsaPrivateKey, rsa::RsaPublicKey) {
+        // 2048 bits — ensures the signature is 256 bytes
+        // (standard RS256 fixture size).
+        let mut rng = ChaCha20Rng::seed_from_u64(0x6272_6164_6961_6e00); // "bradia\0"
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048)
+            .expect("fixture 2048-bit RSA key");
+        let pub_key = priv_key.to_public_key();
+        (priv_key, pub_key)
+    }
+
+    fn mint_rs256(priv_key: &RsaPrivateKey, claims: serde_json::Value) -> String {
+        let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
+        let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing = format!("{h}.{p}");
+        let signing_key = RsaSigningKey::<Sha256>::new(priv_key.clone());
+        let mut rng = ChaCha20Rng::seed_from_u64(0x1111_2222_3333_4444);
+        let sig = signing_key.sign_with_rng(&mut rng, signing.as_bytes());
+        let s = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{signing}.{s}")
+    }
+
+    #[test]
+    fn rs256_round_trip_verifies_a_fixture_signed_token() {
+        let (priv_key, pub_key) = fixture_rsa_keypair();
+        let token = mint_rs256(&priv_key, serde_json::json!({
+            "iss": "https://idp.example",
+            "sub": "alice",
+            "exp": 10_000_u64,
+        }));
+        let v = JwtRs256Verifier::new(pub_key);
+        let verified = v.verify_at(&token, now_at(5_000)).unwrap();
+        assert_eq!(verified.header.alg, "RS256");
+        assert_eq!(verified.std.sub.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn rs256_tampered_payload_fails_signature_check() {
+        let (priv_key, pub_key) = fixture_rsa_keypair();
+        let token = mint_rs256(&priv_key, serde_json::json!({
+            "sub": "a", "exp": 10_000_u64,
+        }));
+        let parts: Vec<&str> = token.splitn(3, '.').collect();
+        // Flip one bit in the payload.
+        let mut payload = parts[1].to_string();
+        let b = payload.pop().unwrap();
+        payload.push(if b == 'A' { 'B' } else { 'A' });
+        let tampered = format!("{}.{}.{}", parts[0], payload, parts[2]);
+        let err = JwtRs256Verifier::new(pub_key).verify_at(&tampered, now_at(0)).unwrap_err();
+        assert_eq!(err, JwtError::BadSignature);
+    }
+
+    #[test]
+    fn rs256_wrong_key_fails_signature_check() {
+        let (priv_a, _) = fixture_rsa_keypair();
+        // Generate an unrelated key with a different seed.
+        let mut rng = ChaCha20Rng::seed_from_u64(0xdeadbeef);
+        let priv_b = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub_b  = priv_b.to_public_key();
+        let token = mint_rs256(&priv_a, serde_json::json!({
+            "sub": "a", "exp": 10_000_u64,
+        }));
+        let err = JwtRs256Verifier::new(pub_b).verify_at(&token, now_at(0)).unwrap_err();
+        assert_eq!(err, JwtError::BadSignature);
+    }
+
+    #[test]
+    fn rs256_wrong_alg_in_header_rejected() {
+        let (priv_key, pub_key) = fixture_rsa_keypair();
+        let token = mint_rs256(&priv_key, serde_json::json!({ "sub": "a", "exp": 10_000_u64 }));
+        // Replace the header's alg with HS256 (still base64-encoded; the
+        // body changes, so the signature will not be valid but we
+        // check that the alg check fires first).
+        let bad_header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let parts: Vec<&str> = token.splitn(3, '.').collect();
+        let twisted = format!("{}.{}.{}", bad_header, parts[1], parts[2]);
+        let err = JwtRs256Verifier::new(pub_key).verify_at(&twisted, now_at(0)).unwrap_err();
+        assert!(matches!(err, JwtError::UnsupportedAlg(a) if a == "HS256"));
+    }
+
+    #[test]
+    fn rs256_expired_rejected_past_skew() {
+        let (priv_key, pub_key) = fixture_rsa_keypair();
+        let token = mint_rs256(&priv_key, serde_json::json!({ "sub": "a", "exp": 100_u64 }));
+        let v = JwtRs256Verifier::new(pub_key).with_clock_skew_secs(30);
+        v.verify_at(&token, now_at(120)).unwrap();      // within skew
+        let err = v.verify_at(&token, now_at(200)).unwrap_err();
+        assert!(matches!(err, JwtError::Expired { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn rs256_iss_aud_enforced_when_expected() {
+        let (priv_key, pub_key) = fixture_rsa_keypair();
+        let token = mint_rs256(&priv_key, serde_json::json!({
+            "iss": "https://idp", "aud": "bradian",
+            "sub": "a", "exp": 10_000_u64,
+        }));
+        let ok = JwtRs256Verifier::new(pub_key.clone())
+            .with_issuer("https://idp").with_audience("bradian");
+        ok.verify_at(&token, now_at(0)).unwrap();
+        let bad_iss = JwtRs256Verifier::new(pub_key.clone())
+            .with_issuer("https://other");
+        assert_eq!(bad_iss.verify_at(&token, now_at(0)).unwrap_err(), JwtError::BadSignature);
+        let bad_aud = JwtRs256Verifier::new(pub_key).with_audience("elsewhere");
+        assert_eq!(bad_aud.verify_at(&token, now_at(0)).unwrap_err(), JwtError::BadSignature);
+    }
+
+    #[test]
+    fn rs256_verifier_loads_from_spki_pem() {
+        let (_, pub_key) = fixture_rsa_keypair();
+        let pem = pub_key.to_public_key_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        assert!(pem.contains("BEGIN PUBLIC KEY"));
+        // Construct a verifier from the PEM string.
+        let v = JwtRs256Verifier::from_public_key_pem(&pem).unwrap();
+        // And a malformed PEM is rejected.
+        let bad = JwtRs256Verifier::from_public_key_pem("not a pem");
+        assert!(matches!(bad, Err(JwtError::KeyParse(_))));
+        let _ = v;   // silence unused
     }
 }
