@@ -55,6 +55,20 @@ pub struct ScanControl {
 impl Default for ScanControl { fn default() -> Self { Self::new(ScanLimits::default()) } }
 impl ScanControl {
     pub fn new(limits: ScanLimits) -> Self { Self { limits, cancelled: Arc::new(AtomicBool::new(false)) } }
+    /// ADR 0351 — construct a control with default scan
+    /// limits but an EXTERNALLY-OWNED cancel flag. The
+    /// wire handler shares its per-session
+    /// `Arc<AtomicBool>` with the scan so the cooperative
+    /// between-statement cancel also fires MID-scan: any
+    /// row-metered SELECT path observes the flip at its
+    /// next `check()` and returns `ResourceError::Cancelled`.
+    pub fn with_shared_cancel(flag: Arc<AtomicBool>) -> Self {
+        Self { limits: ScanLimits::default(), cancelled: flag }
+    }
+    /// ADR 0351 — expose the shared cancel flag so callers
+    /// that want to wire additional sources (admin cancel,
+    /// client-side deadline, etc.) can target the same bit.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> { Arc::clone(&self.cancelled) }
     // Existing administrative/native APIs retain their compatibility contract.
     // SQL query paths must always use default or explicitly supplied limits.
     pub(crate) fn legacy_unlimited() -> Self {
@@ -105,6 +119,34 @@ mod tests {
         assert_eq!(meter.step(), Err(ResourceError::Cancelled));
         assert_eq!(meter.row(1), Err(ResourceError::Cancelled));
     }
+    #[test]
+    fn with_shared_cancel_observes_external_flips() {
+        // ADR 0351 — a ScanControl constructed from a
+        // caller-owned Arc<AtomicBool> fires its check()
+        // the moment the shared flag flips, even though
+        // the control itself wasn't the one holding the
+        // Arc at construction.
+        let external = Arc::new(AtomicBool::new(false));
+        let control = ScanControl::with_shared_cancel(Arc::clone(&external));
+        assert_eq!(control.check(), Ok(()));
+        external.store(true, Ordering::Relaxed);
+        assert_eq!(control.check(), Err(ResourceError::Cancelled));
+    }
+
+    #[test]
+    fn cancel_flag_round_trips_the_same_arc() {
+        // ADR 0351 — cancel_flag() returns the same Arc
+        // the control holds, so flipping via the handle
+        // or via the returned flag observes identical
+        // state.
+        let external = Arc::new(AtomicBool::new(false));
+        let control = ScanControl::with_shared_cancel(Arc::clone(&external));
+        let handle = control.cancel_flag();
+        assert!(Arc::ptr_eq(&external, &handle));
+        control.cancel();
+        assert!(external.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn accounting_overflow_never_wraps_or_disables_limits() {
         let control = ScanControl::new(ScanLimits { max_rows: usize::MAX, max_bytes: usize::MAX, max_work: usize::MAX });

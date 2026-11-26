@@ -537,7 +537,16 @@ impl WireServer {
                             code: 3,
                             message: format!("authorization denied for statement: {sql}"),
                         }
-                    } else { match self.engine.execute(&sql) {
+                    } else {
+                        // ADR 0351 — hand the SELECT scan a
+                        // ScanControl sharing this session's
+                        // cancel flag so a Cancel message
+                        // (or admin cancel_session) aborts
+                        // the scan MID-row, not just
+                        // between statements.
+                        let control = bradian_relational::runtime_limits::ScanControl
+                            ::with_shared_cancel(cancel_flag.clone());
+                        match self.engine.execute_with_control(&sql, &control) {
                         Ok(SqlResultSet::Rows { columns, rows, column_types: engine_types }) => {
                             // ADR 0338 — typed wire row:
                             // convert each cell via
@@ -2226,6 +2235,33 @@ mod tests {
         match reply {
             WireMessage::RowSet { column_types, .. } =>
                 assert_eq!(column_types, vec![WireType::Int64]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    // ---------- ADR 0351: preemptive mid-scan cancellation ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execute_still_works_after_shared_cancel_plumbing() {
+        // ADR 0351 — the wire handler now builds a
+        // ScanControl::with_shared_cancel per Execute and
+        // routes through execute_with_control. Validate
+        // that the happy path (no cancel) still returns
+        // rows identically to the pre-0351 shape.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute("SELECT id FROM t.public.items").await.unwrap();
+        match reply {
+            WireMessage::RowSet { rows, column_types, .. } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(column_types, vec![WireType::Int64]);
+            }
             other => panic!("expected RowSet, got {other:?}"),
         }
         client.bye().await.unwrap();
