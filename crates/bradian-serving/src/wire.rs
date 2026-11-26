@@ -168,6 +168,15 @@ pub enum WireMessage {
     Command  { affected: u64 },
     ErrorMsg { code: u32, message: String },
     Bye,
+    /// ADR 0346 — cooperative session cancellation.
+    /// A caller (admin via `WireServer::cancel_session`,
+    /// or the client itself) requests orderly session
+    /// termination. The server flips a per-session flag;
+    /// the main connection's handler checks the flag at
+    /// the top of every loop iteration and closes with
+    /// `ErrorMsg { code: 5 }` after the current statement
+    /// (if any) completes.
+    Cancel   { session: u64 },
 }
 
 #[derive(Debug, Error)]
@@ -241,6 +250,11 @@ pub struct WireServer {
     /// authenticated statement writes a
     /// `bradian_security::AuditEntry` record.
     audit: Option<Arc<bradian_security::AuditLog>>,
+    /// ADR 0346 — cooperative cancellation registry.
+    /// Keyed by session id; the flag is set by
+    /// `cancel_session` or by a `Cancel` wire message.
+    cancellations:
+        Arc<parking_lot::Mutex<std::collections::HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl std::fmt::Debug for WireServer {
@@ -256,7 +270,34 @@ impl WireServer {
             next_session: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             memory_pressure: None,
             audit: None,
+            cancellations: Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new())),
         }
+    }
+
+    /// ADR 0346 — flip the cancellation flag for a live
+    /// session. The next iteration of the session's
+    /// handler loop observes the flag and closes the
+    /// connection after replying `ErrorMsg { code: 5 }`.
+    /// Returns `true` if a session with that id was
+    /// found; `false` means the session has already
+    /// closed (or never existed).
+    pub fn cancel_session(&self, session: u64) -> bool {
+        let g = self.cancellations.lock();
+        if let Some(flag) = g.get(&session) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else { false }
+    }
+
+    /// ADR 0346 — observe whether a session's
+    /// cancellation flag has been set. Useful for admin
+    /// tooling; the handler's loop uses the Arc flag
+    /// directly for lower overhead.
+    pub fn is_session_cancelled(&self, session: u64) -> bool {
+        let g = self.cancellations.lock();
+        g.get(&session).map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
     }
 
     /// ADR 0337 — install a `MemoryPressureHarness` that
@@ -420,7 +461,37 @@ impl WireServer {
         self.audit_record(&who, "session_open", &format!("session={session}"),
             None, None);
 
+        // ADR 0346 — register this session's cancellation
+        // flag. `CancelGuard` removes the entry on drop
+        // so a closed session doesn't leak its slot.
+        let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancellations.lock().insert(session, cancel_flag.clone());
+        struct CancelGuard {
+            map: Arc<parking_lot::Mutex<
+                std::collections::HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>>,
+            session: u64,
+        }
+        impl Drop for CancelGuard {
+            fn drop(&mut self) {
+                self.map.lock().remove(&self.session);
+            }
+        }
+        let _cancel_guard = CancelGuard {
+            map: self.cancellations.clone(),
+            session,
+        };
+
         loop {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = write_frame(&mut stream, &WireMessage::ErrorMsg {
+                    code: 5,
+                    message: format!("session {session} cancelled"),
+                }).await;
+                let _ = write_frame(&mut stream, &WireMessage::Bye).await;
+                self.audit_record(&who, "session_cancel",
+                    &format!("session={session}"), None, None);
+                return Ok(());
+            }
             let req = match read_frame(&mut stream).await {
                 Ok(m) => m,
                 Err(WireError::Closed) => {
@@ -511,6 +582,19 @@ impl WireServer {
                     self.audit_record(&who, "session_close",
                         &format!("session={session}"), Some("bye".into()), None);
                     return Ok(());
+                }
+                WireMessage::Cancel { session: target } => {
+                    // ADR 0346 — a Cancel for THIS session
+                    // flips the local flag; a Cancel for
+                    // ANOTHER session routes through the
+                    // registry so a client-held control
+                    // channel can cancel its peer.
+                    if target == session {
+                        cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    } else {
+                        let _ = self.cancel_session(target);
+                    }
+                    write_frame(&mut stream, &WireMessage::Command { affected: 0 }).await?;
                 }
                 other => {
                     write_frame(&mut stream, &WireMessage::ErrorMsg {
@@ -1801,6 +1885,96 @@ mod tests {
         assert_eq!(json, "\"timestamp_tz\"");
         let back: WireType = serde_json::from_str(&json).unwrap();
         assert_eq!(back, t);
+    }
+
+    // ---------- ADR 0346: cancellation ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_session_closes_live_connection_with_code_5() {
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let s2 = server.clone();
+        let server_handle = tokio::spawn(async move {
+            s2.serve_one(&listener).await
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let session_id = client.session();
+        // One successful statement, then an external cancel.
+        let _ = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        // Spin until the session is registered, then
+        // cancel it from the server side.
+        assert!(server.cancel_session(session_id),
+            "cancel_session should find the live session");
+        // The server observes the flag at the top of its
+        // next loop iteration — which requires us to send
+        // SOMETHING so the loop ticks. Send a harmless
+        // Execute.
+        let reply = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        // The handler may have replied with the SELECT
+        // result OR with the cancel ErrorMsg(5) depending
+        // on timing. Accept either; the subsequent read
+        // must observe ErrorMsg(5) + Bye.
+        let got_cancel = matches!(&reply,
+            WireMessage::ErrorMsg { code: 5, .. });
+        if !got_cancel {
+            // Second read should surface the cancel.
+            let bye = read_frame(&mut tokio::io::BufReader::new(&mut client_stream_of(&mut client)))
+                .await.unwrap();
+            assert!(matches!(bye, WireMessage::ErrorMsg { code: 5, .. }),
+                "expected cancel ErrorMsg, got {bye:?}");
+        }
+        // After cancel the session is gone from the
+        // registry.
+        assert!(!server.cancel_session(session_id),
+            "cancelled session should have been removed");
+        server_handle.await.unwrap().unwrap();
+    }
+
+    fn client_stream_of(c: &mut WireClient) -> &mut TcpStream {
+        &mut c.stream
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_message_on_same_session_closes_after_ack() {
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let session_id = client.session();
+        // Send a self-targeted Cancel frame.
+        let mut tcp = &mut client.stream;
+        write_frame(&mut tcp,
+            &WireMessage::Cancel { session: session_id }).await.unwrap();
+        // Handler acks with Command { affected: 0 } then
+        // observes the flag on the next loop iteration.
+        let ack = read_frame(&mut tcp).await.unwrap();
+        assert!(matches!(ack, WireMessage::Command { affected: 0 }),
+            "expected ack, got {ack:?}");
+        let cancel = read_frame(&mut tcp).await.unwrap();
+        assert!(matches!(cancel, WireMessage::ErrorMsg { code: 5, .. }),
+            "expected cancel ErrorMsg(5), got {cancel:?}");
+        let bye = read_frame(&mut tcp).await.unwrap();
+        assert!(matches!(bye, WireMessage::Bye));
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn cancel_session_unknown_id_returns_false() {
+        let dir = tempdir().unwrap();
+        let engine = Arc::new(bradian_relational::sql::SqlEngine::open(dir.path()).unwrap());
+        let server = WireServer::new(engine);
+        assert!(!server.cancel_session(999_999),
+            "cancelling an unknown session must return false");
+        assert!(!server.is_session_cancelled(999_999));
     }
 
     #[test]
