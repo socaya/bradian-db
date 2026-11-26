@@ -417,27 +417,30 @@ impl WireServer {
         write_frame(&mut stream, &WireMessage::HelloOk { session }).await?;
 
         let who = principal_id.unwrap_or_else(|| "anonymous".to_string());
-        self.audit_record(&who, "session_open", &format!("session={session}"), None);
+        self.audit_record(&who, "session_open", &format!("session={session}"),
+            None, None);
 
         loop {
             let req = match read_frame(&mut stream).await {
                 Ok(m) => m,
                 Err(WireError::Closed) => {
                     self.audit_record(&who, "session_close",
-                        &format!("session={session}"), Some("eof".into()));
+                        &format!("session={session}"), Some("eof".into()), None);
                     return Ok(());
                 }
                 Err(e) => {
                     self.audit_record(&who, "session_close",
-                        &format!("session={session}"), Some(format!("{e}")));
+                        &format!("session={session}"), Some(format!("{e}")), None);
                     return Err(e);
                 }
             };
             match req {
                 WireMessage::Execute { sql } => {
+                    let fp = Some(sql_fingerprint(&sql));
                     let reply = if !authz(&sql) {
                         self.audit_record(&who, "authz_deny",
-                            &audit_target_of(&sql), Some(truncate_sql(&sql)));
+                            &audit_target_of(&sql), Some(truncate_sql(&sql)),
+                            fp.clone());
                         WireMessage::ErrorMsg {
                             code: 3,
                             message: format!("authorization denied for statement: {sql}"),
@@ -465,7 +468,8 @@ impl WireServer {
                                     Err(e) => {
                                         let msg = format!("{e}");
                                         self.audit_record(&who, "pressure_deny",
-                                            &audit_target_of(&sql), Some(truncate_sql(&sql)));
+                                            &audit_target_of(&sql), Some(truncate_sql(&sql)),
+                                            fp.clone());
                                         write_frame(&mut stream, &WireMessage::ErrorMsg {
                                             code: 4, message: msg }).await?;
                                         continue;
@@ -480,20 +484,23 @@ impl WireServer {
                             self.audit_record(&who, "execute_rows",
                                 &audit_target_of(&sql),
                                 Some(format!("rows={rows_returned}; sql={}",
-                                    truncate_sql(&sql))));
+                                    truncate_sql(&sql))),
+                                fp.clone());
                             continue;
                         }
                         Ok(SqlResultSet::Command { affected }) => {
                             self.audit_record(&who, "execute_command",
                                 &audit_target_of(&sql),
                                 Some(format!("affected={affected}; sql={}",
-                                    truncate_sql(&sql))));
+                                    truncate_sql(&sql))),
+                                fp.clone());
                             WireMessage::Command { affected }
                         }
                         Err(e) => {
                             self.audit_record(&who, "execute_error",
                                 &audit_target_of(&sql),
-                                Some(format!("err={e}; sql={}", truncate_sql(&sql))));
+                                Some(format!("err={e}; sql={}", truncate_sql(&sql))),
+                                fp.clone());
                             WireMessage::ErrorMsg { code: 1, message: format!("{e}") }
                         }
                     }};
@@ -502,7 +509,7 @@ impl WireServer {
                 WireMessage::Bye => {
                     write_frame(&mut stream, &WireMessage::Bye).await?;
                     self.audit_record(&who, "session_close",
-                        &format!("session={session}"), Some("bye".into()));
+                        &format!("session={session}"), Some("bye".into()), None);
                     return Ok(());
                 }
                 other => {
@@ -513,7 +520,10 @@ impl WireServer {
         }
     }
 
-    fn audit_record(&self, principal_id: &str, action: &str, target: &str, detail: Option<String>) {
+    fn audit_record(
+        &self, principal_id: &str, action: &str, target: &str,
+        detail: Option<String>, plan_fingerprint: Option<String>,
+    ) {
         if let Some(log) = &self.audit {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -523,7 +533,7 @@ impl WireServer {
                 principal_id: principal_id.to_string(),
                 action: action.to_string(),
                 target: target.to_string(),
-                plan_fingerprint: None,
+                plan_fingerprint,
                 detail,
             };
             // Audit write failures are logged, not
@@ -560,6 +570,48 @@ fn audit_target_of(sql: &str) -> String {
     let verb = trimmed.split_ascii_whitespace().next().unwrap_or("?")
         .to_ascii_uppercase();
     format!("sql:{verb}")
+}
+
+/// ADR 0345 — BLAKE3-based statement fingerprint for the
+/// audit entry's `plan_fingerprint` field. Normalises
+/// the SQL by trimming + collapsing whitespace +
+/// lower-casing so semantically-equivalent statements
+/// (identical except for whitespace / case) produce the
+/// same hash.
+///
+/// Honest scope: this is a STATEMENT fingerprint, not a
+/// compiled-plan fingerprint. True plan fingerprinting
+/// requires wiring in `bradian_planner::sql_plan` (ADR
+/// 0296) to compile each incoming SQL into a
+/// `SqlLogicalNode` and hash the serialised tree — that
+/// is a dedicated follow-up once the planner runs
+/// in-line with the engine's execute path.
+fn sql_fingerprint(sql: &str) -> String {
+    let mut normalised = String::with_capacity(sql.len());
+    let mut last_was_space = true;
+    for ch in sql.trim().chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                normalised.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            for c in ch.to_lowercase() { normalised.push(c); }
+            last_was_space = false;
+        }
+    }
+    let h = blake3::hash(normalised.as_bytes());
+    hex_lower(h.as_bytes())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(H[(*b >> 4) as usize] as char);
+        out.push(H[(*b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1606,6 +1658,58 @@ mod tests {
         assert!(truncated.len() < 400);
         assert!(truncated.ends_with('…'));
         assert_eq!(super::truncate_sql("SELECT 1"), "SELECT 1");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audit_execute_entries_carry_a_plan_fingerprint() {
+        let (_dir, engine) = fresh_engine();
+        let logdir = tempdir().unwrap();
+        let log_path = logdir.path().join("audit.log");
+        let audit = Arc::new(AuditLog::open(log_path.clone()).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine).with_audit_log(audit);
+        let server_handle = tokio::spawn({
+            let s = server.clone();
+            async move { s.serve_one(&listener).await }
+        });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let _ = client.execute(
+            "SELECT value FROM t.public.items WHERE id = 1").await.unwrap();
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+        let entries = read_audit(&log_path);
+        let exec: Vec<_> = entries.iter()
+            .filter(|e| e["action"] == "execute_rows").collect();
+        assert_eq!(exec.len(), 1);
+        let fp = exec[0]["plan_fingerprint"].as_str().unwrap();
+        assert_eq!(fp.len(), 64, "BLAKE3 hex is 64 chars; got {fp:?}");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        // Open/close entries do NOT carry a fingerprint.
+        for entry in entries.iter()
+            .filter(|e| e["action"] == "session_open"
+                     || e["action"] == "session_close")
+        {
+            assert!(entry.get("plan_fingerprint").map(|v| v.is_null()).unwrap_or(true),
+                "session_* entries should not have plan_fingerprint");
+        }
+    }
+
+    #[test]
+    fn sql_fingerprint_is_whitespace_and_case_insensitive() {
+        let a = super::sql_fingerprint("SELECT * FROM t");
+        let b = super::sql_fingerprint("  select *   FROM\tT  ");
+        assert_eq!(a, b);
+        // Different statements → different fingerprints.
+        let c = super::sql_fingerprint("SELECT * FROM other");
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn sql_fingerprint_is_blake3_hex_64_chars() {
+        let fp = super::sql_fingerprint("SELECT 1");
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
