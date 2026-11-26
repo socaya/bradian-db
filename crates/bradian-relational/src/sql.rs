@@ -1326,13 +1326,110 @@ pub(crate) fn aggregate_result_type(
                 _ => None,
             }
         }
-        // ADR 0237 — aggregate over scalar FuncExpr. The
-        // engine doesn't statically type function output
-        // yet; fall back to inference.
-        AggSpec::MinExpr(_) | AggSpec::MaxExpr(_)
-        | AggSpec::SumExpr(_) | AggSpec::AvgExpr(_)
-        | AggSpec::CountColExpr(_)
-        | AggSpec::CountDistinctExpr(_) => None,
+        // ADR 0350 — aggregate over scalar `FuncExpr`.
+        // MIN/MAX of a function preserve the function's
+        // output type; SUM/AVG widen to Int64 or keep the
+        // Decimal scale as the column-backed path does;
+        // COUNT variants always yield Int64.
+        AggSpec::MinExpr(fe) | AggSpec::MaxExpr(fe) =>
+            func_result_type(fe, table),
+        AggSpec::SumExpr(fe) | AggSpec::AvgExpr(fe) =>
+            match func_result_type(fe, table)? {
+                DataType::Int32 | DataType::Int64 => Some(DataType::Int64),
+                dt @ DataType::Decimal { .. } => Some(dt),
+                _ => None,
+            },
+        AggSpec::CountColExpr(_) | AggSpec::CountDistinctExpr(_) =>
+            Some(DataType::Int64),
+    }
+}
+
+/// ADR 0350 — engine-sourced type of a scalar function
+/// call. Mirrors every arm of `evaluate_func`:
+///
+/// | `FuncExpr` arm                   | Output `DataType`                         |
+/// |----------------------------------|-------------------------------------------|
+/// | `Upper` / `Lower` / `Trim`       | `Text`                                    |
+/// | `Concat` / `Substr` / `Replace`  | `Text`                                    |
+/// | `Length`                         | `Int64`                                   |
+/// | `Abs(arg)`                       | `func_arg_type(arg)` (numeric pass-through)|
+/// | `Coalesce(args)`                 | first typable arg's type                  |
+/// | `NullIf(a, _)`                   | type of `a`                               |
+/// | `Case { arms, else_result }`     | first arm's result type                   |
+/// | `Cast { target }`                | explicit `target`                         |
+/// | `BinOp { lhs, rhs }`             | `Decimal{..}` if either side is `Decimal`;|
+/// |                                  | else `Int64`                              |
+/// | `Now` / `TimestampAdd`           | `TimestampTz`                             |
+/// | `TimestampDiff`                  | `Int64` (whole seconds)                   |
+///
+/// Returns `None` whenever a sub-expression can't be
+/// typed (unknown column, unusable literal, nested
+/// expr whose own typing gave up).
+pub(crate) fn func_result_type(
+    fe: &FuncExpr, table: &Table,
+) -> Option<DataType> {
+    match fe {
+        FuncExpr::Upper(_)
+        | FuncExpr::Lower(_)
+        | FuncExpr::Trim(_)
+        | FuncExpr::Concat(_)
+        | FuncExpr::Substr { .. }
+        | FuncExpr::Replace { .. } => Some(DataType::Text),
+        FuncExpr::Length(_) => Some(DataType::Int64),
+        FuncExpr::Abs(a) => func_arg_type(a, table),
+        FuncExpr::Coalesce(args) => args.iter().find_map(|a| func_arg_type(a, table)),
+        FuncExpr::NullIf(a, _) => func_arg_type(a, table),
+        FuncExpr::Case { arms, else_result } => {
+            if let Some(arm) = arms.first() {
+                if let Some(t) = func_arg_type(&arm.result, table) { return Some(t); }
+            }
+            else_result.as_ref().and_then(|r| func_arg_type(r, table))
+        }
+        FuncExpr::Cast { target, .. } => Some(target.clone()),
+        FuncExpr::BinOp { lhs, rhs, .. } => {
+            let lt = func_arg_type(lhs, table);
+            let rt = func_arg_type(rhs, table);
+            match (&lt, &rt) {
+                (Some(DataType::Decimal { .. }), _) => lt,
+                (_, Some(DataType::Decimal { .. })) => rt,
+                (Some(_), _) | (_, Some(_)) => Some(DataType::Int64),
+                _ => None,
+            }
+        }
+        FuncExpr::Now | FuncExpr::TimestampAdd { .. } => Some(DataType::TimestampTz),
+        FuncExpr::TimestampDiff { .. } => Some(DataType::Int64),
+    }
+}
+
+/// ADR 0350 — engine-sourced type of a `FuncArg`.
+/// `ColumnRef` resolves against `table`; `Literal` looks
+/// at the `Value` variant; `Nested` recurses into
+/// `func_result_type`. Returns `None` when the arg
+/// cannot be typed statically.
+pub(crate) fn func_arg_type(
+    arg: &FuncArg, table: &Table,
+) -> Option<DataType> {
+    match arg {
+        FuncArg::ColumnRef(name) => {
+            let p = locate(table, name).ok()?;
+            Some(table.columns[p].data_type.clone())
+        }
+        FuncArg::Literal(v) => match v {
+            Value::Boolean(_)     => Some(DataType::Boolean),
+            Value::Int32(_)       => Some(DataType::Int32),
+            Value::Int64(_)       => Some(DataType::Int64),
+            // A bare numeric literal that arrived as
+            // Decimal has unknown precision/scale at this
+            // point; honest `None` is better than a
+            // fabricated (10, 2).
+            Value::Decimal(_)     => None,
+            Value::String(_)      => Some(DataType::Text),
+            Value::TimestampTz(_) => Some(DataType::TimestampTz),
+            Value::Uuid(_)        => Some(DataType::Uuid),
+            Value::Json(_)        => Some(DataType::Json),
+            Value::Null           => None,
+        }
+        FuncArg::Nested(fe) => func_result_type(fe, table),
     }
 }
 
@@ -6617,13 +6714,25 @@ impl SqlEngine {
                     let mut types = Vec::with_capacity(select_items.len());
                     let mut complete = true;
                     for it in &select_items {
-                        if let SelectItem::Column(Projection::Column(name)) = it {
-                            if name.contains('.') { complete = false; break; }
-                            match locate(&table, name) {
-                                Ok(idx) => types.push(table.columns[idx].data_type.clone()),
-                                Err(_)  => { complete = false; break; }
+                        match it {
+                            SelectItem::Column(Projection::Column(name)) => {
+                                if name.contains('.') { complete = false; break; }
+                                match locate(&table, name) {
+                                    Ok(idx) => types.push(table.columns[idx].data_type.clone()),
+                                    Err(_)  => { complete = false; break; }
+                                }
                             }
-                        } else { complete = false; break; }
+                            // ADR 0350 — scalar function
+                            // projection types come from
+                            // `func_result_type`.
+                            SelectItem::Func(fe) => {
+                                match func_result_type(fe, &table) {
+                                    Some(t) => types.push(t),
+                                    None    => { complete = false; break; }
+                                }
+                            }
+                            _ => { complete = false; break; }
+                        }
                     }
                     if complete { types } else { Vec::new() }
                 };

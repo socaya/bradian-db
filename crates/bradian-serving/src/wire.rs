@@ -2144,6 +2144,94 @@ mod tests {
         server_handle.await.unwrap().unwrap();
     }
 
+    // ---------- ADR 0350: scalar function types ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cast_reports_target_data_type_from_engine() {
+        // ADR 0350 — CAST(value AS TEXT) carries its
+        // explicit target `DataType` straight to the
+        // wire layer. Previously this dropped to row
+        // inference and happened to return `String`
+        // only because the single cell was a string;
+        // with an empty result set the fallback would
+        // have reported `Unknown`.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        // Filter down to nothing; CAST still must type
+        // its output column from the target.
+        let reply = client.execute(
+            "SELECT CAST(value AS TEXT) FROM t.public.items WHERE id = 99999999"
+        ).await.unwrap();
+        match reply {
+            WireMessage::RowSet { rows, column_types, .. } => {
+                assert!(rows.is_empty());
+                assert_eq!(column_types, vec![WireType::String]);
+            }
+            other => panic!("expected empty RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn length_upper_now_report_fixed_types_from_engine() {
+        // ADR 0350 — LENGTH -> Int64, UPPER -> Text,
+        // NOW() -> TimestampTz, all engine-sourced.
+        let (_dir, engine) = fresh_engine();
+        engine.execute("CREATE TABLE t.public.strings (id BIGINT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(id))").unwrap();
+        engine.execute("INSERT INTO t.public.strings(id, name) VALUES(1, 'hi')").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+
+        let a = client.execute("SELECT LENGTH(name) FROM t.public.strings WHERE id = 1").await.unwrap();
+        match a {
+            WireMessage::RowSet { column_types, .. } =>
+                assert_eq!(column_types, vec![WireType::Int64]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        let b = client.execute("SELECT UPPER(name) FROM t.public.strings WHERE id = 1").await.unwrap();
+        match b {
+            WireMessage::RowSet { column_types, .. } =>
+                assert_eq!(column_types, vec![WireType::String]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        let c = client.execute("SELECT NOW() FROM t.public.strings WHERE id = 1").await.unwrap();
+        match c {
+            WireMessage::RowSet { column_types, .. } =>
+                assert_eq!(column_types, vec![WireType::TimestampTz]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binop_on_integers_reports_int64_from_engine() {
+        // ADR 0350 — integer +/-/* yields Int64; a
+        // Decimal operand would widen to Decimal.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute("SELECT value + 1 FROM t.public.items WHERE id = 1").await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, .. } =>
+                assert_eq!(column_types, vec![WireType::Int64]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
     // ---------- ADR 0346: cancellation ----------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
