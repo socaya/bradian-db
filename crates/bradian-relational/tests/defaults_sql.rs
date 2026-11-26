@@ -51,7 +51,7 @@ fn nullable_defaults_distinguish_explicit_null_and_explicit_default() {
     db.with_session(|s| {
         let extended = s.execute(&format!("DESCRIBE TABLE bank.public.accounts AS OF {lsn} WITH DEFAULTS"))?;
         match extended {
-            SqlResultSet::Rows { columns, rows } => {
+            SqlResultSet::Rows { columns, rows, .. } => {
                 assert_eq!(&columns[4..], &["has_default", "column_default"]);
                 assert_eq!(&rows[0][4..], &[Value::Boolean(false), Value::Null]);
                 assert_eq!(&rows[2][4..], &[Value::Boolean(true), Value::String("pending".into())]);

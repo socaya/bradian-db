@@ -43,12 +43,12 @@ fn sql_two_table_commit_is_one_wal_record_and_survives_restart() {
             assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=10")?,
                 SqlResultSet::Rows {
                     columns: vec!["balance".into()],
-                    rows: vec![vec![Value::Int64(800)]],
+                    rows: vec![vec![Value::Int64(800)]], column_types: Vec::new(),
                 });
             assert_eq!(s.execute("SELECT amount FROM banking.public.movements WHERE id=40")?,
                 SqlResultSet::Rows {
                     columns: vec!["amount".into()],
-                    rows: vec![vec![Value::Int64(-200)]],
+                    rows: vec![vec![Value::Int64(-200)]], column_types: Vec::new(),
                 });
             s.execute("COMMIT")?;
             assert_eq!(s.last_commit_lsn(), Some(start + 1));
@@ -65,12 +65,12 @@ fn sql_two_table_commit_is_one_wal_record_and_survives_restart() {
         assert_eq!(session.execute("SELECT id,balance FROM banking.public.accounts")?,
             SqlResultSet::Rows {
                 columns: vec!["id".into(), "balance".into()],
-                rows: vec![vec![Value::Int64(10), Value::Int64(800)]],
+                rows: vec![vec![Value::Int64(10), Value::Int64(800)]], column_types: Vec::new(),
             });
         assert_eq!(session.execute("SELECT account_id,amount FROM banking.public.movements")?,
             SqlResultSet::Rows {
                 columns: vec!["account_id".into(), "amount".into()],
-                rows: vec![vec![Value::Int64(10), Value::Int64(-200)]],
+                rows: vec![vec![Value::Int64(10), Value::Int64(-200)]], column_types: Vec::new(),
             });
         session.execute("ROLLBACK")?;
         Ok(())
@@ -98,12 +98,12 @@ fn rollback_and_session_drop_abort_both_tables() {
         assert_eq!(session.execute("SELECT * FROM banking.public.accounts")?,
             SqlResultSet::Rows {
                 columns: vec!["id".into(), "balance".into()],
-                rows: vec![],
+                rows: vec![], column_types: Vec::new(),
             });
         assert_eq!(session.execute("SELECT * FROM banking.public.movements")?,
             SqlResultSet::Rows {
                 columns: vec!["id".into(), "account_id".into(), "amount".into()],
-                rows: vec![],
+                rows: vec![], column_types: Vec::new(),
             });
         Ok(())
     }).unwrap();
@@ -132,7 +132,7 @@ fn statement_error_discards_all_prior_changes_across_tables() {
         assert_eq!(session.execute("SELECT id FROM banking.public.movements")?,
             SqlResultSet::Rows {
                 columns: vec!["id".into()],
-                rows: vec![vec![Value::Int64(2)]],
+                rows: vec![vec![Value::Int64(2)]], column_types: Vec::new(),
             });
         Ok(())
     }).unwrap();
@@ -165,12 +165,12 @@ fn sql_cross_table_update_and_delete_are_one_atomic_commit() {
         assert_eq!(session.execute("SELECT balance FROM banking.public.accounts WHERE id=3")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(900)]],
+                rows: vec![vec![Value::Int64(900)]], column_types: Vec::new(),
             });
         assert_eq!(session.execute("SELECT id FROM banking.public.movements")?,
             SqlResultSet::Rows {
                 columns: vec!["id".into()],
-                rows: vec![vec![Value::Int64(8)]],
+                rows: vec![vec![Value::Int64(8)]], column_types: Vec::new(),
             });
         Ok(())
     }).unwrap();

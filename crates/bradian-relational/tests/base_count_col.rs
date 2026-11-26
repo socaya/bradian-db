@@ -24,7 +24,7 @@ fn seed(dir: &std::path::Path) -> SqlEngine {
 
 fn single_count(rs: SqlResultSet) -> i64 {
     match rs {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["count"]);
             assert_eq!(rows.len(), 1);
             match rows[0][0] {

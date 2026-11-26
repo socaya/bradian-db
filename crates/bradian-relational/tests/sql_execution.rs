@@ -31,7 +31,7 @@ fn native_sql_create_insert_select_update_delete_and_restart() {
         assert_eq!(db.execute("SELECT customer,amount FROM billing.public.invoices WHERE id = 7;").unwrap(),
             SqlResultSet::Rows {
                 columns: vec!["customer".into(), "amount".into()],
-                rows: vec![vec![Value::String("Alice".into()), Value::Decimal(120075)]],
+                rows: vec![vec![Value::String("Alice".into()), Value::Decimal(120075)]], column_types: Vec::new(),
             });
         command(&db, "UPDATE billing.public.invoices SET settled = true, note = 'paid' WHERE id=7;", 1);
         command(&db, "DELETE FROM billing.public.invoices WHERE id=8;", 1);
@@ -41,17 +41,17 @@ fn native_sql_create_insert_select_update_delete_and_restart() {
                 rows: vec![vec![
                     Value::Int64(7), Value::String("Alice".into()), Value::Decimal(120075),
                     Value::Boolean(true), Value::String("paid".into()),
-                ]],
+                ]], column_types: Vec::new(),
             });
     }
     let reopened = SqlEngine::open(base.path()).unwrap();
     assert_eq!(reopened.execute("SELECT id, note FROM billing.public.invoices WHERE id=7").unwrap(),
         SqlResultSet::Rows {
             columns: vec!["id".into(), "note".into()],
-            rows: vec![vec![Value::Int64(7), Value::String("paid".into())]],
+            rows: vec![vec![Value::Int64(7), Value::String("paid".into())]], column_types: Vec::new(),
         });
     assert_eq!(reopened.execute("SELECT id FROM billing.public.invoices WHERE id=8").unwrap(),
-        SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![] });
+        SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![], column_types: Vec::new() });
     command(&reopened, "INSERT INTO billing.public.invoices (id,customer,amount,settled,note) VALUES (9,'Eve',0.00,false,NULL)", 1);
 }
 
@@ -81,7 +81,7 @@ fn rejected_sql_never_mutates_a_preexisting_row() {
     assert_eq!(db.execute("SELECT id,customer FROM billing.public.invoices WHERE id=1").unwrap(),
         SqlResultSet::Rows {
             columns: vec!["id".into(),"customer".into()],
-            rows: vec![vec![Value::Int64(1),Value::String("One".into())]],
+            rows: vec![vec![Value::Int64(1),Value::String("One".into())]], column_types: Vec::new(),
         });
 }
 
@@ -94,7 +94,7 @@ fn sql_literals_handle_escaped_quotes_nulls_boolean_and_negative_values() {
     assert_eq!(db.execute("SELECT customer,amount FROM billing.public.invoices WHERE id=-2;").unwrap(),
         SqlResultSet::Rows {
             columns: vec!["customer".into(),"amount".into()],
-            rows: vec![vec![Value::String("O'Reilly".into()),Value::Decimal(-1250)]],
+            rows: vec![vec![Value::String("O'Reilly".into()),Value::Decimal(-1250)]], column_types: Vec::new(),
         });
     assert!(matches!(
         db.execute("INSERT INTO billing.public.invoices(id,customer,amount,settled,note) VALUES (9,'x',5.00,NULL,NULL)"),
@@ -136,13 +136,13 @@ fn composite_primary_key_predicate_uses_declared_key_order() {
     command(&db,"INSERT INTO operational.public.keys(tenant,code,payload) VALUES ('a','bc','first')",1);
     command(&db,"INSERT INTO operational.public.keys(tenant,code,payload) VALUES ('ab','c','second')",1);
     assert_eq!(db.execute("SELECT payload FROM operational.public.keys WHERE code='bc' AND tenant='a'").unwrap(),
-        SqlResultSet::Rows {columns:vec!["payload".into()],rows:vec![vec![Value::String("first".into())]]});
+        SqlResultSet::Rows {columns:vec!["payload".into()],rows:vec![vec![Value::String("first".into())]], column_types: Vec::new()});
     command(&db,"UPDATE operational.public.keys SET payload='updated' WHERE code='c' AND tenant='ab'",1);
     assert_eq!(db.execute("SELECT payload FROM operational.public.keys WHERE tenant='ab' AND code='c'").unwrap(),
-        SqlResultSet::Rows {columns:vec!["payload".into()],rows:vec![vec![Value::String("updated".into())]]});
+        SqlResultSet::Rows {columns:vec!["payload".into()],rows:vec![vec![Value::String("updated".into())]], column_types: Vec::new()});
     command(&db,"DELETE FROM operational.public.keys WHERE code='bc' AND tenant='a'",1);
     assert_eq!(db.execute("SELECT * FROM operational.public.keys").unwrap(),
-        SqlResultSet::Rows {columns:vec!["tenant".into(),"code".into(),"payload".into()],rows:vec![vec![Value::String("ab".into()),Value::String("c".into()),Value::String("updated".into())]]});
+        SqlResultSet::Rows {columns:vec!["tenant".into(),"code".into(),"payload".into()],rows:vec![vec![Value::String("ab".into()),Value::String("c".into()),Value::String("updated".into())]], column_types: Vec::new()});
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn sql_insert_column_order_can_differ_from_schema_order() {
     setup(&db);
     command(&db,"INSERT INTO billing.public.invoices(note,settled,amount,customer,id) VALUES (NULL,false,2.35,'Reverse',42)",1);
     assert_eq!(db.execute("SELECT id,customer,amount FROM billing.public.invoices WHERE id=42").unwrap(),
-        SqlResultSet::Rows {columns:vec!["id".into(),"customer".into(),"amount".into()],rows:vec![vec![Value::Int64(42),Value::String("Reverse".into()),Value::Decimal(235)]]});
+        SqlResultSet::Rows {columns:vec!["id".into(),"customer".into(),"amount".into()],rows:vec![vec![Value::Int64(42),Value::String("Reverse".into()),Value::Decimal(235)]], column_types: Vec::new()});
 }
 
 
@@ -184,7 +184,7 @@ fn typed_sql_table_transaction_commits_multiple_rows_as_one_wal_record() {
             rows: vec![
                 vec![Value::Int64(11), Value::String("Alice".into())],
                 vec![Value::Int64(12), Value::String("Bob".into())],
-            ],
+            ], column_types: Vec::new(),
         });
     }
     let reopened = SqlEngine::open(root.path()).unwrap();
@@ -192,7 +192,7 @@ fn typed_sql_table_transaction_commits_multiple_rows_as_one_wal_record() {
         "SELECT customer FROM billing.public.invoices WHERE id=12"
     ).unwrap(), SqlResultSet::Rows {
         columns: vec!["customer".into()],
-        rows: vec![vec![Value::String("Bob".into())]],
+        rows: vec![vec![Value::String("Bob".into())]], column_types: Vec::new(),
     });
 }
 
@@ -212,7 +212,7 @@ fn typed_sql_transaction_closure_error_aborts_all_changes() {
     assert!(matches!(result, Err(SqlError::Unsupported(_))));
     assert_eq!(engine.execute(
         "SELECT id FROM billing.public.invoices WHERE id=30"
-    ).unwrap(), SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![] });
+    ).unwrap(), SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![], column_types: Vec::new() });
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn scoped_begin_commit_stages_sql_until_one_durable_wal_commit() {
                     rows: vec![
                         vec![Value::Int64(11), Value::String("Alice".into())],
                         vec![Value::Int64(12), Value::String("Bob".into())],
-                    ],
+                    ], column_types: Vec::new(),
                 },
             );
             session.execute("UPDATE billing.public.invoices SET amount=12.50 WHERE id=11")?;
@@ -261,14 +261,14 @@ fn scoped_begin_commit_stages_sql_until_one_durable_wal_commit() {
         assert_eq!(engine.execute("SELECT id,amount FROM billing.public.invoices").unwrap(),
             SqlResultSet::Rows {
                 columns: vec!["id".into(), "amount".into()],
-                rows: vec![vec![Value::Int64(11), Value::Decimal(1250)]],
+                rows: vec![vec![Value::Int64(11), Value::Decimal(1250)]], column_types: Vec::new(),
             });
     }
     let reopened = SqlEngine::open(base.path()).unwrap();
     assert_eq!(reopened.execute("SELECT customer FROM billing.public.invoices WHERE id=11").unwrap(),
         SqlResultSet::Rows {
             columns: vec!["customer".into()],
-            rows: vec![vec![Value::String("Alice".into())]],
+            rows: vec![vec![Value::String("Alice".into())]], column_types: Vec::new(),
         });
 }
 
@@ -286,7 +286,7 @@ fn scoped_sql_rollback_and_implicit_abort_do_not_publish_rows() {
         Ok(()) // drop open session, implicit rollback
     }).unwrap();
     assert_eq!(engine.execute("SELECT * FROM billing.public.invoices").unwrap(),
-        SqlResultSet::Rows { columns: vec!["id".into(),"customer".into(),"amount".into(),"settled".into(),"note".into()], rows: vec![] });
+        SqlResultSet::Rows { columns: vec!["id".into(),"customer".into(),"amount".into(),"settled".into(),"note".into()], rows: vec![], column_types: Vec::new() });
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn scoped_sql_statement_error_aborts_all_prior_staged_changes() {
         Ok(())
     }).unwrap();
     assert_eq!(engine.execute("SELECT id FROM billing.public.invoices").unwrap(),
-        SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![vec![Value::Int64(3)]] });
+        SqlResultSet::Rows { columns: vec!["id".into()], rows: vec![vec![Value::Int64(3)]], column_types: Vec::new() });
 }
 
 #[test]

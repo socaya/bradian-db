@@ -71,7 +71,7 @@ fn insert_select_with_returning() {
     match db.execute(
         "INSERT INTO t.public.dst(id, name, qty) SELECT id, name, qty FROM t.public.src WHERE id = 1 RETURNING id"
     ).unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id"]);
             assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }

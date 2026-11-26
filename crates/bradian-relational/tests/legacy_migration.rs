@@ -66,12 +66,12 @@ fn migrates_multiple_legacy_tables_and_preserves_original_data() {
             assert_eq!(s.execute("SELECT id,amount FROM banking.public.movements")?,
                 SqlResultSet::Rows {
                     columns: vec!["id".into(), "amount".into()],
-                    rows: vec![vec![Value::Int64(5), Value::Int64(-100)]],
+                    rows: vec![vec![Value::Int64(5), Value::Int64(-100)]], column_types: Vec::new(),
                 });
             assert_eq!(s.execute("SELECT id,note FROM banking.public.empty")?,
                 SqlResultSet::Rows {
                     columns: vec!["id".into(),"note".into()],
-                    rows: vec![],
+                    rows: vec![], column_types: Vec::new(),
                 });
             s.execute("ROLLBACK")?;
             Ok(())
@@ -84,7 +84,7 @@ fn migrates_multiple_legacy_tables_and_preserves_original_data() {
             rows: vec![
                 vec![Value::Int64(1),Value::Int64(1000)],
                 vec![Value::Int64(2),Value::Int64(500)],
-            ],
+            ], column_types: Vec::new(),
         });
 }
 
@@ -111,12 +111,12 @@ fn migrated_shared_domain_supports_new_atomic_cross_table_sql() {
         assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?,
             SqlResultSet::Rows {
                 columns:vec!["balance".into()],
-                rows:vec![vec![Value::Int64(900)]],
+                rows:vec![vec![Value::Int64(900)]], column_types: Vec::new(),
             });
         assert_eq!(s.execute("SELECT amount FROM banking.public.movements WHERE id=6")?,
             SqlResultSet::Rows {
                 columns:vec!["amount".into()],
-                rows:vec![vec![Value::Int64(-100)]],
+                rows:vec![vec![Value::Int64(-100)]], column_types: Vec::new(),
             });
         s.execute("ROLLBACK")?;
         Ok(())
@@ -235,7 +235,7 @@ fn migration_with_only_catalog_metadata_keeps_unprovisioned_tables_empty() {
     db.with_session(|s| {
         s.execute("BEGIN")?;
         assert_eq!(s.execute("SELECT * FROM reporting.public.empty")?,
-            SqlResultSet::Rows {columns: vec!["id".into()],rows: vec![]});
+            SqlResultSet::Rows {columns: vec!["id".into()],rows: vec![], column_types: Vec::new()});
         s.execute("ROLLBACK")?;
         Ok(())
     }).unwrap();

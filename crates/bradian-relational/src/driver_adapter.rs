@@ -71,7 +71,7 @@ fn translate_result(rs: SqlResultSet) -> DriverResponse {
             } else {
                 DriverResponse::Affected { rows: affected }
             },
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             let rows = rows.into_iter().map(|values| DriverRow {
                 columns: columns.clone(),
                 values,

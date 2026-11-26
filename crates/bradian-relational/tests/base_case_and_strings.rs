@@ -20,7 +20,7 @@ fn seed(dir: &std::path::Path) -> SqlEngine {
 
 fn rows_of(rs: SqlResultSet) -> (Vec<String>, Vec<Vec<Value>>) {
     match rs {
-        SqlResultSet::Rows { columns, rows } => (columns, rows),
+        SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
         other => panic!("expected Rows; got {other:?}"),
     }
 }

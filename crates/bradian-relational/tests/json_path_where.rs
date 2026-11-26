@@ -70,7 +70,7 @@ fn where_combines_with_json_path_projection() {
     match db.execute(
         "SELECT id, body ->> 'name' FROM t.public.docs WHERE body ->> 'level' = '3'"
     ).unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id".to_string(), "body->>'name'".to_string()]);
             let names: Vec<String> = rows.iter().map(|r| match &r[1] {
                 Value::String(s) => s.clone(),

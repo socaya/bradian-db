@@ -22,7 +22,7 @@ fn arrow_arrow_array_index_returns_text() {
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
     match db.execute("SELECT body -> 'tags' ->> 1 FROM t.public.docs WHERE id=1").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["body->'tags'->>1".to_string()]);
             match &rows[0][0] {
                 Value::String(s) => assert_eq!(s, "green"),

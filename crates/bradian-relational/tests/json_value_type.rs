@@ -95,7 +95,7 @@ fn sql_engine_insert_round_trip_returns_value_json() {
     ] { db.execute(sql).unwrap(); }
 
     match db.execute("SELECT body FROM test.public.docs WHERE id=1").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["body".to_string()]);
             assert_eq!(rows.len(), 1);
             match &rows[0][0] {

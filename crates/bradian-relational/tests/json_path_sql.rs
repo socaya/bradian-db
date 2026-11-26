@@ -22,7 +22,7 @@ fn arrow_extracts_json_subvalue_preserving_json_variant() {
     let db = open(dir.path());
     seeded(&db);
     match db.execute("SELECT body -> 'nested' FROM t.public.docs WHERE id=1").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["body->'nested'".to_string()]);
             match &rows[0][0] {
                 Value::Json(s) => {
@@ -42,7 +42,7 @@ fn arrow_arrow_extracts_as_text() {
     let db = open(dir.path());
     seeded(&db);
     match db.execute("SELECT body ->> 'name' FROM t.public.docs WHERE id=1").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["body->>'name'".to_string()]);
             match &rows[0][0] {
                 Value::String(s) => assert_eq!(s, "alice"),
@@ -86,7 +86,7 @@ fn path_combines_with_other_projections_and_scan() {
     let db = open(dir.path());
     seeded(&db);
     match db.execute("SELECT id, body ->> 'name' FROM t.public.docs").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id".to_string(), "body->>'name'".to_string()]);
             assert_eq!(rows.len(), 2);
             let names: std::collections::BTreeSet<String> = rows.iter().map(|r|

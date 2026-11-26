@@ -87,11 +87,32 @@ impl WireValue {
     }
 }
 
-/// Infer per-column types from the row set's data:
-/// scan the first non-null cell per column; columns
-/// that remain all-null (or empty row set) stay
-/// `Unknown`. This is a best-effort shape until the
-/// engine ships column metadata in `SqlResultSet`.
+/// ADR 0347 — project a catalog `DataType` to a wire
+/// `WireType`. Used when the engine populates
+/// `SqlResultSet::Rows::column_types`, so the wire layer
+/// can skip the row-based inference fallback.
+pub(crate) fn wire_type_from_data_type(
+    t: bradian_relational::DataType,
+) -> WireType {
+    use bradian_relational::DataType as D;
+    match t {
+        D::Boolean          => WireType::Bool,
+        D::Int32            => WireType::Int32,
+        D::Int64            => WireType::Int64,
+        D::Decimal { .. }   => WireType::Decimal,
+        D::Varchar { .. }   => WireType::String,
+        D::Text             => WireType::String,
+        D::TimestampTz      => WireType::TimestampTz,
+        D::Uuid             => WireType::Uuid,
+        D::Json             => WireType::Json,
+    }
+}
+
+/// ADR 0340 fallback — infer per-column types from the
+/// row set when the engine did not populate
+/// `SqlResultSet::Rows::column_types`. Scans the first
+/// non-null cell per column; columns that remain all-null
+/// (or empty row set) stay `Unknown`.
 fn infer_column_types(columns: &[String], rows: &[Vec<WireValue>]) -> Vec<WireType> {
     let mut out = vec![WireType::Unknown; columns.len()];
     for row in rows {
@@ -517,7 +538,7 @@ impl WireServer {
                             message: format!("authorization denied for statement: {sql}"),
                         }
                     } else { match self.engine.execute(&sql) {
-                        Ok(SqlResultSet::Rows { columns, rows }) => {
+                        Ok(SqlResultSet::Rows { columns, rows, column_types: engine_types }) => {
                             // ADR 0338 — typed wire row:
                             // convert each cell via
                             // WireValue::from(Value).
@@ -548,7 +569,21 @@ impl WireServer {
                                 }
                             } else { None };
                             let rows_returned = rows.len();
-                            let column_types = infer_column_types(&columns, &rows);
+                            // ADR 0347 — prefer engine-sourced
+                            // DataType when the executor
+                            // populated `SqlResultSet::Rows::column_types`
+                            // (len matches columns). Fall back
+                            // to ADR 0340 row-based inference
+                            // only when the engine couldn't
+                            // source types (aggregates, scalar
+                            // functions, set operators, etc.).
+                            let column_types = if engine_types.len() == columns.len() {
+                                engine_types.into_iter()
+                                    .map(wire_type_from_data_type)
+                                    .collect()
+                            } else {
+                                infer_column_types(&columns, &rows)
+                            };
                             let reply = WireMessage::RowSet { columns, column_types, rows };
                             write_frame(&mut stream, &reply).await?;
                             drop(maybe_guard);  // release in-flight bytes
@@ -1885,6 +1920,78 @@ mod tests {
         assert_eq!(json, "\"timestamp_tz\"");
         let back: WireType = serde_json::from_str(&json).unwrap();
         assert_eq!(back, t);
+    }
+
+    // ---------- ADR 0347: engine-sourced column types ----------
+
+    #[test]
+    fn wire_type_from_data_type_covers_every_catalog_variant() {
+        use bradian_relational::DataType as D;
+        assert_eq!(wire_type_from_data_type(D::Boolean),         WireType::Bool);
+        assert_eq!(wire_type_from_data_type(D::Int32),           WireType::Int32);
+        assert_eq!(wire_type_from_data_type(D::Int64),           WireType::Int64);
+        assert_eq!(wire_type_from_data_type(D::Decimal { precision: 10, scale: 2 }), WireType::Decimal);
+        assert_eq!(wire_type_from_data_type(D::Varchar { max_length: 32 }),          WireType::String);
+        assert_eq!(wire_type_from_data_type(D::Text),            WireType::String);
+        assert_eq!(wire_type_from_data_type(D::TimestampTz),     WireType::TimestampTz);
+        assert_eq!(wire_type_from_data_type(D::Uuid),            WireType::Uuid);
+        assert_eq!(wire_type_from_data_type(D::Json),            WireType::Json);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rowset_column_types_come_from_engine_not_inference_for_empty_bare_select() {
+        // ADR 0347 — an empty-result bare-column SELECT
+        // still ships typed columns because the types
+        // come from the catalog, NOT inferred from any
+        // row (there are no rows to infer from).
+        let (_dir, engine) = fresh_engine();
+        // Delete all rows so the SELECT returns 0 rows;
+        // the WHERE 0=1 shape is compact and portable.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        // fresh_engine's `items` table has (id BIGINT PK,
+        // value BIGINT). Filter down to nothing with a PK
+        // predicate no row satisfies.
+        let reply = client.execute("SELECT id, value FROM t.public.items WHERE id = 99999999").await.unwrap();
+        match reply {
+            WireMessage::RowSet { rows, column_types, .. } => {
+                assert!(rows.is_empty(), "empty result expected");
+                // If this had been row-inferred we would
+                // have gotten two WireType::Unknown.
+                // Engine-sourced types project directly
+                // from the catalog.
+                assert_eq!(column_types, vec![WireType::Int64, WireType::Int64]);
+            }
+            other => panic!("expected empty RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rowset_column_types_fall_back_to_inference_when_engine_cannot_source() {
+        // ADR 0347 — COUNT(*) is an aggregate the engine
+        // doesn't emit a column_type for yet, so the wire
+        // layer must fall back to ADR 0340 inference and
+        // still produce Int64 from the single cell.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute("SELECT COUNT(*) FROM t.public.items").await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, .. } => {
+                assert_eq!(column_types, vec![WireType::Int64]);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
     }
 
     // ---------- ADR 0346: cancellation ----------

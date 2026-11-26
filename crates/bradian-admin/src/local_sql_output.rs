@@ -55,7 +55,7 @@ impl Serialize for ResultLine<'_> {
                 let mut map=serializer.serialize_map(Some(3))?; map.serialize_entry("affected",affected)?;
                 map.serialize_entry("kind","command")?; map.serialize_entry("statement",&self.statement)?; map.end()
             }
-            SqlResultSet::Rows { columns,rows }=>{
+            SqlResultSet::Rows { columns,rows, .. }=>{
                 let mut map=serializer.serialize_map(Some(4))?; map.serialize_entry("columns",columns)?;
                 map.serialize_entry("kind","rows")?; map.serialize_entry("rows",&Rows(rows))?;
                 map.serialize_entry("statement",&self.statement)?; map.end()
@@ -112,7 +112,7 @@ mod tests {
         let columns=(0..values.len()).map(|n|format!("col{n}")).collect::<Vec<_>>();
         let expected=json!({"statement":7,"kind":"rows","columns":columns,"rows":[values.iter().map(legacy).collect::<Vec<_>>()]});
         let mut old=serde_json::to_vec(&expected).unwrap(); old.push(b'\n'); let mut actual=Vec::new();
-        output(&mut actual,7,SqlResultSet::Rows { columns,rows:vec![values] },DEFAULT_OUTPUT_BYTES).unwrap(); assert_eq!(actual,old);
+        output(&mut actual,7,SqlResultSet::Rows { columns,rows:vec![values], column_types: Vec::new() },DEFAULT_OUTPUT_BYTES).unwrap(); assert_eq!(actual,old);
         let mut actual=Vec::new(); output(&mut actual,2,SqlResultSet::Command { affected:13 },DEFAULT_OUTPUT_BYTES).unwrap();
         let mut old=serde_json::to_vec(&json!({"statement":2,"kind":"command","affected":13})).unwrap(); old.push(b'\n'); assert_eq!(actual,old);
     }
@@ -128,7 +128,7 @@ mod tests {
     }
     #[test]
     fn escaped_text_amplification_is_charged_before_any_json_line_is_emitted() {
-        let rows=||SqlResultSet::Rows { columns:vec!["text".into()],rows:vec![vec![Value::String("\0".repeat(256))]] };
+        let rows=||SqlResultSet::Rows { columns:vec!["text".into()],rows:vec![vec![Value::String("\0".repeat(256))]], column_types: Vec::new() };
         let mut output_bytes=Vec::new(); assert!(output(&mut output_bytes,1,rows(),512).is_err()); assert!(output_bytes.is_empty());
         output(&mut output_bytes,1,rows(),10000).unwrap(); assert!(output_bytes.len()>256*6);
         let parsed:Json=serde_json::from_slice(&output_bytes).unwrap(); assert_eq!(parsed["rows"][0][0]["value"],"\0".repeat(256));

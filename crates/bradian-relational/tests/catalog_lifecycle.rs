@@ -71,13 +71,13 @@ fn provision_catalog_tables_and_run_cross_table_sql_after_restart() {
             session.execute("SELECT amount FROM billing.public.invoices WHERE id=1")?,
             SqlResultSet::Rows {
                 columns: vec!["amount".into()],
-                rows: vec![vec![Value::Int64(800)]],
+                rows: vec![vec![Value::Int64(800)]], column_types: Vec::new(),
             });
         assert_eq!(
             session.execute("SELECT invoice_id FROM billing.public.payments WHERE id=9")?,
             SqlResultSet::Rows {
                 columns: vec!["invoice_id".into()],
-                rows: vec![vec![Value::Int64(1)]],
+                rows: vec![vec![Value::Int64(1)]], column_types: Vec::new(),
             });
         session.execute("ROLLBACK")?;
         Ok(())
@@ -154,7 +154,7 @@ fn bootstrap_existing_g16_pins_without_rewriting_rows() {
         assert_eq!(session.execute("SELECT amount FROM billing.public.invoices WHERE id=7")?,
             SqlResultSet::Rows {
                 columns: vec!["amount".into()],
-                rows: vec![vec![Value::Int64(70)]],
+                rows: vec![vec![Value::Int64(70)]], column_types: Vec::new(),
             });
         Ok(())
     }).unwrap();

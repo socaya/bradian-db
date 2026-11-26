@@ -620,7 +620,7 @@ impl<'a> HistorySqlSession<'a> {
                 let (_, first_sql) = iter.next().expect("at least one part");
                 let first = self.execute(&first_sql)?;
                 let (columns, mut rows) = match first {
-                    SqlResultSet::Rows { columns, rows } => (columns, rows),
+                    SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
                     _ => return Err(SqlError::Unsupported(
                         "UNION requires every arm to be a SELECT".into())),
                 };
@@ -628,7 +628,7 @@ impl<'a> HistorySqlSession<'a> {
                 for (all, piece) in iter {
                     let next = self.execute(&piece)?;
                     let (next_cols, next_rows) = match next {
-                        SqlResultSet::Rows { columns, rows } => (columns, rows),
+                        SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
                         _ => return Err(SqlError::Unsupported(
                             "UNION requires every arm to be a SELECT".into())),
                     };
@@ -643,7 +643,7 @@ impl<'a> HistorySqlSession<'a> {
                     rows = crate::sql::dedup_rows(rows);
                     crate::sql::sort_distinct_output(&mut rows);
                 }
-                return Ok(SqlResultSet::Rows { columns, rows });
+                return Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() });
             }
         }
         let result = self.execute_inner(sql);
@@ -755,7 +755,7 @@ impl<'a> HistorySqlSession<'a> {
                 let mut columns = vec!["column_name".into(), "data_type".into(),
                     "nullable".into(), "schema_registered_lsn".into()];
                 if defaults { columns.extend(["has_default".into(), "column_default".into()]); }
-                Ok(SqlResultSet::Rows { columns, rows })
+                Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() })
             }
             "insert" | "select" | "update" | "delete" => {
                 // Resolve and parse before applying any change. On any error,
@@ -1085,7 +1085,7 @@ impl<'a> HistorySqlSession<'a> {
                             let value = crate::sql::evaluate_aggregate(&spec, &table, &rows)?;
                             return Ok(SqlResultSet::Rows {
                                 columns: vec![spec.result_column().into()],
-                                rows: vec![vec![value]],
+                                rows: vec![vec![value]], column_types: Vec::new(),
                             });
                         }
                         // ADR 0217 — grouped evaluation.
@@ -1108,7 +1108,24 @@ impl<'a> HistorySqlSession<'a> {
                             out
                         } else { rows };
                         let columns: Vec<String> = plain_projections.iter().map(|pj| pj.label()).collect();
-                        Ok(SqlResultSet::Rows { columns, rows })
+                        // ADR 0347 — source column_types from
+                        // the catalog when every projection
+                        // is a bare column.
+                        let column_types: Vec<crate::model::DataType> = {
+                            let mut types = Vec::with_capacity(plain_projections.len());
+                            let mut complete = true;
+                            for pj in &plain_projections {
+                                if let crate::sql::Projection::Column(name) = pj {
+                                    if name.contains('.') { complete = false; break; }
+                                    match crate::sql::locate(&table, name) {
+                                        Ok(idx) => types.push(table.columns[idx].data_type.clone()),
+                                        Err(_)  => { complete = false; break; }
+                                    }
+                                } else { complete = false; break; }
+                            }
+                            if complete { types } else { Vec::new() }
+                        };
+                        Ok(SqlResultSet::Rows { columns, rows, column_types })
                     }
                     "update" => {
                         // ADR 0147 — deadline check before mutation.

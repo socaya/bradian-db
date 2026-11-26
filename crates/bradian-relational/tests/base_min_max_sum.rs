@@ -22,7 +22,7 @@ fn seed(dir: &std::path::Path) -> SqlEngine {
 
 fn single(rs: SqlResultSet, col: &str) -> Value {
     match rs {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec![col.to_string()]);
             assert_eq!(rows.len(), 1);
             rows[0][0].clone()

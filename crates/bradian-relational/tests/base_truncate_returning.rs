@@ -30,7 +30,7 @@ fn truncate_returning_star() {
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
     match db.execute("TRUNCATE TABLE t.public.items RETURNING *").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id", "name"]);
             assert_eq!(rows.len(), 3);
         }
@@ -43,7 +43,7 @@ fn truncate_returning_subset() {
     let dir = tempdir().unwrap();
     let db = seed(dir.path());
     match db.execute("TRUNCATE TABLE t.public.items RETURNING id").unwrap() {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id"]);
             assert_eq!(rows.len(), 3);
         }

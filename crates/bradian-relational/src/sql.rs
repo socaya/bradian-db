@@ -105,7 +105,19 @@ pub const SQL_PROFILE_VERSION: &str = "bradian-sql-g1-2026-11-16";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlResultSet {
     Command { affected: u64 },
-    Rows { columns: Vec<String>, rows: Vec<Vec<Value>> },
+    /// ADR 0347 — `column_types` carries the engine-declared
+    /// `DataType` per column so the wire layer can emit typed
+    /// column metadata without row-based inference. Empty when
+    /// the producing code path has no type info to hand
+    /// (aggregates, set operators, scalar functions); downstream
+    /// consumers fall back to ADR 0340 inference in that case.
+    /// Ordered after `rows` so pre-0347 destructures keep working
+    /// with a trailing `.. `.
+    Rows {
+        columns:      Vec<String>,
+        rows:         Vec<Vec<Value>>,
+        column_types: Vec<crate::model::DataType>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1355,12 +1367,17 @@ pub(crate) fn finish_dml_result_with_table(
                 .map(|pj| locate(table, pj.source_column()))
                 .collect::<SqlResult<Vec<_>>>()?;
             let columns: Vec<String> = projs.iter().map(|pj| pj.label()).collect();
+            // ADR 0347 — DML RETURNING types come directly
+            // from the catalog column at `positions[i]`.
+            let column_types: Vec<crate::model::DataType> = positions.iter()
+                .map(|p| table.columns[*p].data_type.clone())
+                .collect();
             let rows: Vec<Vec<Value>> = captured.into_iter().map(|row| {
                 positions.iter().zip(projs).map(|(pos, pj)|
                     apply_projection(pj, row[*pos].clone())
                 ).collect::<SqlResult<Vec<Value>>>()
             }).collect::<SqlResult<Vec<Vec<Value>>>>()?;
-            Ok(SqlResultSet::Rows { columns, rows })
+            Ok(SqlResultSet::Rows { columns, rows, column_types })
         }
     }
 }
@@ -2910,7 +2927,28 @@ pub(crate) fn evaluate_grouped(
         }
         output_rows.push(out);
     }
-    Ok(SqlResultSet::Rows { columns, rows: output_rows })
+    // ADR 0347 — GROUP BY output: when every select_item
+    // is a bare column that resolves to a group key, source
+    // the DataType from the catalog. Mixed aggregate/func
+    // items drop to the empty marker so the wire layer uses
+    // inference for the full row.
+    let column_types: Vec<crate::model::DataType> = {
+        let mut types = Vec::with_capacity(items.len());
+        let mut complete = true;
+        for item in items {
+            match item {
+                SelectItem::Column(Projection::Column(name)) => {
+                    match locate(table, name) {
+                        Ok(idx) => types.push(table.columns[idx].data_type.clone()),
+                        Err(_)  => { complete = false; break; }
+                    }
+                }
+                _ => { complete = false; break; }
+            }
+        }
+        if complete { types } else { Vec::new() }
+    };
+    Ok(SqlResultSet::Rows { columns, rows: output_rows, column_types })
 }
 
 /// ADR 0228 — parse an aggregate-argument column name that may
@@ -5274,7 +5312,7 @@ impl SqlEngine {
                 let first = self.execute_impl_single(
                     &first_sql, control, budget.as_deref_mut(), policy, authz)?;
                 let (mut columns, mut rows) = match first {
-                    SqlResultSet::Rows { columns, rows } => (columns, rows),
+                    SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
                     _ => return Err(SqlError::Unsupported(
                         "UNION requires every arm to be a SELECT".into())),
                 };
@@ -5283,7 +5321,7 @@ impl SqlEngine {
                     let next = self.execute_impl_single(
                         &piece, control, budget.as_deref_mut(), policy, authz)?;
                     let (next_cols, next_rows) = match next {
-                        SqlResultSet::Rows { columns, rows } => (columns, rows),
+                        SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
                         _ => return Err(SqlError::Unsupported(
                             "UNION requires every arm to be a SELECT".into())),
                     };
@@ -5300,7 +5338,7 @@ impl SqlEngine {
                     sort_distinct_output(&mut rows);
                 }
                 let _ = &mut columns;
-                return Ok(SqlResultSet::Rows { columns, rows });
+                return Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() });
             }
         }
         self.execute_impl_single(sql, control, budget, policy, authz)
@@ -5324,7 +5362,7 @@ impl SqlEngine {
         let first = self.execute_impl_single(
             first_sql, control, budget.as_deref_mut(), policy, authz)?;
         let (columns, mut rows) = match first {
-            SqlResultSet::Rows { columns, rows } => (columns, rows),
+            SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
             _ => return Err(SqlError::Unsupported(
                 "set operator requires every arm to be a SELECT".into())),
         };
@@ -5333,7 +5371,7 @@ impl SqlEngine {
             let next = self.execute_impl_single(
                 arm_sql, control, budget.as_deref_mut(), policy, authz)?;
             let next_rows = match next {
-                SqlResultSet::Rows { columns: nc, rows } => {
+                SqlResultSet::Rows { columns: nc, rows, .. } => {
                     if nc.len() != column_count {
                         return Err(SqlError::Unsupported(
                             "set-operator arms must have the same column count".into()));
@@ -5380,7 +5418,7 @@ impl SqlEngine {
                 }
             };
         }
-        Ok(SqlResultSet::Rows { columns, rows })
+        Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() })
     }
 
     /// ADR 0226 — execute a simple INNER JOIN between two tables.
@@ -5511,7 +5549,15 @@ impl SqlEngine {
                 }
             }
         }
-        Ok(SqlResultSet::Rows { columns, rows })
+        // ADR 0347 — INNER/OUTER JOIN output types come
+        // from proj_positions (side, pos) pointing at the
+        // declared column on the correct source table.
+        let column_types: Vec<crate::model::DataType> = proj_positions.iter()
+            .map(|(is_right, pos)| {
+                if *is_right { right.columns[*pos].data_type.clone() }
+                else         { left.columns[*pos].data_type.clone() }
+            }).collect();
+        Ok(SqlResultSet::Rows { columns, rows, column_types })
     }
 
     /// ADR 0228 — build composite rows from a two-table join
@@ -5624,7 +5670,7 @@ impl SqlEngine {
                 let value = evaluate_aggregate(&spec, composite, &composite_rows)?;
                 return Ok(SqlResultSet::Rows {
                     columns: vec![spec.result_column().into()],
-                    rows: vec![vec![value]],
+                    rows: vec![vec![value]], column_types: Vec::new(),
                 });
             }
             return Err(SqlError::Unsupported(
@@ -5705,7 +5751,7 @@ impl SqlEngine {
             // replaces one subquery with a literal list.
             let rs = self.execute_impl(inner, control, None, None, None)?;
             let values = match rs {
-                SqlResultSet::Rows { columns, rows } => {
+                SqlResultSet::Rows { columns, rows, .. } => {
                     if columns.len() != 1 {
                         return Err(SqlError::Unsupported(
                             "IN (SELECT …) subquery must return exactly one column".into()));
@@ -6436,7 +6482,7 @@ impl SqlEngine {
                     let value = evaluate_aggregate(&spec, &table, &all)?;
                     return Ok(SqlResultSet::Rows {
                         columns: vec![spec.result_column().into()],
-                        rows: vec![vec![value]],
+                        rows: vec![vec![value]], column_types: Vec::new(),
                     });
                 }
                 // ADR 0217 — grouped evaluation: bucket by group
@@ -6480,7 +6526,28 @@ impl SqlEngine {
                     out
                 } else { rows };
                 let columns: Vec<String> = select_items.iter().map(|it| it.label()).collect();
-                Ok(SqlResultSet::Rows { columns, rows })
+                // ADR 0347 — when every projection is a
+                // bare column reference, source the output
+                // DataType per column directly from the
+                // catalog. Scalar functions, JSON paths,
+                // aggregates and qualified refs all drop
+                // back to the empty marker so the wire
+                // layer uses row-based inference.
+                let column_types: Vec<crate::model::DataType> = {
+                    let mut types = Vec::with_capacity(select_items.len());
+                    let mut complete = true;
+                    for it in &select_items {
+                        if let SelectItem::Column(Projection::Column(name)) = it {
+                            if name.contains('.') { complete = false; break; }
+                            match locate(&table, name) {
+                                Ok(idx) => types.push(table.columns[idx].data_type.clone()),
+                                Err(_)  => { complete = false; break; }
+                            }
+                        } else { complete = false; break; }
+                    }
+                    if complete { types } else { Vec::new() }
+                };
+                Ok(SqlResultSet::Rows { columns, rows, column_types })
             }
             "update" => {
                 let name = p.name()?;
@@ -7345,9 +7412,16 @@ impl<'a> SqlSession<'a> {
                         p.end()?;
                         let rows = if let Some(key) = key { tx.get(&key)?.into_iter().collect::<Vec<_>>() }
                             else { tx.scan_with_control(&self.control)? };
+                        // ADR 0347 — transactional SELECT
+                        // projects known columns at `positions`
+                        // ∈ `self.table.columns`.
+                        let column_types: Vec<crate::model::DataType> = positions.iter()
+                            .map(|p| self.table.columns[*p].data_type.clone())
+                            .collect();
                         Ok(SqlResultSet::Rows {
                             columns: projected,
                             rows: crate::typed_table::project_rows_with_control(rows, &positions, &self.control)?,
+                            column_types,
                         })
                     }
                     "update" => {

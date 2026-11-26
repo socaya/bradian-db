@@ -35,7 +35,7 @@ fn domain_arrow_extracts_json_subvalue() {
     dom.with_session(|s| {
         s.execute("BEGIN")?;
         match s.execute("SELECT body ->> 'name' FROM t.public.docs WHERE id=1")? {
-            SqlResultSet::Rows { columns, rows } => {
+            SqlResultSet::Rows { columns, rows, .. } => {
                 assert_eq!(columns, vec!["body->>'name'".to_string()]);
                 match &rows[0][0] {
                     Value::String(ref v) => assert_eq!(v, "alice"),
@@ -106,7 +106,7 @@ fn history_arrow_extracts_json_subvalue() {
     db.with_session(|s| {
         s.execute("BEGIN")?;
         match s.execute("SELECT body ->> 'name' FROM t.public.docs WHERE id=1")? {
-            SqlResultSet::Rows { columns, rows } => {
+            SqlResultSet::Rows { columns, rows, .. } => {
                 assert_eq!(columns, vec!["body->>'name'".to_string()]);
                 match &rows[0][0] {
                     Value::String(ref v) => assert_eq!(v, "alice"),
@@ -168,7 +168,7 @@ fn mvcc_arrow_extracts_json_subvalue() {
     engine.with_session(|s| {
         s.execute("BEGIN")?;
         match s.execute("SELECT body ->> 'name' FROM t.public.docs WHERE id=1")? {
-            SqlResultSet::Rows { columns, rows } => {
+            SqlResultSet::Rows { columns, rows, .. } => {
                 assert_eq!(columns, vec!["body->>'name'".to_string()]);
                 match &rows[0][0] {
                     Value::String(ref v) => assert_eq!(v, "carol"),

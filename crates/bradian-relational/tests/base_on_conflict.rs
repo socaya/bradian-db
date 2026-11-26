@@ -89,7 +89,7 @@ fn on_conflict_returning_captures_both_shapes() {
         "INSERT INTO t.public.items(id, name, qty) VALUES(1, 'x', 11), (2, 'y', 22) ON CONFLICT (id) DO UPDATE SET qty = 99 RETURNING id, qty"
     ).unwrap();
     match rs {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id", "qty"]);
             assert_eq!(rows[0], vec![Value::Int64(1), Value::Int64(99)]);
             assert_eq!(rows[1], vec![Value::Int64(2), Value::Int64(22)]);

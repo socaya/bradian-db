@@ -183,7 +183,7 @@ fn cls_empty_readable_set_is_treated_as_cls_disabled() {
     let authz = AuthorizationContext::administrator("root");
     let rs = eng.execute_with_policy(
         "SELECT * FROM app.public.items", &policy, &authz).unwrap();
-    let SqlResultSet::Rows { columns, rows } = rs else { panic!(); };
+    let SqlResultSet::Rows { columns, rows, .. } = rs else { panic!(); };
     // Full schema returned.
     assert_eq!(columns, vec!["id".to_string(), "tenant".to_string(), "name".to_string()]);
     assert_eq!(rows.len(), 3);

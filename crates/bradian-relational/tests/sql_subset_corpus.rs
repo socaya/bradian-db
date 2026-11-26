@@ -67,7 +67,7 @@ fn literal_integer_positive() {
     let rows = db.execute("SELECT amount FROM test.public.items WHERE id=1").unwrap();
     assert_eq!(rows, SqlResultSet::Rows {
         columns: vec!["amount".into()],
-        rows: vec![vec![Value::Int64(42)]],
+        rows: vec![vec![Value::Int64(42)]], column_types: Vec::new(),
     });
 }
 
@@ -81,7 +81,7 @@ fn literal_integer_negative() {
         db.execute("SELECT amount FROM test.public.items WHERE id=1").unwrap(),
         SqlResultSet::Rows {
             columns: vec!["amount".into()],
-            rows: vec![vec![Value::Int64(-100)]],
+            rows: vec![vec![Value::Int64(-100)]], column_types: Vec::new(),
         },
     );
 }
@@ -100,15 +100,15 @@ fn literal_text_empty_and_escaped_and_utf8() {
     db.execute("INSERT INTO test.public.notes (id,body) VALUES (3,'é')").unwrap();
     assert_eq!(
         db.execute("SELECT body FROM test.public.notes WHERE id=1").unwrap(),
-        SqlResultSet::Rows { columns: vec!["body".into()], rows: vec![vec![Value::String(String::new())]] },
+        SqlResultSet::Rows { columns: vec!["body".into()], rows: vec![vec![Value::String(String::new())]], column_types: Vec::new() },
     );
     assert_eq!(
         db.execute("SELECT body FROM test.public.notes WHERE id=2").unwrap(),
-        SqlResultSet::Rows { columns: vec!["body".into()], rows: vec![vec![Value::String("it's ok".into())]] },
+        SqlResultSet::Rows { columns: vec!["body".into()], rows: vec![vec![Value::String("it's ok".into())]], column_types: Vec::new() },
     );
     assert_eq!(
         db.execute("SELECT body FROM test.public.notes WHERE id=3").unwrap(),
-        SqlResultSet::Rows { columns: vec!["body".into()], rows: vec![vec![Value::String("é".into())]] },
+        SqlResultSet::Rows { columns: vec!["body".into()], rows: vec![vec![Value::String("é".into())]], column_types: Vec::new() },
     );
 }
 
@@ -126,15 +126,15 @@ fn literal_boolean_and_null_case_insensitive() {
     db.execute("INSERT INTO test.public.flags (id,flag) VALUES (3,null)").unwrap();
     assert_eq!(
         db.execute("SELECT flag FROM test.public.flags WHERE id=1").unwrap(),
-        SqlResultSet::Rows { columns: vec!["flag".into()], rows: vec![vec![Value::Boolean(true)]] },
+        SqlResultSet::Rows { columns: vec!["flag".into()], rows: vec![vec![Value::Boolean(true)]], column_types: Vec::new() },
     );
     assert_eq!(
         db.execute("SELECT flag FROM test.public.flags WHERE id=2").unwrap(),
-        SqlResultSet::Rows { columns: vec!["flag".into()], rows: vec![vec![Value::Boolean(false)]] },
+        SqlResultSet::Rows { columns: vec!["flag".into()], rows: vec![vec![Value::Boolean(false)]], column_types: Vec::new() },
     );
     assert_eq!(
         db.execute("SELECT flag FROM test.public.flags WHERE id=3").unwrap(),
-        SqlResultSet::Rows { columns: vec!["flag".into()], rows: vec![vec![Value::Null]] },
+        SqlResultSet::Rows { columns: vec!["flag".into()], rows: vec![vec![Value::Null]], column_types: Vec::new() },
     );
 }
 
@@ -160,7 +160,7 @@ fn type_int32_and_int64_and_varchar_and_decimal_round_trip() {
     ).unwrap();
     let rows = db.execute("SELECT id,big,label,price FROM test.public.catalog WHERE id=1").unwrap();
     match rows {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["id", "big", "label", "price"]);
             assert_eq!(rows.len(), 1);
             assert!(matches!(rows[0][0], Value::Int32(1)));
@@ -203,7 +203,7 @@ fn ddl_create_and_insert_select_update_delete_cycle() {
         db.execute("SELECT * FROM test.public.items").unwrap(),
         SqlResultSet::Rows {
             columns: vec!["id".into(), "amount".into()],
-            rows: vec![vec![Value::Int64(1), Value::Int64(30)]],
+            rows: vec![vec![Value::Int64(1), Value::Int64(30)]], column_types: Vec::new(),
         },
     );
 }
@@ -287,7 +287,7 @@ fn sql_engine_session_commit_publishes_single_wal_batch() {
     }).unwrap();
     assert_eq!(
         db.execute("SELECT amount FROM test.public.items WHERE id=1").unwrap(),
-        SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(10)]] },
+        SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(10)]], column_types: Vec::new() },
     );
 }
 
@@ -305,7 +305,7 @@ fn sql_engine_session_rollback_discards_staged_changes() {
     }).unwrap();
     assert_eq!(
         db.execute("SELECT amount FROM test.public.items WHERE id=1").unwrap(),
-        SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(10)]] },
+        SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(10)]], column_types: Vec::new() },
     );
 }
 
@@ -338,11 +338,11 @@ fn domain_cross_table_commit_publishes_atomically() {
         s.execute("BEGIN")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(100)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(100)]], column_types: Vec::new() },
         );
         assert_eq!(
             s.execute("SELECT amount FROM bank.public.movements WHERE id=7")?,
-            SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(25)]] },
+            SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(25)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -373,7 +373,7 @@ fn domain_rollback_discards_cross_table_changes() {
         s.execute("BEGIN")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -390,7 +390,7 @@ fn history_begin_commit_round_trip() {
         s.execute("BEGIN")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1000)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -414,7 +414,7 @@ fn history_savepoint_rollback_to_discards_only_post_marker_work() {
         s.execute("BEGIN")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1100)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1100)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -429,7 +429,7 @@ fn history_begin_with_read_validation_is_accepted() {
         s.execute("BEGIN TRANSACTION WITH READ VALIDATION")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1000)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new() },
         );
         s.execute("COMMIT")?;
         Ok(())
@@ -447,7 +447,7 @@ fn update_expression_arithmetic_on_bigint() {
         s.execute("UPDATE bank.public.accounts SET balance = balance + 25 WHERE id=1")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1025)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1025)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -463,7 +463,7 @@ fn update_expression_parentheses_override_precedence() {
         s.execute("UPDATE bank.public.accounts SET balance = (balance + 10) * 2 WHERE id=1")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(2020)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(2020)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -486,7 +486,7 @@ fn ordered_order_by_limit_offset() {
         rows,
         SqlResultSet::Rows {
             columns: vec!["id".into()],
-            rows: vec![vec![Value::Int64(2)], vec![Value::Int64(1)]],
+            rows: vec![vec![Value::Int64(2)], vec![Value::Int64(1)]], column_types: Vec::new(),
         },
     );
 }
@@ -531,14 +531,14 @@ fn as_of_returns_committed_rows_at_lsn() {
         let now = s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?;
         assert_eq!(now, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(5000)]],
+            rows: vec![vec![Value::Int64(5000)]], column_types: Vec::new(),
         });
         let historical = s.execute(&format!(
             "SELECT balance FROM bank.public.accounts AS OF {snapshot_lsn} WHERE id=1"
         ))?;
         assert_eq!(historical, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(1000)]],
+            rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
         });
         s.execute("ROLLBACK")?;
         Ok(())
@@ -574,7 +574,7 @@ fn alter_add_nullable_column_lets_old_rows_read_null_when_epoch_writes_enabled()
         s.execute("BEGIN")?;
         assert_eq!(
             s.execute("SELECT memo FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["memo".into()], rows: vec![vec![Value::Null]] },
+            SqlResultSet::Rows { columns: vec!["memo".into()], rows: vec![vec![Value::Null]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -622,7 +622,7 @@ fn describe_table_as_of_returns_schema_rows() {
         Ok(r)
     }).unwrap();
     match rows {
-        SqlResultSet::Rows { columns, rows } => {
+        SqlResultSet::Rows { columns, rows, .. } => {
             assert_eq!(columns, vec!["column_name", "data_type", "nullable", "schema_registered_lsn"]);
             // At least the `id` and `balance` columns must be present.
             let names: Vec<_> = rows.iter().map(|r| match &r[0] {
@@ -664,7 +664,7 @@ fn release_savepoint_confirms_prior_work_and_allows_commit() {
         s.execute("BEGIN")?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1200)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1200)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -684,7 +684,7 @@ fn insert_default_uses_the_column_default_at_the_target_schema() {
         s.execute("INSERT INTO bank.public.accounts (id,balance,memo) VALUES (99,0,DEFAULT)")?;
         assert_eq!(
             s.execute("SELECT memo FROM bank.public.accounts WHERE id=99")?,
-            SqlResultSet::Rows { columns: vec!["memo".into()], rows: vec![vec![Value::String("none".into())]] },
+            SqlResultSet::Rows { columns: vec!["memo".into()], rows: vec![vec![Value::String("none".into())]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -705,7 +705,7 @@ fn update_expression_boundary_at_32_nested_parentheses_is_accepted() {
         s.execute(&expr)?;
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1001)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1001)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())
@@ -762,7 +762,7 @@ fn update_expression_boundary_at_128_nodes_is_accepted() {
         // Starting balance 1000 => -1000 + 63 = -937.
         assert_eq!(
             s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(-937)]] },
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(-937)]], column_types: Vec::new() },
         );
         s.execute("ROLLBACK")?;
         Ok(())

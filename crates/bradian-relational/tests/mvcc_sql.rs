@@ -54,7 +54,7 @@ fn mvcc_sql_accepts_g15_format_and_commits_across_two_tables() {
             s.execute("INSERT INTO banking.public.accounts(id,balance) VALUES(10,900)")?;
             s.execute("INSERT INTO banking.public.movements(id,account_id,amount) VALUES(5,10,-100)")?;
             assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=10")?,
-                SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(900)]] });
+                SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(900)]], column_types: Vec::new() });
             s.execute("COMMIT")?;
             assert!(s.last_commit_lsn().is_some());
             Ok(())
@@ -69,7 +69,7 @@ fn mvcc_sql_accepts_g15_format_and_commits_across_two_tables() {
         legacy_sql.with_session(|s| {
             s.execute("BEGIN")?;
             assert_eq!(s.execute("SELECT amount FROM banking.public.movements WHERE id=5")?,
-                SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(-100)]] });
+                SqlResultSet::Rows { columns: vec!["amount".into()], rows: vec![vec![Value::Int64(-100)]], column_types: Vec::new() });
             Ok(())
         }).unwrap();
     }
@@ -95,14 +95,14 @@ fn independent_sql_sessions_keep_original_snapshot_visible() {
         })?;
         assert_eq!(reader.snapshot_lsn(), Some(original));
         assert_eq!(reader.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1000)]] });
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new() });
         reader.execute("ROLLBACK")?;
         Ok(())
     }).unwrap();
     engine.with_session(|s| {
         s.execute("BEGIN")?;
         assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(800)]] });
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(800)]], column_types: Vec::new() });
         s.execute("ROLLBACK")?;
         Ok(())
     }).unwrap();
@@ -138,9 +138,9 @@ fn concurrent_disjoint_sql_updates_succeed_from_same_snapshot() {
     engine.with_session(|s| {
         s.execute("BEGIN")?;
         assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(950)]] });
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(950)]], column_types: Vec::new() });
         assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=2")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(450)]] });
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(450)]], column_types: Vec::new() });
         s.execute("ROLLBACK")?;
         Ok(())
     }).unwrap();
@@ -168,7 +168,7 @@ fn same_key_sql_writers_conflict_without_lost_update() {
     engine.with_session(|s| {
         s.execute("BEGIN")?;
         assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(850)]] });
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(850)]], column_types: Vec::new() });
         Ok(())
     }).unwrap();
 }
@@ -274,7 +274,7 @@ fn historical_versions_not_claimed_after_reopen_and_pins_released() {
     recovered.with_session(|s| {
         s.execute("BEGIN")?;
         assert_eq!(s.execute("SELECT balance FROM banking.public.accounts WHERE id=1")?,
-            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(777)]] });
+            SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![vec![Value::Int64(777)]], column_types: Vec::new() });
         Ok(())
     }).unwrap();
 }

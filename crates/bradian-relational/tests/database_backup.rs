@@ -49,14 +49,14 @@ fn assert_database(root: &std::path::Path, balance: i64) {
             session.execute("SELECT balance FROM banking.public.accounts WHERE id=10")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(balance)]],
+                rows: vec![vec![Value::Int64(balance)]], column_types: Vec::new(),
             },
         );
         assert_eq!(
             session.execute("SELECT amount FROM banking.public.movements WHERE id=4")?,
             SqlResultSet::Rows {
                 columns: vec!["amount".into()],
-                rows: vec![vec![Value::Int64(100)]],
+                rows: vec![vec![Value::Int64(100)]], column_types: Vec::new(),
             },
         );
         session.execute("ROLLBACK")?;

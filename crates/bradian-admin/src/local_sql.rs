@@ -413,7 +413,7 @@ mod tests {
     fn json_output_keeps_wide_numeric_and_temporal_values_exact() {
         let mut bytes = Vec::new();
         output(&mut bytes, 1, SqlResultSet::Rows { columns: vec!["id".into(),"decimal".into(),"time".into(),"uuid".into()],
-            rows: vec![vec![Value::Int64(i64::MAX),Value::Decimal(10_i128.pow(38)-1),Value::TimestampTz(i64::MIN),Value::Uuid([255;16])]] }, DEFAULT_OUTPUT_BYTES).unwrap();
+            rows: vec![vec![Value::Int64(i64::MAX),Value::Decimal(10_i128.pow(38)-1),Value::TimestampTz(i64::MIN),Value::Uuid([255;16])]], column_types: Vec::new() }, DEFAULT_OUTPUT_BYTES).unwrap();
         let json: Json = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["rows"][0][0]["value"], i64::MAX.to_string());
         assert_eq!(json["rows"][0][1]["unscaled"], (10_i128.pow(38)-1).to_string());

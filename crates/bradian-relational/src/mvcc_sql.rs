@@ -358,7 +358,7 @@ impl<'a> MvccSqlSession<'a> {
                 let (_, first_sql) = iter.next().expect("at least one part");
                 let first = self.execute(&first_sql)?;
                 let (columns, mut rows) = match first {
-                    SqlResultSet::Rows { columns, rows } => (columns, rows),
+                    SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
                     _ => return Err(SqlError::Unsupported(
                         "UNION requires every arm to be a SELECT".into())),
                 };
@@ -366,7 +366,7 @@ impl<'a> MvccSqlSession<'a> {
                 for (all, piece) in iter {
                     let next = self.execute(&piece)?;
                     let (next_cols, next_rows) = match next {
-                        SqlResultSet::Rows { columns, rows } => (columns, rows),
+                        SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
                         _ => return Err(SqlError::Unsupported(
                             "UNION requires every arm to be a SELECT".into())),
                     };
@@ -381,7 +381,7 @@ impl<'a> MvccSqlSession<'a> {
                     rows = crate::sql::dedup_rows(rows);
                     crate::sql::sort_distinct_output(&mut rows);
                 }
-                return Ok(SqlResultSet::Rows { columns, rows });
+                return Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() });
             }
         }
         let result = self.execute_inner(sql);
@@ -731,7 +731,7 @@ impl<'a> MvccSqlSession<'a> {
                             let value = crate::sql::evaluate_aggregate(&spec, &table, &rows)?;
                             return Ok(SqlResultSet::Rows {
                                 columns: vec![spec.result_column().into()],
-                                rows: vec![vec![value]],
+                                rows: vec![vec![value]], column_types: Vec::new(),
                             });
                         }
                         // ADR 0217 — grouped evaluation.
@@ -752,7 +752,24 @@ impl<'a> MvccSqlSession<'a> {
                             crate::sql::sort_distinct_output(&mut out);
                             out
                         } else { projected };
-                        Ok(SqlResultSet::Rows { columns, rows: projected })
+                        // ADR 0347 — source column_types from
+                        // the catalog when every projection
+                        // is a bare column.
+                        let column_types: Vec<crate::model::DataType> = {
+                            let mut types = Vec::with_capacity(plain_projections.len());
+                            let mut complete = true;
+                            for pj in &plain_projections {
+                                if let crate::sql::Projection::Column(name) = pj {
+                                    if name.contains('.') { complete = false; break; }
+                                    match crate::sql::locate(&table, name) {
+                                        Ok(idx) => types.push(table.columns[idx].data_type.clone()),
+                                        Err(_)  => { complete = false; break; }
+                                    }
+                                } else { complete = false; break; }
+                            }
+                            if complete { types } else { Vec::new() }
+                        };
+                        Ok(SqlResultSet::Rows { columns, rows: projected, column_types })
                     }
                     "update" => {
                         // ADR 0147 — deadline check before mutation.

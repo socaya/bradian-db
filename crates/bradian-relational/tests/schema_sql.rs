@@ -233,7 +233,7 @@ fn describe_and_select_column_names_use_the_historical_schema() {
             SqlResultSet::Rows { rows, .. } if rows.len() == 2));
         s.execute("BEGIN")?;
         match s.execute(&format!("SELECT * FROM bank.public.accounts AS OF {before}"))? {
-            SqlResultSet::Rows { columns, rows } => {
+            SqlResultSet::Rows { columns, rows, .. } => {
                 assert_eq!(columns, vec!["id", "balance"]);
                 assert!(rows.iter().all(|row| row.len() == 2));
             },

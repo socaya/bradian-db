@@ -56,7 +56,7 @@ fn verified_cutover_keeps_original_and_queries_typed_rows() {
         assert_eq!(s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(1000)]],
+                rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
             });
         s.execute("ROLLBACK")?;
         Ok(())
@@ -68,7 +68,7 @@ fn verified_cutover_keeps_original_and_queries_typed_rows() {
         assert_eq!(s.execute("SELECT id FROM bank.public.movements")?,
             SqlResultSet::Rows {
                 columns: vec!["id".into()],
-                rows: vec![vec![Value::Int64(8)]],
+                rows: vec![vec![Value::Int64(8)]], column_types: Vec::new(),
             });
         Ok(())
     }).unwrap();
@@ -99,22 +99,22 @@ fn historical_select_as_of_persists_across_restart() {
         let old = format!("SELECT balance FROM bank.public.accounts AS OF {before} WHERE id=1");
         assert_eq!(s.execute(&old)?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(1000)]],
+            rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
         });
         let newer = format!("SELECT balance FROM bank.public.accounts AS OF {after} WHERE id=1");
         assert_eq!(s.execute(&newer)?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(750)]],
+            rows: vec![vec![Value::Int64(750)]], column_types: Vec::new(),
         });
         let old_movements = format!("SELECT id FROM bank.public.movements AS OF {before}");
         assert_eq!(s.execute(&old_movements)?, SqlResultSet::Rows {
             columns: vec!["id".into()],
-            rows: vec![vec![Value::Int64(8)]],
+            rows: vec![vec![Value::Int64(8)]], column_types: Vec::new(),
         });
         let new_movements = format!("SELECT id FROM bank.public.movements AS OF {after}");
         assert_eq!(s.execute(&new_movements)?, SqlResultSet::Rows {
             columns: vec!["id".into()],
-            rows: vec![vec![Value::Int64(8)], vec![Value::Int64(9)]],
+            rows: vec![vec![Value::Int64(8)], vec![Value::Int64(9)]], column_types: Vec::new(),
         });
         s.execute("ROLLBACK")?;
         Ok(())
@@ -146,11 +146,11 @@ fn deletion_history_and_rollback_behave_correctly() {
             "SELECT balance FROM bank.public.accounts AS OF {before} WHERE id=2"
         ))?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(600)]],
+            rows: vec![vec![Value::Int64(600)]], column_types: Vec::new(),
         });
         assert_eq!(s.execute(&format!(
             "SELECT balance FROM bank.public.accounts AS OF {after} WHERE id=2"
-        ))?, SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![] });
+        ))?, SqlResultSet::Rows { columns: vec!["balance".into()], rows: vec![], column_types: Vec::new() });
         s.execute("ROLLBACK")?;
         Ok(())
     }).unwrap();
@@ -263,7 +263,7 @@ fn historical_sql_obeys_durable_retention_floor_after_reopen() {
             "SELECT balance FROM bank.public.accounts AS OF {new_commit} WHERE id=1"
         ))?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(600)]],
+            rows: vec![vec![Value::Int64(600)]], column_types: Vec::new(),
         });
         Ok(())
     }).unwrap();
@@ -385,13 +385,13 @@ fn g24_backup_restores_retained_history_and_preserves_source() {
             "SELECT balance FROM bank.public.accounts AS OF {old} WHERE id=1"
         ))?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(1000)]],
+            rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
         });
         assert_eq!(s.execute(&format!(
             "SELECT balance FROM bank.public.accounts AS OF {current} WHERE id=1"
         ))?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(400)]],
+            rows: vec![vec![Value::Int64(400)]], column_types: Vec::new(),
         });
         Ok(())
     }).unwrap();
@@ -464,7 +464,7 @@ fn g25_verified_g18_lifecycle_cutover_preserves_original_and_rows() {
                 session.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
                 SqlResultSet::Rows {
                     columns: vec!["balance".into()],
-                    rows: vec![vec![Value::Int64(1000)]],
+                    rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
                 }
             );
             Ok(())
@@ -533,7 +533,7 @@ fn g26_describe_table_as_of_returns_persisted_schema_epoch() {
             ))
         }).unwrap();
         match &expected {
-            SqlResultSet::Rows { columns, rows } => {
+            SqlResultSet::Rows { columns, rows, .. } => {
                 assert_eq!(columns, &vec![
                     "column_name".to_string(), "data_type".to_string(),
                     "nullable".to_string(), "schema_registered_lsn".to_string(),
@@ -658,13 +658,13 @@ fn g28_prepared_schema_intent_survives_restart_without_activating_ddl() {
         assert_eq!(session.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(1000)]],
+                rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
             });
         assert_eq!(session.execute(&format!(
             "SELECT balance FROM bank.public.accounts AS OF {old_lsn} WHERE id=1"
         ))?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(1000)]],
+            rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
         });
         Ok(())
     }).unwrap();
@@ -750,13 +750,13 @@ fn g29_abort_prepared_schema_survives_restart_and_keeps_catalog_unchanged() {
         assert_eq!(s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(1000)]],
+                rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
             });
         assert_eq!(s.execute(&format!(
             "SELECT balance FROM bank.public.accounts AS OF {original_lsn} WHERE id=1"
         ))?, SqlResultSet::Rows {
             columns: vec!["balance".into()],
-            rows: vec![vec![Value::Int64(1000)]],
+            rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
         });
         Ok(())
     }).unwrap();
@@ -834,7 +834,7 @@ fn g30_coordination_fence_survives_restart_and_keeps_original_schema() {
             session.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(1000)]],
+                rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
             }
         );
         Ok(())
@@ -949,7 +949,7 @@ fn g31_readiness_recovers_without_activating_the_schema() {
         assert_eq!(s.execute("SELECT balance FROM bank.public.accounts WHERE id=1")?,
             SqlResultSet::Rows {
                 columns: vec!["balance".into()],
-                rows: vec![vec![Value::Int64(1000)]],
+                rows: vec![vec![Value::Int64(1000)]], column_types: Vec::new(),
             });
         Ok(())
     }).unwrap();
