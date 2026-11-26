@@ -2092,6 +2092,58 @@ mod tests {
         server_handle.await.unwrap().unwrap();
     }
 
+    // ---------- ADR 0349: set-operator result types ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn union_carries_engine_types_when_every_arm_sources_them() {
+        // ADR 0349 — UNION ALL of two bare-column SELECTs
+        // each source Int64 column types; the combined
+        // result carries those types forward instead of
+        // dropping to inference.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        // Two arms, both `SELECT id FROM t.public.items`.
+        let reply = client.execute(
+            "SELECT id FROM t.public.items UNION ALL SELECT id FROM t.public.items"
+        ).await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, .. } => {
+                assert_eq!(column_types, vec![WireType::Int64]);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn union_distinct_preserves_engine_types_through_the_dedup_sort() {
+        // ADR 0349 — the UNION (no ALL) code path runs
+        // dedup + sort after merging the arms. Verify
+        // engine types survive that extra step.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT id, value FROM t.public.items UNION SELECT id, value FROM t.public.items"
+        ).await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, .. } => {
+                assert_eq!(column_types, vec![WireType::Int64, WireType::Int64]);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
     // ---------- ADR 0346: cancellation ----------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

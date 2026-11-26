@@ -357,22 +357,29 @@ impl<'a> MvccSqlSession<'a> {
                 let mut iter = parts.into_iter();
                 let (_, first_sql) = iter.next().expect("at least one part");
                 let first = self.execute(&first_sql)?;
-                let (columns, mut rows) = match first {
-                    SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
+                let (columns, mut rows, mut column_types) = match first {
+                    SqlResultSet::Rows { columns, rows, column_types } =>
+                        (columns, rows, column_types),
                     _ => return Err(SqlError::Unsupported(
                         "UNION requires every arm to be a SELECT".into())),
                 };
                 let mut any_dedup = false;
                 for (all, piece) in iter {
                     let next = self.execute(&piece)?;
-                    let (next_cols, next_rows) = match next {
-                        SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
+                    let (next_cols, next_rows, next_types) = match next {
+                        SqlResultSet::Rows { columns, rows, column_types } =>
+                            (columns, rows, column_types),
                         _ => return Err(SqlError::Unsupported(
                             "UNION requires every arm to be a SELECT".into())),
                     };
                     if next_cols.len() != columns.len() {
                         return Err(SqlError::Unsupported(
                             "UNION arms must have the same column count".into()));
+                    }
+                    // ADR 0349 — carry engine types only
+                    // when every arm sourced them.
+                    if next_types.len() != column_types.len() {
+                        column_types.clear();
                     }
                     rows.extend(next_rows);
                     if !all { any_dedup = true; }
@@ -381,7 +388,7 @@ impl<'a> MvccSqlSession<'a> {
                     rows = crate::sql::dedup_rows(rows);
                     crate::sql::sort_distinct_output(&mut rows);
                 }
-                return Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() });
+                return Ok(SqlResultSet::Rows { columns, rows, column_types });
             }
         }
         let result = self.execute_inner(sql);

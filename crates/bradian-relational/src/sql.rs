@@ -5366,8 +5366,9 @@ impl SqlEngine {
                 let (_, first_sql) = parts_iter.next().expect("at least one part");
                 let first = self.execute_impl_single(
                     &first_sql, control, budget.as_deref_mut(), policy, authz)?;
-                let (mut columns, mut rows) = match first {
-                    SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
+                let (mut columns, mut rows, mut column_types) = match first {
+                    SqlResultSet::Rows { columns, rows, column_types } =>
+                        (columns, rows, column_types),
                     _ => return Err(SqlError::Unsupported(
                         "UNION requires every arm to be a SELECT".into())),
                 };
@@ -5375,14 +5376,24 @@ impl SqlEngine {
                 for (all, piece) in parts_iter {
                     let next = self.execute_impl_single(
                         &piece, control, budget.as_deref_mut(), policy, authz)?;
-                    let (next_cols, next_rows) = match next {
-                        SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
+                    let (next_cols, next_rows, next_types) = match next {
+                        SqlResultSet::Rows { columns, rows, column_types } =>
+                            (columns, rows, column_types),
                         _ => return Err(SqlError::Unsupported(
                             "UNION requires every arm to be a SELECT".into())),
                     };
                     if next_cols.len() != columns.len() {
                         return Err(SqlError::Unsupported(
                             "UNION arms must have the same column count".into()));
+                    }
+                    // ADR 0349 — if ANY arm couldn't source
+                    // types, drop the whole vec back to
+                    // empty so the wire layer falls back to
+                    // row inference. A principled per-column
+                    // type-check across arms (promotion or
+                    // reject) is the next slice.
+                    if next_types.len() != column_types.len() {
+                        column_types.clear();
                     }
                     rows.extend(next_rows);
                     if !all { any_dedup = true; }
@@ -5393,7 +5404,7 @@ impl SqlEngine {
                     sort_distinct_output(&mut rows);
                 }
                 let _ = &mut columns;
-                return Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() });
+                return Ok(SqlResultSet::Rows { columns, rows, column_types });
             }
         }
         self.execute_impl_single(sql, control, budget, policy, authz)
@@ -5416,8 +5427,9 @@ impl SqlEngine {
         let (_, first_sql) = iter.next().expect("at least one arm");
         let first = self.execute_impl_single(
             first_sql, control, budget.as_deref_mut(), policy, authz)?;
-        let (columns, mut rows) = match first {
-            SqlResultSet::Rows { columns, rows, .. } => (columns, rows),
+        let (columns, mut rows, mut column_types) = match first {
+            SqlResultSet::Rows { columns, rows, column_types } =>
+                (columns, rows, column_types),
             _ => return Err(SqlError::Unsupported(
                 "set operator requires every arm to be a SELECT".into())),
         };
@@ -5426,10 +5438,17 @@ impl SqlEngine {
             let next = self.execute_impl_single(
                 arm_sql, control, budget.as_deref_mut(), policy, authz)?;
             let next_rows = match next {
-                SqlResultSet::Rows { columns: nc, rows, .. } => {
+                SqlResultSet::Rows { columns: nc, rows, column_types: nt } => {
                     if nc.len() != column_count {
                         return Err(SqlError::Unsupported(
                             "set-operator arms must have the same column count".into()));
+                    }
+                    // ADR 0349 — if ANY arm lacks engine
+                    // types, drop the accumulator so the
+                    // wire layer falls back to row
+                    // inference.
+                    if nt.len() != column_types.len() {
+                        column_types.clear();
                     }
                     rows
                 }
@@ -5473,7 +5492,7 @@ impl SqlEngine {
                 }
             };
         }
-        Ok(SqlResultSet::Rows { columns, rows, column_types: Vec::new() })
+        Ok(SqlResultSet::Rows { columns, rows, column_types })
     }
 
     /// ADR 0226 — execute a simple INNER JOIN between two tables.
