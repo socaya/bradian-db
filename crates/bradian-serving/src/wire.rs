@@ -2241,6 +2241,44 @@ mod tests {
         server_handle.await.unwrap().unwrap();
     }
 
+    // ---------- ADR 0353: qualified alias.col in grouped join ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grouped_join_qualified_select_reports_engine_types() {
+        // ADR 0353 — `SELECT a.id, COUNT(*) FROM items AS a
+        // JOIN items2 AS b ON a.id = b.id GROUP BY a.id`
+        // projects a qualified column plus an aggregate.
+        // The dispatch builds a composite table where
+        // columns are literally named "a.id", "a.value",
+        // etc. — so `locate(composite, "a.id")` resolves
+        // via the same catalog path bare columns use.
+        let (_dir, engine) = fresh_engine();
+        engine.execute(
+            "CREATE TABLE t.public.items2 (id BIGINT NOT NULL, note BIGINT, PRIMARY KEY(id))"
+        ).unwrap();
+        engine.execute("INSERT INTO t.public.items2(id, note) VALUES(1, 42)").unwrap();
+        engine.execute("INSERT INTO t.public.items2(id, note) VALUES(2, 43)").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT a.id, COUNT(*) FROM t.public.items AS a \
+             JOIN t.public.items2 AS b ON a.id = b.id \
+             GROUP BY a.id"
+        ).await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, rows, .. } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(column_types, vec![WireType::Int64, WireType::Int64]);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
     // ---------- ADR 0352: per-column set-op type agreement ----------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
