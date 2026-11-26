@@ -5483,13 +5483,19 @@ impl SqlEngine {
                         return Err(SqlError::Unsupported(
                             "UNION arms must have the same column count".into()));
                     }
-                    // ADR 0349 — if ANY arm couldn't source
-                    // types, drop the whole vec back to
-                    // empty so the wire layer falls back to
-                    // row inference. A principled per-column
-                    // type-check across arms (promotion or
-                    // reject) is the next slice.
-                    if next_types.len() != column_types.len() {
+                    // ADR 0349 + 0352 — drop the whole vec
+                    // back to empty if any arm couldn't
+                    // source types OR if any column
+                    // disagrees element-wise with the
+                    // accumulator. Cross-arm promotion is
+                    // a future slice; the conservative
+                    // choice is to fall back to row
+                    // inference rather than claim a type
+                    // the payload may not satisfy.
+                    if next_types.len() != column_types.len()
+                        || next_types.iter().zip(&column_types)
+                            .any(|(a, b)| a != b)
+                    {
                         column_types.clear();
                     }
                     rows.extend(next_rows);
@@ -5540,11 +5546,15 @@ impl SqlEngine {
                         return Err(SqlError::Unsupported(
                             "set-operator arms must have the same column count".into()));
                     }
-                    // ADR 0349 — if ANY arm lacks engine
-                    // types, drop the accumulator so the
-                    // wire layer falls back to row
-                    // inference.
-                    if nt.len() != column_types.len() {
+                    // ADR 0349 + 0352 — drop the whole vec
+                    // back to empty if any arm couldn't
+                    // source types OR if any column
+                    // disagrees element-wise with the
+                    // accumulator.
+                    if nt.len() != column_types.len()
+                        || nt.iter().zip(&column_types)
+                            .any(|(a, b)| a != b)
+                    {
                         column_types.clear();
                     }
                     rows

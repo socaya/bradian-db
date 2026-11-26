@@ -353,9 +353,13 @@ impl<'a> DomainSqlSession<'a> {
                         return Err(SqlError::Unsupported(
                             "UNION arms must have the same column count".into()));
                     }
-                    // ADR 0349 — carry engine types only
-                    // when every arm sourced them.
-                    if next_types.len() != column_types.len() {
+                    // ADR 0349 + 0352 — carry engine types
+                    // only when every arm sourced them AND
+                    // every column matches element-wise.
+                    if next_types.len() != column_types.len()
+                        || next_types.iter().zip(&column_types)
+                            .any(|(a, b)| a != b)
+                    {
                         column_types.clear();
                     }
                     rows.extend(next_rows);
