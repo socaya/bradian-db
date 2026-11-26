@@ -131,12 +131,34 @@ pub fn p256_public_key_from_jwk(jwk: &Jwk)
     Ok(pk.into())
 }
 
-/// ADR 0342 — a verifying key the cache stores. One
-/// variant per algorithm family.
+/// ADR 0344 — convert a `kty: "OKP", crv: "Ed25519"` JWK
+/// entry into an `ed25519_dalek::VerifyingKey`. The `x`
+/// field is a 32-byte base64url-encoded raw public key.
+pub fn ed25519_public_key_from_jwk(jwk: &Jwk)
+    -> JwksResult<ed25519_dalek::VerifyingKey>
+{
+    if jwk.kty != "OKP" {
+        return Err(JwksError::Malformed("kty must be \"OKP\""));
+    }
+    if jwk.crv.as_deref() != Some("Ed25519") {
+        return Err(JwksError::Malformed("crv must be \"Ed25519\""));
+    }
+    let x_b64 = jwk.x.as_deref().ok_or(JwksError::Malformed("missing x"))?;
+    let bytes = URL_SAFE_NO_PAD.decode(x_b64).map_err(|e|
+        JwksError::RsaKey(format!("x base64: {e}")))?;
+    let arr: [u8; 32] = bytes.as_slice().try_into()
+        .map_err(|_| JwksError::Malformed("Ed25519 x must decode to 32 bytes"))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&arr)
+        .map_err(|e| JwksError::RsaKey(format!("Ed25519 public-key invalid: {e}")))
+}
+
+/// ADR 0342 + 0344 — a verifying key the cache stores.
+/// One variant per algorithm family.
 #[derive(Clone, Debug)]
 pub enum JwkVerifyingKey {
     Rsa(RsaPublicKey),
     Es256(p256::ecdsa::VerifyingKey),
+    Eddsa(ed25519_dalek::VerifyingKey),
 }
 
 impl JwkVerifyingKey {
@@ -144,6 +166,7 @@ impl JwkVerifyingKey {
         match jwk.kty.as_str() {
             "RSA" => Ok(Self::Rsa(rsa_public_key_from_jwk(jwk)?)),
             "EC"  => Ok(Self::Es256(p256_public_key_from_jwk(jwk)?)),
+            "OKP" => Ok(Self::Eddsa(ed25519_public_key_from_jwk(jwk)?)),
             _     => Err(JwksError::Malformed("unsupported kty")),
         }
     }
@@ -202,7 +225,7 @@ impl JwksCache {
         let mut snap = Snapshot::default();
         for jwk in &set.keys {
             let key = match jwk.kty.as_str() {
-                "RSA" | "EC" => JwkVerifyingKey::from_jwk(jwk)?,
+                "RSA" | "EC" | "OKP" => JwkVerifyingKey::from_jwk(jwk)?,
                 _ => continue,
             };
             match jwk.kid.as_ref() {
@@ -325,6 +348,8 @@ impl JwksCache {
                 crate::enterprise_identity::JwtRs256Verifier::new(rsa_key).verify(token)?,
             JwkVerifyingKey::Es256(ec_key) =>
                 crate::enterprise_identity::JwtEs256Verifier::new(ec_key).verify(token)?,
+            JwkVerifyingKey::Eddsa(ed_key) =>
+                crate::enterprise_identity::JwtEddsaVerifier::new(ed_key).verify(token)?,
         })
     }
 }
@@ -711,5 +736,96 @@ mod tests {
         // break verification via a forged kid.
         let _ = new_h.clone();
         format!("{new_h}.{}.{}", parts[1], parts[2])
+    }
+
+    // ---------- ADR 0344: OKP / Ed25519 JWK support ----------
+
+    use ed25519_dalek::SigningKey as EdSigningKey;
+    #[allow(unused_imports)]
+    use ed25519_dalek::Signer as _;
+
+    fn fixture_ed_keypair(seed: u64) -> (EdSigningKey, ed25519_dalek::VerifyingKey) {
+        use rand::RngCore;
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let mut secret = [0u8; 32];
+        rng.fill_bytes(&mut secret);
+        let sk = EdSigningKey::from_bytes(&secret);
+        let vk = sk.verifying_key();
+        (sk, vk)
+    }
+
+    fn jwk_from_ed_pub(vk: &ed25519_dalek::VerifyingKey, kid: Option<&str>) -> Jwk {
+        Jwk {
+            kty: "OKP".into(),
+            kid: kid.map(str::to_string),
+            alg: Some("EdDSA".into()),
+            use_: Some("sig".into()),
+            n: None, e: None,
+            crv: Some("Ed25519".into()),
+            x: Some(B64.encode(vk.as_bytes())),
+            y: None,
+        }
+    }
+
+    fn mint_eddsa(sk: &EdSigningKey, kid: Option<&str>,
+                  claims: serde_json::Value) -> String {
+        let mut header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT" });
+        if let Some(k) = kid { header["kid"] = serde_json::Value::String(k.into()); }
+        let h = B64.encode(serde_json::to_vec(&header).unwrap());
+        let p = B64.encode(serde_json::to_vec(&claims).unwrap());
+        let signing = format!("{h}.{p}");
+        let sig = sk.sign(signing.as_bytes());
+        format!("{signing}.{}", B64.encode(sig.to_bytes()))
+    }
+
+    #[test]
+    fn okp_jwk_round_trips_through_ed25519_verifying_key() {
+        let (_sk, vk) = fixture_ed_keypair(1);
+        let jwk = jwk_from_ed_pub(&vk, Some("ed-1"));
+        let back = ed25519_public_key_from_jwk(&jwk).unwrap();
+        assert_eq!(back.as_bytes(), vk.as_bytes());
+    }
+
+    #[test]
+    fn okp_jwk_requires_ed25519_curve() {
+        let (_, vk) = fixture_ed_keypair(2);
+        let mut jwk = jwk_from_ed_pub(&vk, None);
+        jwk.crv = Some("Ed448".into());
+        assert!(matches!(ed25519_public_key_from_jwk(&jwk),
+            Err(JwksError::Malformed("crv must be \"Ed25519\""))));
+    }
+
+    #[test]
+    fn okp_jwk_missing_x_or_wrong_length_rejected() {
+        let (_, vk) = fixture_ed_keypair(3);
+        let mut jwk = jwk_from_ed_pub(&vk, None);
+        jwk.x = None;
+        assert!(matches!(ed25519_public_key_from_jwk(&jwk),
+            Err(JwksError::Malformed("missing x"))));
+        jwk.x = Some(B64.encode([0u8; 16]));   // too short
+        assert!(matches!(ed25519_public_key_from_jwk(&jwk),
+            Err(JwksError::Malformed("Ed25519 x must decode to 32 bytes"))));
+    }
+
+    #[test]
+    fn cache_dispatches_rsa_ec_and_ed_keys_by_variant() {
+        let (sk_rsa, pub_rsa) = fixture_key(20);
+        let (_sk_ec, pub_ec)  = fixture_ec_keypair(21);
+        let _ = sk_rsa;
+        let _ = pub_ec;
+        let (sk_ed,  pub_ed)  = fixture_ed_keypair(22);
+        let set = JwkSet { keys: vec![
+            jwk_from_pub(&pub_rsa, Some("rsa-key")),
+            jwk_from_ed_pub(&pub_ed, Some("ed-key")),
+        ]};
+        let cache = JwksCache::new(Duration::from_secs(60));
+        cache.load(&set).unwrap();
+        assert_eq!(cache.len(), 2);
+        // Ed25519-signed token verified via EdDSA path.
+        let ed_token = mint_eddsa(&sk_ed, Some("ed-key"),
+            serde_json::json!({ "sub": "ed-user", "exp": u64::MAX }));
+        let v = cache.verify(&ed_token).unwrap();
+        assert_eq!(v.header.alg, "EdDSA");
+        assert_eq!(v.std.sub.as_deref(), Some("ed-user"));
     }
 }
