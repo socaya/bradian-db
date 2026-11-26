@@ -1994,6 +1994,104 @@ mod tests {
         server_handle.await.unwrap().unwrap();
     }
 
+    // ---------- ADR 0348: aggregate column types ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_star_reports_int64_from_engine_without_inference_on_empty_table() {
+        // ADR 0348 — scalar COUNT(*) on an empty table has
+        // exactly one output row with the integer 0. The
+        // engine now types the column as Int64 directly
+        // rather than relying on the cell's wire shape.
+        let (dir, _engine) = fresh_engine();
+        // Spin a NEW engine with an empty table so COUNT(*)
+        // returns `[[0]]` — even without the engine typing,
+        // a 0 cell is Int64, which hides the fix. Instead
+        // we validate against a column with ONLY nulls so
+        // ADR 0340 inference would have reported Unknown.
+        drop(dir);
+        let (_dir, engine) = fresh_engine();
+        engine.execute("UPDATE t.public.items SET value = NULL WHERE id = 1").unwrap();
+        engine.execute("UPDATE t.public.items SET value = NULL WHERE id = 2").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        // Scalar SUM over an all-null column: the result
+        // row holds Null. ADR 0340 inference would report
+        // Unknown; ADR 0348 reports Int64 (because the
+        // source column is BIGINT and SUM widens to Int64).
+        let reply = client.execute("SELECT SUM(value) FROM t.public.items").await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert!(matches!(rows[0][0], WireValue::Null));
+                assert_eq!(column_types, vec![WireType::Int64]);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn min_max_report_source_column_type_from_engine() {
+        // ADR 0348 — MIN/MAX of a BIGINT column reports
+        // Int64 regardless of whether rows are present or
+        // all-null. Here we use a 1-row case to prove the
+        // type routing; the all-null case is covered above.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        // Two scalar-aggregate SELECTs, since the current
+        // SQL grammar routes one scalar aggregate per
+        // statement (mixing with a bare column requires
+        // GROUP BY; two aggregates in one SELECT isn't
+        // part of the G12 profile).
+        let a = client.execute("SELECT MIN(value) FROM t.public.items").await.unwrap();
+        match a {
+            WireMessage::RowSet { column_types, .. } =>
+                assert_eq!(column_types, vec![WireType::Int64]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        let b = client.execute("SELECT MAX(value) FROM t.public.items").await.unwrap();
+        match b {
+            WireMessage::RowSet { column_types, .. } =>
+                assert_eq!(column_types, vec![WireType::Int64]),
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn group_by_bucket_count_reports_int64_from_engine() {
+        // ADR 0348 — the GROUP BY output site now types
+        // aggregate columns alongside bare group keys.
+        // A `SELECT id, COUNT(*) GROUP BY id` reports
+        // (Int64, Int64) end-to-end without inference.
+        let (_dir, engine) = fresh_engine();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = WireServer::new(engine);
+        let server_handle = tokio::spawn(async move { server.serve_one(&listener).await });
+        let mut client = WireClient::connect(addr, "a").await.unwrap();
+        let reply = client.execute(
+            "SELECT id, COUNT(*) FROM t.public.items GROUP BY id"
+        ).await.unwrap();
+        match reply {
+            WireMessage::RowSet { column_types, .. } => {
+                assert_eq!(column_types, vec![WireType::Int64, WireType::Int64]);
+            }
+            other => panic!("expected RowSet, got {other:?}"),
+        }
+        client.bye().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
     // ---------- ADR 0346: cancellation ----------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

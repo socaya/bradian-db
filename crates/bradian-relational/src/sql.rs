@@ -1288,6 +1288,54 @@ impl AggSpec {
     }
 }
 
+/// ADR 0348 — engine-sourced type of an aggregate output.
+/// Mirrors the Value variant produced by `evaluate_aggregate`:
+///
+/// | Spec                          | Output `DataType`                                |
+/// |-------------------------------|--------------------------------------------------|
+/// | `CountStar`                   | `Int64`                                          |
+/// | `CountCol` / `CountDistinct`  | `Int64`                                          |
+/// | `Min(col)` / `Max(col)`       | source column's `DataType`                       |
+/// | `Sum(col)` on `Int32/Int64`   | `Int64`                                          |
+/// | `Sum(col)` on `Decimal{..}`   | same `Decimal` (scale preserved)                 |
+/// | `Avg(col)` on `Int32/Int64`   | `Int64` (truncated)                              |
+/// | `Avg(col)` on `Decimal{..}`   | same `Decimal` (scale preserved)                 |
+/// | `*Expr` variants              | `None` — evaluated over an arbitrary `FuncExpr`  |
+///
+/// Returns `None` for any case the engine can't type
+/// statically; callers downstream fall back to ADR 0340
+/// row-based inference at the wire boundary.
+pub(crate) fn aggregate_result_type(
+    spec: &AggSpec, table: &Table,
+) -> Option<DataType> {
+    match spec {
+        AggSpec::CountStar
+            | AggSpec::CountCol(_)
+            | AggSpec::CountDistinct(_) => Some(DataType::Int64),
+        AggSpec::Min(c) | AggSpec::Max(c) => {
+            let p = locate(table, c).ok()?;
+            Some(table.columns[p].data_type.clone())
+        }
+        AggSpec::Sum(c) | AggSpec::Avg(c) => {
+            let p = locate(table, c).ok()?;
+            match &table.columns[p].data_type {
+                DataType::Int32 | DataType::Int64 => Some(DataType::Int64),
+                dt @ DataType::Decimal { .. } => Some(dt.clone()),
+                // Non-numeric source will error at
+                // evaluate_aggregate; no type to report.
+                _ => None,
+            }
+        }
+        // ADR 0237 — aggregate over scalar FuncExpr. The
+        // engine doesn't statically type function output
+        // yet; fall back to inference.
+        AggSpec::MinExpr(_) | AggSpec::MaxExpr(_)
+        | AggSpec::SumExpr(_) | AggSpec::AvgExpr(_)
+        | AggSpec::CountColExpr(_)
+        | AggSpec::CountDistinctExpr(_) => None,
+    }
+}
+
 /// ADR 0223 — ON CONFLICT (pk_cols) DO NOTHING | DO UPDATE SET …
 /// The conflict target is scoped to the primary-key column set for
 /// the MVP; UNIQUE-key targets are a future extension.
@@ -2927,11 +2975,12 @@ pub(crate) fn evaluate_grouped(
         }
         output_rows.push(out);
     }
-    // ADR 0347 — GROUP BY output: when every select_item
-    // is a bare column that resolves to a group key, source
-    // the DataType from the catalog. Mixed aggregate/func
-    // items drop to the empty marker so the wire layer uses
-    // inference for the full row.
+    // ADR 0347 + 0348 — GROUP BY output: bare-column
+    // items resolve against `group_keys`/`table.columns`;
+    // aggregate items go through `aggregate_result_type`.
+    // A single un-typable item (scalar function, expr
+    // aggregate) drops the whole vec back to empty so
+    // the wire layer uses row inference for the row.
     let column_types: Vec<crate::model::DataType> = {
         let mut types = Vec::with_capacity(items.len());
         let mut complete = true;
@@ -2941,6 +2990,12 @@ pub(crate) fn evaluate_grouped(
                     match locate(table, name) {
                         Ok(idx) => types.push(table.columns[idx].data_type.clone()),
                         Err(_)  => { complete = false; break; }
+                    }
+                }
+                SelectItem::Agg(spec) => {
+                    match aggregate_result_type(spec, table) {
+                        Some(t) => types.push(t),
+                        None    => { complete = false; break; }
                     }
                 }
                 _ => { complete = false; break; }
@@ -5668,9 +5723,12 @@ impl SqlEngine {
         if group_keys.is_empty() {
             if let Some(spec) = scalar_aggregate {
                 let value = evaluate_aggregate(&spec, composite, &composite_rows)?;
+                // ADR 0348 — engine-sourced aggregate type.
+                let column_types = aggregate_result_type(&spec, composite)
+                    .map(|t| vec![t]).unwrap_or_default();
                 return Ok(SqlResultSet::Rows {
                     columns: vec![spec.result_column().into()],
-                    rows: vec![vec![value]], column_types: Vec::new(),
+                    rows: vec![vec![value]], column_types,
                 });
             }
             return Err(SqlError::Unsupported(
@@ -6480,9 +6538,12 @@ impl SqlEngine {
                 // the filtered scan into a single-row result.
                 if let Some(spec) = scalar_aggregate {
                     let value = evaluate_aggregate(&spec, &table, &all)?;
+                    // ADR 0348 — engine-sourced aggregate type.
+                    let column_types = aggregate_result_type(&spec, &table)
+                        .map(|t| vec![t]).unwrap_or_default();
                     return Ok(SqlResultSet::Rows {
                         columns: vec![spec.result_column().into()],
-                        rows: vec![vec![value]], column_types: Vec::new(),
+                        rows: vec![vec![value]], column_types,
                     });
                 }
                 // ADR 0217 — grouped evaluation: bucket by group

@@ -716,9 +716,12 @@ impl<'a> DomainSqlSession<'a> {
                         // ADR 0213/0214/0215/0216 — scalar aggregate.
                         if let Some(spec) = scalar_aggregate {
                             let value = crate::sql::evaluate_aggregate(&spec, &table, &rows)?;
+                            // ADR 0348 — engine-sourced aggregate type.
+                            let column_types = crate::sql::aggregate_result_type(&spec, &table)
+                                .map(|t| vec![t]).unwrap_or_default();
                             return Ok(SqlResultSet::Rows {
                                 columns: vec![spec.result_column().into()],
-                                rows: vec![vec![value]], column_types: Vec::new(),
+                                rows: vec![vec![value]], column_types,
                             });
                         }
                         // ADR 0217 — grouped evaluation.
