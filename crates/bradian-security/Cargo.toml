@@ -29,6 +29,8 @@ subtle      = { workspace = true }
 rsa         = { workspace = true }
 # ADR 0341 — enterprise OIDC JWT verification (ES256).
 p256        = { workspace = true }
+# ADR 0343 — enterprise OIDC JWT verification (EdDSA / Ed25519).
+ed25519-dalek = { workspace = true }
 # ADR 0329 — JWKS fetch for RS256 key rotation.
 reqwest     = { workspace = true }
 tokio       = { workspace = true }

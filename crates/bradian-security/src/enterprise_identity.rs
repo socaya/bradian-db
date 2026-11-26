@@ -402,6 +402,110 @@ impl JwtEs256Verifier {
 }
 
 // ---------------------------------------------------------------------------
+// ADR 0343 — EdDSA verifier (Ed25519).
+
+#[allow(unused_imports)]
+use ed25519_dalek::Verifier as _Ed25519Verifier;
+use ed25519_dalek::{Signature as Ed25519Signature,
+    VerifyingKey as Ed25519VerifyingKey};
+
+/// EdDSA (Ed25519) verifier. JWS alg name is `"EdDSA"`
+/// per RFC 8037.
+#[derive(Clone, Debug)]
+pub struct JwtEddsaVerifier {
+    key: Ed25519VerifyingKey,
+    expected_iss: Option<String>,
+    expected_aud: Option<String>,
+    skew_secs:    u64,
+}
+
+impl JwtEddsaVerifier {
+    pub fn new(key: Ed25519VerifyingKey) -> Self {
+        Self { key, expected_iss: None, expected_aud: None, skew_secs: 30 }
+    }
+
+    /// Load from a PEM-encoded SPKI
+    /// `-----BEGIN PUBLIC KEY-----` block.
+    pub fn from_public_key_pem(pem: &str) -> JwtResult<Self> {
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        let key = Ed25519VerifyingKey::from_public_key_pem(pem)
+            .map_err(|e| JwtError::KeyParse(format!("SPKI PEM: {e}")))?;
+        Ok(Self::new(key))
+    }
+
+    pub fn with_issuer  (mut self, iss: impl Into<String>) -> Self {
+        self.expected_iss = Some(iss.into()); self
+    }
+    pub fn with_audience(mut self, aud: impl Into<String>) -> Self {
+        self.expected_aud = Some(aud.into()); self
+    }
+    pub fn with_clock_skew_secs(mut self, secs: u64) -> Self {
+        self.skew_secs = secs; self
+    }
+
+    pub fn verify(&self, token: &str) -> JwtResult<Verified> {
+        self.verify_at(token, SystemTime::now())
+    }
+
+    pub fn verify_at(&self, token: &str, now: SystemTime) -> JwtResult<Verified> {
+        let mut parts = token.split('.');
+        let h_b64 = parts.next().ok_or(JwtError::Malformed("missing header"))?;
+        let p_b64 = parts.next().ok_or(JwtError::Malformed("missing payload"))?;
+        let s_b64 = parts.next().ok_or(JwtError::Malformed("missing signature"))?;
+        if parts.next().is_some() {
+            return Err(JwtError::Malformed("extra segments after signature"));
+        }
+
+        let header_bytes  = decode_b64(h_b64)?;
+        let payload_bytes = decode_b64(p_b64)?;
+        let signature     = decode_b64(s_b64)?;
+
+        let header: JwtHeader = serde_json::from_slice(&header_bytes)
+            .map_err(|e| JwtError::Json(format!("header: {e}")))?;
+        if header.alg != "EdDSA" {
+            return Err(JwtError::UnsupportedAlg(header.alg.clone()));
+        }
+
+        // Ed25519 JWS signatures are 64 bytes of R||S.
+        let sig: Ed25519Signature = Ed25519Signature::from_slice(&signature)
+            .map_err(|_| JwtError::BadSignature)?;
+        let signing_input = format!("{h_b64}.{p_b64}");
+        self.key.verify(signing_input.as_bytes(), &sig)
+            .map_err(|_| JwtError::BadSignature)?;
+
+        let claims: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .map_err(|e| JwtError::Json(format!("payload: {e}")))?;
+        let std: StandardClaims = serde_json::from_slice(&payload_bytes)
+            .map_err(|e| JwtError::Json(format!("standard-claims: {e}")))?;
+
+        let now_secs = now.duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+        if let Some(exp) = std.exp {
+            if now_secs > exp.saturating_add(self.skew_secs) {
+                return Err(JwtError::Expired { exp, now: now_secs });
+            }
+        }
+        if let Some(nbf) = std.nbf {
+            if now_secs.saturating_add(self.skew_secs) < nbf {
+                return Err(JwtError::NotYetValid { nbf, now: now_secs });
+            }
+        }
+        if let Some(want) = &self.expected_iss {
+            match &std.iss {
+                Some(got) if got == want => {}
+                _ => return Err(JwtError::BadSignature),
+            }
+        }
+        if let Some(want) = &self.expected_aud {
+            if !matches_audience(&std.aud, want) {
+                return Err(JwtError::BadSignature);
+            }
+        }
+        Ok(Verified { header, claims, std })
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 fn decode_b64(s: &str) -> JwtResult<Vec<u8>> {
     URL_SAFE_NO_PAD.decode(s).map_err(|e| JwtError::Base64(format!("{e}")))
@@ -781,6 +885,114 @@ mod tests {
             .verify_at(&token, now_at(0)).unwrap();
         let (_, vk2) = fixture_ec_keypair(7);
         let bad = JwtEs256Verifier::new(vk2).with_issuer("https://other");
+        assert_eq!(bad.verify_at(&token, now_at(0)).unwrap_err(),
+            JwtError::BadSignature);
+    }
+
+    // ----------------------------------------------------------
+    // ADR 0343 — EdDSA (Ed25519) tests.
+
+    #[allow(unused_imports)]
+    use ed25519_dalek::Signer as _;
+    use ed25519_dalek::SigningKey as EdSigningKey;
+    #[allow(unused_imports)]
+    use ed25519_dalek::pkcs8::EncodePublicKey as _;
+
+    fn fixture_ed_keypair(seed: u64) -> (EdSigningKey, Ed25519VerifyingKey) {
+        use rand::RngCore;
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let mut secret = [0u8; 32];
+        rng.fill_bytes(&mut secret);
+        let sk = EdSigningKey::from_bytes(&secret);
+        let vk = sk.verifying_key();
+        (sk, vk)
+    }
+
+    fn mint_eddsa(sk: &EdSigningKey, claims: serde_json::Value) -> String {
+        let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT" });
+        let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing = format!("{h}.{p}");
+        let sig = sk.sign(signing.as_bytes());
+        format!("{signing}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+    }
+
+    #[test]
+    fn eddsa_round_trip_verifies_a_fixture_signed_token() {
+        let (sk, vk) = fixture_ed_keypair(1);
+        let token = mint_eddsa(&sk, serde_json::json!({
+            "iss": "https://idp.example",
+            "sub": "alice",
+            "exp": 10_000_u64,
+        }));
+        let v = JwtEddsaVerifier::new(vk)
+            .verify_at(&token, now_at(5_000)).unwrap();
+        assert_eq!(v.header.alg, "EdDSA");
+        assert_eq!(v.std.sub.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn eddsa_tampered_payload_fails_signature_check() {
+        let (sk, vk) = fixture_ed_keypair(2);
+        let token = mint_eddsa(&sk, serde_json::json!({
+            "sub": "a", "exp": 10_000_u64,
+        }));
+        let parts: Vec<&str> = token.splitn(3, '.').collect();
+        let mut payload = parts[1].to_string();
+        let b = payload.pop().unwrap();
+        payload.push(if b == 'A' { 'B' } else { 'A' });
+        let tampered = format!("{}.{}.{}", parts[0], payload, parts[2]);
+        let err = JwtEddsaVerifier::new(vk).verify_at(&tampered, now_at(0)).unwrap_err();
+        assert_eq!(err, JwtError::BadSignature);
+    }
+
+    #[test]
+    fn eddsa_wrong_key_fails_signature_check() {
+        let (sk_a, _)    = fixture_ed_keypair(3);
+        let (_, vk_b)    = fixture_ed_keypair(4);
+        let token = mint_eddsa(&sk_a, serde_json::json!({
+            "sub": "a", "exp": 10_000_u64,
+        }));
+        let err = JwtEddsaVerifier::new(vk_b).verify_at(&token, now_at(0)).unwrap_err();
+        assert_eq!(err, JwtError::BadSignature);
+    }
+
+    #[test]
+    fn eddsa_wrong_alg_in_header_is_rejected_before_crypto() {
+        let (sk, vk) = fixture_ed_keypair(5);
+        let token = mint_eddsa(&sk, serde_json::json!({ "sub": "a", "exp": 10_000_u64 }));
+        let bad_header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"JWT"}"#);
+        let parts: Vec<&str> = token.splitn(3, '.').collect();
+        let twisted = format!("{}.{}.{}", bad_header, parts[1], parts[2]);
+        let err = JwtEddsaVerifier::new(vk).verify_at(&twisted, now_at(0)).unwrap_err();
+        assert!(matches!(err, JwtError::UnsupportedAlg(a) if a == "ES256"));
+    }
+
+    #[test]
+    fn eddsa_verifier_loads_from_spki_pem() {
+        let (_, vk) = fixture_ed_keypair(6);
+        let pem = vk.to_public_key_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .unwrap();
+        assert!(pem.contains("BEGIN PUBLIC KEY"));
+        JwtEddsaVerifier::from_public_key_pem(&pem).unwrap();
+        assert!(matches!(
+            JwtEddsaVerifier::from_public_key_pem("garbage"),
+            Err(JwtError::KeyParse(_))));
+    }
+
+    #[test]
+    fn eddsa_iss_and_aud_enforced() {
+        let (sk, vk) = fixture_ed_keypair(7);
+        let token = mint_eddsa(&sk, serde_json::json!({
+            "iss": "https://idp", "aud": "bradian",
+            "sub": "a", "exp": 10_000_u64,
+        }));
+        JwtEddsaVerifier::new(vk)
+            .with_issuer("https://idp")
+            .with_audience("bradian")
+            .verify_at(&token, now_at(0)).unwrap();
+        let (_, vk2) = fixture_ed_keypair(7);
+        let bad = JwtEddsaVerifier::new(vk2).with_issuer("https://other");
         assert_eq!(bad.verify_at(&token, now_at(0)).unwrap_err(),
             JwtError::BadSignature);
     }

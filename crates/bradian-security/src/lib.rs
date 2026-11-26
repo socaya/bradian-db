@@ -25,8 +25,8 @@ pub use cert_principal::{
 };
 pub use encryption::{seal, unseal, DataKey, KeyId, KeyRing, SealedPayload};
 pub use enterprise_identity::{
-    JwtError, JwtEs256Verifier, JwtHeader, JwtHs256Verifier, JwtResult,
-    JwtRs256Verifier, StandardClaims, Verified,
+    JwtEddsaVerifier, JwtError, JwtEs256Verifier, JwtHeader, JwtHs256Verifier,
+    JwtResult, JwtRs256Verifier, StandardClaims, Verified,
 };
 pub use jwks::{Jwk, JwkSet, JwksCache, JwksError, JwksResult, rsa_public_key_from_jwk};
 pub use principal::{Principal, Role};
